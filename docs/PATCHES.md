@@ -4,6 +4,29 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-05 — v1.0.6 — layar login berkedip (loop reload 401)
+
+**Bug fixed**
+
+- `API.req()` merespons HTTP 401 dengan `location.href = '/panel/?expired=1'`.
+  Karena halaman aplikasi hanya ada satu (`/panel/`, `/agen/`, `/teknisi/`,
+  `/pelanggan/`), URL tujuan sama dengan URL yang sedang dibuka, dan
+  `location.href` ke URL yang **sama tetap me-reload** halaman. Setiap reload
+  memanggil `/api/auth/me` → 401 lagi → reload lagi: layar login berkedip ~1×
+  per detik dan menembak `/api/auth/me` terus-menerus.
+- Kini navigasi hanya dilakukan bila berada di halaman lain
+  (`location.replace(halaman + '?expired=1')`); di layar login cukup lempar
+  error sehingga `requireLogin()` menampilkan kartu login. `showLogin()` juga
+  diberi pesan "Sesi berakhir — masuk kembali." saat `?expired=1` ada di URL,
+  dan tidak lagi menambah kartu login kedua bila sudah tampil.
+
+**Verifikasi (2026-10-05)**
+
+- Lewat browser (HTTP): `/panel/`, `/agen/`, `/teknisi/` tetap di URL yang sama
+  selama 6–8 detik dengan kartu login tampil (`/api/auth/me` 401 hanya sekali per
+  muat, sebelumnya 1× per detik di `access log`); `/panel/?expired=1` menampilkan
+  pesan "Sesi berakhir — masuk kembali.".
+
 ## 2026-10-05 — v1.0.5 — router tidak lagi "down" karena satu siklus gagal
 
 **Bug fixed**

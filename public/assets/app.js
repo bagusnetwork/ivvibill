@@ -18,7 +18,12 @@ const API = {
     try { data = await r.json(); } catch (_) {}
     if (r.status === 401 && !url.includes('/auth/login')) {
       sessionStorage.removeItem('ivvi_user');
-      location.href = (document.body.dataset.app || '/panel') + '/?expired=1';
+      const halaman = (document.body.dataset.app || '/panel') + '/';
+      // location.href ke URL yang sama me-reload halaman; kalau halaman itu juga
+      // yang memanggil API ber-401, reload berikutnya 401 lagi — halaman berkedip
+      // tanpa henti. Di layar login cukup lempar error, jangan navigasi.
+      if (location.pathname === halaman) throw new Error('Sesi berakhir');
+      location.replace(halaman + '?expired=1');
       throw new Error('Sesi berakhir');
     }
     if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
@@ -64,14 +69,17 @@ async function requireLogin(roles) {
 
 function showLogin() {
   const app = document.body.dataset.app || '/panel';
+  if (document.querySelector('.login-wrap')) return;
   document.getElementById('layout').style.display = 'none';
   const lw = document.createElement('div');
   lw.className = 'login-wrap';
   const judul = { '/panel': 'Panel Data Server', '/agen': 'Agen Hotspot', '/teknisi': 'Karyawan & Teknisi', '/pelanggan': 'Area Pelanggan' }[app] || 'ivvibill';
+  const kedaluwarsa = /[?&]expired=1/.test(location.search);
   lw.innerHTML = `
     <div class="login-card">
       <div class="brand-row"><div class="mark">iV</div>
         <div><h1>ivvibill</h1><div class="sub">${judul}</div></div></div>
+      ${kedaluwarsa ? '<p class="hint" style="text-align:center;color:#e5484d">Sesi berakhir — masuk kembali.</p>' : ''}
       <form id="lf">
         <div class="form-row"><label>Username</label>
           <input name="username" autocomplete="username" required autofocus></div>
