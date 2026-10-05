@@ -43,7 +43,7 @@ async function tugasRouter() {
   try {
     const r = await monitor.pollSemuaRouter();
     const err = r.filter(x => !x.ok);
-    if (err.length) log('Router down:', err.map(e => `${e.id}:${e.error}`).join('; '));
+    if (err.length) log('Gagal polling router:', err.map(e => `${e.id}:${e.error}`).join('; '));
   } catch (e) { log('Router error:', e.message); }
   finally { running.router = false; }
 }
