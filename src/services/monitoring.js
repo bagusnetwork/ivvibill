@@ -16,6 +16,14 @@ async function perangkatMikrotik(idSetting) {
   return { setting: s, dev };
 }
 
+/**
+ * Per-router penghitung siklus gagal berturut-turut. Status 'down' di DB baru
+ * ditulis setelah AMBANG_DOWN siklus gagal, supaya link yang sering membuang
+ * paket (EHOSTUNREACH) tidak membuat router tampak mati.
+ */
+const gagalRouter = new Map();
+const AMBANG_DOWN = 3;
+
 function klien(dev) {
   return new RouterOS({
     host: dev.alamat,
@@ -88,14 +96,21 @@ async function pollRouter(idSetting) {
     }
     await db.run('UPDATE master_perangkat SET last_check = NOW(), last_msg = ? WHERE id = ?',
       ['OK', dev.id]);
+    gagalRouter.delete(setting.id);
     return { ok: true, interfaces: ifaces.length };
   } catch (e) {
-    await db.run(
-      `UPDATE setting_mikrotik SET last_check = NOW(), status = 'down' WHERE id = ?`,
-      [setting.id]
-    );
+    // link ke router jauh bisa drop sebentar (EHOSTUNREACH) — status 'down'
+    // baru dipasang setelah beberapa siklus gagal berturut-turut.
+    const gagal = (gagalRouter.get(setting.id) || 0) + 1;
+    gagalRouter.set(setting.id, gagal);
+    if (gagal >= AMBANG_DOWN) {
+      await db.run(
+        `UPDATE setting_mikrotik SET last_check = NOW(), status = 'down' WHERE id = ?`,
+        [setting.id]
+      );
+    }
     await db.run('UPDATE master_perangkat SET last_check = NOW(), last_msg = ? WHERE id = ?',
-      [String(e.message).slice(0, 250), dev.id]);
+      [`gagal ke-${gagal}: ${String(e.message).slice(0, 200)}`, dev.id]);
     throw e;
   } finally {
     c.close();
@@ -124,6 +139,7 @@ async function cekPppoePelanggan(idDataServer = 1) {
   );
 
   const online = new Set();
+  let routerSukses = 0;
   for (const r of routers) {
     try {
       const { setting, dev } = await perangkatMikrotik(r.id);
@@ -132,8 +148,16 @@ async function cekPppoePelanggan(idDataServer = 1) {
         await sambungkan(c);
         const act = await c.pppoeActive();
         act.forEach(a => online.add(String(a.user).toLowerCase()));
+        routerSukses++;
       } finally { c.close(); }
-    } catch (_) { /* router down → jangan langsung dinyatakan offline */ }
+    } catch (_) { /* router gagal diakses → tidak dihitung */ }
+  }
+
+  // Tidak ada satu router pun yang terbaca: daftar sesi online kosong bukan karena
+  // pelanggan mati, tapi karena link-nya yang gagal. Menandai semua pelanggan
+  // offline di sini akan membuat issue palsu + spam WA.
+  if (routers.length > 0 && routerSukses === 0) {
+    return { dicek: aktif.length, offline: 0, semuaRouterGagal: true };
   }
 
   let off = 0;

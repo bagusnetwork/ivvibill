@@ -4,6 +4,36 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-05 — v1.0.5 — router tidak lagi "down" karena satu siklus gagal
+
+**Bug fixed**
+
+- Link API ke CCR1009 (203.0.113.10:8429) sering membuang paket (`EHOSTUNREACH`),
+  padahal router-nya hidup. Karena scheduler polling tiap 60 detik dan satu
+  siklus gagal langsung menulis `status='down'`, panel bolak-balik menampilkan
+  router mati — dan `cekPppoePelanggan()` yang ikut gagal akan menandai semua
+  pelanggan offline.
+- `pollRouter()` kini menghitung siklus gagal berturut-turut per `id_setting`
+  (`gagalRouter`, di memori). `setting_mikrotik.status='down'` baru ditulis
+  setelah `AMBANG_DOWN = 3` siklus gagal beruntun; satu polling sukses
+  mereset penghitung. `master_perangkat.last_msg` tetap mencatat pesan error
+  lengkap dengan nomor siklus (`gagal ke-2: …`) supaya penyebabnya terlihat.
+- `cekPppoePelanggan()` juga dijaga: bila **tidak ada** satu router pun yang
+  berhasil dibaca pada siklus itu, pemeriksaan offline dilewati
+  (`semuaRouterGagal: true`). Sebelumnya sesi online yang gagal diambil
+  dianggap "tidak ada pelanggan yang online", sehingga semua pelanggan
+  berujung issue offline + WA palsu begitu link API router drop.
+
+**Verifikasi (2026-10-05)**
+
+- Uji logika dengan DB/RouterOS tiruan: 4 siklus gagal → `down` ditulis 2×
+  (siklus ke-3 dan ke-4); sukses lalu 2× gagal → 0×; gagal ke-3 setelah reset →
+  1×. `/tmp/ivvi_guard_test.js`.
+- Di layanan nyata setelah `systemctl restart ivvibill`: siklus gagal tetap
+  tercatat di log, `setting_mikrotik.status` bertahan `active` dengan
+  `cpu_load`/`last_check` diperbarui tiap menit.
+
+
 ## 2026-10-05 — v1.0.4 — panel tidak bergaya di HTTP
 
 **Bug fixed**
