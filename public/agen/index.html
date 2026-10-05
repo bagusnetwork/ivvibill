@@ -31,7 +31,7 @@
     </div>
     <div class="content">
       <!-- DASHBOARD -->
-      <div data-view="dashboard" data.onload="loadDash">
+      <div data-view="dashboard" data-onload="loadDash">
         <div class="cards" id="agCards"></div>
         <div class="panel"><div class="panel-head"><h2>Stok voucher per paket</h2></div>
           <div class="panel-body" style="padding:0">
@@ -40,7 +40,7 @@
       </div>
 
       <!-- BELI -->
-      <div data-view="beli" data.onload="loadBeli" style="display:none">
+      <div data-view="beli" data-onload="loadBeli" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Beli voucher dari stok pusat</h2></div>
           <div class="panel-body">
             <div class="form-grid">
@@ -57,7 +57,7 @@
       </div>
 
       <!-- VOUCHER -->
-      <div data-view="voucher" data.onload="loadVoucher" style="display:none">
+      <div data-view="voucher" data-onload="loadVoucher" style="display:none">
         <div class="toolbar">
           <input id="vq" placeholder="Cari kode…" oninput="loadVoucher()">
           <select id="vstatus" onchange="loadVoucher()">
@@ -71,7 +71,7 @@
       </div>
 
       <!-- MUTASI -->
-      <div data-view="mutasi" data.onload="loadMutasi" style="display:none">
+      <div data-view="mutasi" data-onload="loadMutasi" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Riwayat mutasi saldo</h2></div>
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Waktu</th><th>Tipe</th><th class="t-num">Jumlah</th>
@@ -80,7 +80,7 @@
       </div>
 
       <!-- PELANGGAN -->
-      <div data-view="pelanggan" data.onload="loadPelanggan" style="display:none">
+      <div data-view="pelanggan" data-onload="loadPelanggan" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Pelanggan hotspot binaan</h2></div>
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Nama</th><th>WA</th><th>Paket</th><th>Status</th></tr></thead>

@@ -35,7 +35,7 @@
         <button class="btn sm secondary" onclick="logout()">Keluar</button></div>
     </div>
     <div class="content">
-      <div data-view="dashboard" data.onload="loadDash">
+      <div data-view="dashboard" data-onload="loadDash">
         <div class="cards" id="tkCards"></div>
         <div class="panel"><div class="panel-head"><h2>Issue terbuka</h2></div>
           <div class="panel-body" style="padding:0">
@@ -43,7 +43,7 @@
           <tbody id="dashIssue"><tr><td colspan="4" class="empty">Kosong</td></tr></tbody></table></div></div>
       </div>
 
-      <div data-view="pekerjaan" data.onload="loadKerja" style="display:none">
+      <div data-view="pekerjaan" data-onload="loadKerja" style="display:none">
         <div class="toolbar">
           <select id="kStatus" onchange="loadKerja()">
             <option value="">Semua status</option><option>antrian</option><option>dikerjakan</option>
@@ -58,7 +58,7 @@
         </div></div>
       </div>
 
-      <div data-view="tiket" data.onload="loadTiket" style="display:none">
+      <div data-view="tiket" data-onload="loadTiket" style="display:none">
         <div class="toolbar">
           <select id="tStatus" onchange="loadTiket()">
             <option value="">Semua status</option><option>baru</option><option>diproses</option>
@@ -73,7 +73,7 @@
         </div></div>
       </div>
 
-      <div data-view="pelanggan" data.onload="loadPelanggan" style="display:none">
+      <div data-view="pelanggan" data-onload="loadPelanggan" style="display:none">
         <div class="toolbar"><input id="pq" placeholder="Cari pelanggan…" oninput="loadPelanggan()"></div>
         <div class="panel"><div class="panel-body" style="padding:0">
           <table><thead><tr><th>Kode</th><th>Nama</th><th>Tipe</th><th>Paket</th>
@@ -84,7 +84,7 @@
            atau menghapus pelanggan (hanya superadmin).</p>
       </div>
 
-      <div data-view="interface" data.onload="loadInterface" style="display:none">
+      <div data-view="interface" data-onload="loadInterface" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Interface router (tanpa PPPoE)</h2>
           <button class="btn sm secondary" onclick="loadInterface()">⟳</button></div>
           <div class="panel-body" style="padding:0">
@@ -93,7 +93,7 @@
           <tbody id="tbIf"><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table></div></div>
       </div>
 
-      <div data-view="olt" data.onload="loadOlt" style="display:none">
+      <div data-view="olt" data-onload="loadOlt" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Daftar ONU & redaman</h2>
           <button class="btn sm secondary" onclick="loadOlt()">⟳</button></div>
           <div class="panel-body" style="padding:0">
@@ -102,7 +102,7 @@
           <tbody id="tbOnu"><tr><td colspan="7" class="empty">Belum ada data</td></tr></tbody></table></div></div>
       </div>
 
-      <div data-view="issue" data.onload="loadIssue" style="display:none">
+      <div data-view="issue" data-onload="loadIssue" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Issue pelanggan PPPoE</h2></div>
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Pelanggan</th><th>Username</th><th>Tipe</th><th>Pesan</th>

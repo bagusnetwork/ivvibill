@@ -29,7 +29,7 @@
         <button class="btn sm secondary" onclick="logout()">Keluar</button></div>
     </div>
     <div class="content">
-      <div data-view="dashboard" data.onload="loadDash">
+      <div data-view="dashboard" data-onload="loadDash">
         <div class="cards" id="plCards"></div>
         <div class="panel"><div class="panel-head"><h2>Tagihan terbaru</h2>
           <button class="btn sm secondary" onclick="go('tagihan')">Semua</button></div>
@@ -41,7 +41,7 @@
           <div class="panel-body" id="profilBox">Memuat…</div></div>
       </div>
 
-      <div data-view="tagihan" data.onload="loadTagihan" style="display:none">
+      <div data-view="tagihan" data-onload="loadTagihan" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Tagihan saya</h2></div>
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Invoice</th><th>Periode</th><th>Keterangan</th>
@@ -55,7 +55,7 @@
              lalu status otomatis lunas & pesan WhatsApp terkirim.</div></div>
       </div>
 
-      <div data-view="koneksi" data.onload="loadKoneksi" style="display:none">
+      <div data-view="koneksi" data-onload="loadKoneksi" style="display:none">
         <div class="cards" id="knCards"></div>
         <div class="panel"><div class="panel-head"><h2>Riwayat pembayaran</h2></div>
           <div class="panel-body" style="padding:0">
@@ -64,7 +64,7 @@
           <tbody id="tbRiwayat"><tr><td colspan="5" class="empty">Kosong</td></tr></tbody></table></div></div>
       </div>
 
-      <div data-view="tiket" data.onload="loadTiket" style="display:none">
+      <div data-view="tiket" data-onload="loadTiket" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
           <button class="btn" onclick="formTiket()">+ Lapor Gangguan</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">

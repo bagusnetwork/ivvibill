@@ -52,7 +52,7 @@
 
     <div class="content">
       <!-- ================= DASHBOARD ================= -->
-      <div data-view="dashboard" data.onload="loadDashboard">
+      <div data-view="dashboard" data-onload="loadDashboard">
         <div class="cards" id="dashCards"><div class="card"><div class="label">Memuat…</div><div class="value">…</div></div></div>
         <div class="grid2">
           <div class="panel"><div class="panel-head"><h2>Status OLT</h2></div>
@@ -69,7 +69,7 @@
       </div>
 
       <!-- ================= PELANGGAN ================= -->
-      <div data-view="pelanggan" data.onload="loadPelanggan" style="display:none">
+      <div data-view="pelanggan" data-onload="loadPelanggan" style="display:none">
         <div class="toolbar">
           <input id="pq" placeholder="Cari nama / kode / username…" oninput="loadPelanggan()">
           <select id="pstatus" onchange="loadPelanggan()">
@@ -90,7 +90,7 @@
       </div>
 
       <!-- ================= TAGIHAN ================= -->
-      <div data-view="tagihan" data.onload="loadTagihan" style="display:none">
+      <div data-view="tagihan" data-onload="loadTagihan" style="display:none">
         <div class="toolbar">
           <input id="tq" placeholder="Cari invoice / nama…" oninput="loadTagihan()">
           <select id="tstatus" onchange="loadTagihan()">
@@ -114,7 +114,7 @@
       </div>
 
       <!-- ================= PEMBAYARAN ================= -->
-      <div data-view="pembayaran" data.onload="loadBayar" style="display:none">
+      <div data-view="pembayaran" data-onload="loadBayar" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Bukti transfer menunggu verifikasi</h2>
           <button class="btn sm secondary" onclick="loadBayar()">Muat ulang</button></div>
           <div class="panel-body" style="padding:0">
@@ -132,7 +132,7 @@
       </div>
 
       <!-- ================= PAKET ================= -->
-      <div data-view="paket" data.onload="loadPaket" style="display:none">
+      <div data-view="paket" data-onload="loadPaket" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
           <button class="btn" onclick="formPaket()">+ Tambah Paket</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
@@ -143,7 +143,7 @@
       </div>
 
       <!-- ================= VOUCHER ================= -->
-      <div data-view="voucher" data.onload="loadVoucher" style="display:none">
+      <div data-view="voucher" data-onload="loadVoucher" style="display:none">
         <div class="toolbar">
           <input id="vq" placeholder="Cari kode voucher…" oninput="loadVoucher()">
           <select id="vstatus" onchange="loadVoucher()">
@@ -160,7 +160,7 @@
       </div>
 
       <!-- ================= AGEN ================= -->
-      <div data-view="agen" data.onload="loadAgen" style="display:none">
+      <div data-view="agen" data-onload="loadAgen" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
           <button class="btn" onclick="formAgen()">+ Tambah Agen</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
@@ -171,7 +171,7 @@
       </div>
 
       <!-- ================= INTERFACE ================= -->
-      <div data-view="interface" data.onload="loadInterface" style="display:none">
+      <div data-view="interface" data-onload="loadInterface" style="display:none">
         <div class="toolbar">
           <select id="ifRouter" onchange="loadInterface()"><option value="">Semua router</option></select>
           <div class="spacer"></div>
@@ -191,7 +191,7 @@
       </div>
 
       <!-- ================= OLT ================= -->
-      <div data-view="olt" data.onload="loadOlt" style="display:none">
+      <div data-view="olt" data-onload="loadOlt" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
           <button class="btn secondary" onclick="loadOlt()">⟳ Muat ulang</button></div>
         <div class="panel"><div class="panel-head"><h2>Setting & ambang redaman</h2></div>
@@ -208,7 +208,7 @@
       </div>
 
       <!-- ================= ISSUE ================= -->
-      <div data-view="issue" data.onload="loadIssue" style="display:none">
+      <div data-view="issue" data-onload="loadIssue" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Issue pelanggan PPPoE terbuka</h2>
           <button class="btn sm secondary" onclick="loadIssue()">⟳</button></div>
           <div class="panel-body" style="padding:0">
@@ -218,7 +218,7 @@
       </div>
 
       <!-- ================= PERANGKAT ================= -->
-      <div data-view="perangkat" data.onload="loadPerangkat" style="display:none">
+      <div data-view="perangkat" data-onload="loadPerangkat" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
           <button class="btn" onclick="formPerangkat()">+ Tambah Perangkat</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
@@ -231,7 +231,7 @@
       </div>
 
       <!-- ================= PENGGUNA ================= -->
-      <div data-view="pengguna" data.onload="loadPengguna" style="display:none">
+      <div data-view="pengguna" data-onload="loadPengguna" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
           <button class="btn" onclick="formPengguna()">+ Tambah Pengguna</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
@@ -246,7 +246,7 @@
       </div>
 
       <!-- ================= WA ================= -->
-      <div data-view="wa" data.onload="loadWa" style="display:none">
+      <div data-view="wa" data-onload="loadWa" style="display:none">
         <div class="panel"><div class="panel-head"><h2>Kirim pesan manual</h2></div>
           <div class="panel-body">
             <div class="form-grid">
@@ -267,7 +267,7 @@
       </div>
 
       <!-- ================= SETTING ================= -->
-      <div data-view="setting" data.onload="loadSetting" style="display:none">
+      <div data-view="setting" data-onload="loadSetting" style="display:none">
         <div class="grid2">
           <div class="panel"><div class="panel-head"><h2>Identitas & jadwal tagihan</h2></div>
             <div class="panel-body">

@@ -4,6 +4,33 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-05 — v1.0.7 — semua halaman panel berhenti di "Memuat…"
+
+**Bug fixed**
+
+- Keempat aplikasi menandai kontennya dengan atribut `data.onload="loadX"`
+  (titik), sedangkan `go()` di `assets/app.js` membaca `v.dataset.onload` yang
+  berasal dari atribut `data-onload` (strip). Karena `data.onload` bukan
+  atribut `data-*`, `dataset.onload` selalu `undefined` sehingga fungsi loader
+  **tidak pernah dipanggil** — tanpa error, tanpa toast. Efeknya semua halaman
+  panel (dashboard, pelanggan, tagihan, monitoring, perangkat, WhatsApp,
+  pengaturan, dst.) diam di placeholder "Memuat…".
+- 30 atribut di `public/{panel,agen,pelanggan,teknisi}/index.html` diganti
+  menjadi `data-onload=`.
+
+**Verifikasi (2026-10-05)**
+
+- Login `superadmin` lewat browser, lalu `go()` ke-14 halaman panel: semuanya
+  mengisi data, tidak ada lagi teks "Memuat" (dashboard: 0 pelanggan aktif,
+  pemasukan Rp 150.000, 10 voucher; paket/voucher/agen/perangkat/pengguna/wa/
+  setting terisi hasil import IVVINET).
+- Monitoring Interface menampilkan trafik nyata dari CCR1009 (vlan117
+  34.858,6 Kbps RX / 32.023,8 Kbps TX) — bukti parser RouterOS + monitorRate
+  bekerja sampai UI.
+- Console browser bersih dari error JS; hanya peringatan COOP/OAC karena origin
+  masih HTTP (hilang setelah sertifikat TLS terpasang).
+
+
 ## 2026-10-05 — v1.0.6 — layar login berkedip (loop reload 401)
 
 **Bug fixed**
