@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ivvibill — Billing PPPoE & Hotspot</title>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+<style>
+  .hero { max-width: 1080px; margin: 0 auto; padding: 64px 22px 34px; text-align: center; }
+  .hero .mark { width: 74px; height: 74px; border-radius: 20px; margin: 0 auto 16px;
+    background: linear-gradient(135deg, #22c55e, #0ea5e9); display: grid; place-items: center;
+    font-size: 34px; font-weight: 800; color: #052e16; }
+  .hero h1 { font-size: 34px; margin-bottom: 8px; }
+  .hero p { color: var(--muted); max-width: 640px; margin: 0 auto; font-size: 15.5px; }
+  .apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px; max-width: 1080px; margin: 26px auto 0; padding: 0 22px; }
+  .app-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px; text-align: left; transition: transform .15s, border-color .15s; display: block; }
+  .app-card:hover { transform: translateY(-3px); border-color: var(--brand); }
+  .app-card .ic { font-size: 28px; }
+  .app-card h3 { margin: 10px 0 6px; font-size: 17px; color: #fff; }
+  .app-card p { color: var(--muted); font-size: 13.5px; min-height: 56px; }
+  .app-card .go { color: var(--brand); font-weight: 650; font-size: 13.5px; }
+  .sec { max-width: 1080px; margin: 40px auto 0; padding: 0 22px 60px; }
+  .apk { display: flex; gap: 12px; flex-wrap: wrap; }
+  .apk a { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 11px 16px; font-size: 13.5px; color: var(--text); }
+  .apk a:hover { border-color: var(--brand); }
+  .feat { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px,1fr)); gap: 12px; margin-top: 14px; }
+  .feat div { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 13px 15px; font-size: 13.5px; color: var(--muted); }
+  .feat b { color: var(--text); display: block; margin-bottom: 3px; font-size: 14px; }
+</style>
+</head>
+<body>
+  <section class="hero">
+    <div class="mark">iV</div>
+    <h1>ivvibill</h1>
+    <p>Sistem billing ISP terpadu — PPPoE, Hotspot & agen, payment gateway dan pembayaran manual,
+       monitoring interface router (tanpa PPPoE) serta analisa redaman OLT semua brand dalam satu pusat data.</p>
+  </section>
+
+  <section class="apps">
+    <a class="app-card" href="/panel/">
+      <div class="ic">🖥️</div><h3>Panel Data Server</h3>
+      <p>Superadmin: pelanggan, tagihan, pembayaran, gateway, perangkat, monitoring OLT & router, pengguna.</p>
+      <span class="go">Buka panel →</span>
+    </a>
+    <a class="app-card" href="/agen/">
+      <div class="ic">🧧</div><h3>Agen Hotspot</h3>
+      <p>Saldo agen, pembelian voucher stok pusat, penjualan ke pelanggan, riwayat mutasi.</p>
+      <span class="go">Buka agen →</span>
+    </a>
+    <a class="app-card" href="/teknisi/">
+      <div class="ic">🛠️</div><h3>Karyawan & Teknisi</h3>
+      <p>Order pemasangan, tiket gangguan, monitoring interface & OLT, status koneksi pelanggan.</p>
+      <span class="go">Buka teknisi →</span>
+    </a>
+    <a class="app-card" href="/pelanggan/">
+      <div class="ic">👤</div><h3>Dashboard Pelanggan</h3>
+      <p>Tagihan & pembayaran (manual/gateway), status koneksi, tiket gangguan, riwayat.</p>
+      <span class="go">Buka pelanggan →</span>
+    </a>
+  </section>
+
+  <section class="sec">
+    <h2 style="font-size:17px">📲 Unduh Aplikasi Android</h2>
+    <p class="hint" style="margin-bottom:12px">APK WebView siap install — atau pasang via browser: Buka menu ⋮ → "Tambahkan ke layar utama".</p>
+    <div class="apk">
+      <a href="/apk/IvviPanel.apk">⬇ IvviPanel.apk</a>
+      <a href="/apk/IvviAgen.apk">⬇ IvviAgen.apk</a>
+      <a href="/apk/IvviTeknisi.apk">⬇ IvviTeknisi.apk</a>
+      <a href="/apk/IvviPelanggan.apk">⬇ IvviPelanggan.apk</a>
+    </div>
+
+    <h2 style="font-size:17px; margin-top:34px">✨ Fitur inti</h2>
+    <div class="feat">
+      <div><b>Billing PPPoE & Hotspot</b>Tagihan otomatis sesuai jadwal, kode unik, PPN, isolir & WA otomatis.</div>
+      <div><b>Payment gateway + manual</b>Midtrans Snap, Flip, dan transfer manual dengan verifikasi bukti.</div>
+      <div><b>Monitoring interface</b>Traffic router kecuali interface PPPoE, CPU/memory, riwayat 1 jam.</div>
+      <div><b>Redaman OLT (WebFig)</b>HSGQ, VSOL, HisFocus, Hioso, CData, ZTE, Huawei — ambang kritis/warning.</div>
+      <div><b>Peringatan issue PPPoE</b>Deteksi offline, menunggak, isolir → tiket + pesan WhatsApp.</div>
+      <div><b>Keamanan</b>RBAC 4 peran, bcrypt, JWT, AES-256-GCM, rate-limit, audit log.</div>
+    </div>
+  </section>
+</body>
+</html>

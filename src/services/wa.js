@@ -1,0 +1,96 @@
+'use strict';
+// ============================================================
+// WhatsApp gateway — antrean + pengiriman (kompatibel WHAPI-style:
+//   POST {wa_gateway_url}sendMessage  apiKey, phone, message)
+// Template memakai placeholder: #usr #ppp #add #lyn #tot #ket
+// #lmt #jum #ppn #unk #hly #jly #lnk #inv #prd #srv #jam #judul
+// ============================================================
+const db = require('../db');
+const cfgUtil = require('./configData');
+const crypto = require('../util/crypto');
+const http = require('../util/http');
+
+function normalizePhone(p) {
+  let s = String(p || '').replace(/[^0-9]/g, '');
+  if (s.startsWith('0')) s = '62' + s.slice(1);
+  else if (s.startsWith('8')) s = '62' + s;
+  return s;
+}
+
+function render(template, vars) {
+  return String(template || '').replace(/#[a-z]+/gi, (m) => {
+    const k = m.slice(1).toLowerCase();
+    return vars[k] !== undefined && vars[k] !== null ? String(vars[k]) : '';
+  });
+}
+
+async function ambilTemplate(jenis, idDataServer = 1) {
+  const t = await db.one(
+    'SELECT konten FROM pesan_template WHERE id_data_server = ? AND jenis = ?',
+    [idDataServer, jenis]
+  );
+  return t ? t.konten : '';
+}
+
+/** Enqueue pesan — dipanggil oleh billing/cron/modul lain. */
+async function enqueue({ tujuan, jenis, pesan, idRef = null, idDataServer = 1 }) {
+  const no = normalizePhone(tujuan);
+  if (!no) return null;
+  return db.insert(
+    'INSERT INTO wa_queue (id_data_server, tujuan, jenis, pesan, id_ref) VALUES (?,?,?,?,?)',
+    [idDataServer, no, jenis, pesan, idRef]
+  );
+}
+
+/** Kirim satu pesan langsung ke gateway. */
+async function kirimSatu(item, server) {
+  const url = String(server.wa_gateway_url || '').replace(/\/+$/, '');
+  if (!url) throw new Error('URL WhatsApp gateway belum diatur');
+  // apiKey disimpan terenkripsi AES (lihat PUT /gateway di routes/tagihan.js)
+  const key = crypto.decrypt(server.wa_gateway_key) || '';
+  const endpoint = url.endsWith('/') ? url + 'sendMessage' : url + '/sendMessage';
+  const res = await http.post(endpoint, new URLSearchParams({
+    apiKey: key, phone: item.tujuan, message: item.pesan
+  }).toString(), {
+    timeout: 12000,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  });
+  const ok = res.status >= 200 && res.status < 300;
+  return { ok, code: res.status, message: res.text.slice(0, 450) };
+}
+
+/**
+ * Proses antrean: kirim semua pesan pending (maks `limit`).
+ * Dipanggil cron tiap menit.
+ */
+async function prosesAntrean(limit = 30) {
+  const rows = await db.q(
+    'SELECT * FROM wa_queue WHERE status = ? ORDER BY id ASC LIMIT ?',
+    ['pending', Number(limit)]
+  );
+  if (!rows.length) return { sent: 0, failed: 0 };
+
+  const server = await cfgUtil.getServer(1);
+  let sent = 0, failed = 0;
+  for (const item of rows) {
+    let status = 'gagal', err = null;
+    try {
+      const r = await kirimSatu(item, server);
+      if (r.ok) { status = 'terkirim'; sent++; }
+      else { failed++; err = `HTTP ${r.code}: ${r.message}`; }
+    } catch (e) {
+      failed++; err = e.message;
+    }
+    await db.run(
+      'UPDATE wa_queue SET status = ?, percobaan = percobaan + 1, error = ?, sent_at = NOW() WHERE id = ?',
+      [status, err ? String(err).slice(0, 250) : null, item.id]
+    );
+    await db.insert(
+      'INSERT INTO wa_log (id_queue, tujuan, pesan, status, response) VALUES (?,?,?,?,?)',
+      [item.id, item.tujuan, item.pesan, status, err ? String(err).slice(0, 450) : 'OK']
+    );
+  }
+  return { sent, failed };
+}
+
+module.exports = { normalizePhone, render, ambilTemplate, enqueue, prosesAntrean };

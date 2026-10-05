@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ivvibill — Agen Hotspot</title>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+</head>
+<body data-app="/agen">
+<div class="layout" id="layout">
+  <aside class="sidebar">
+    <div class="logo"><span class="mark">iV</span> ivvibill</div>
+    <div class="nav-group">Agen</div>
+    <nav class="nav">
+      <a data-page="dashboard"><span class="ic">💰</span> Saldo & Ringkasan</a>
+      <a data-page="beli"><span class="ic">🛒</span> Beli Voucher</a>
+      <a data-page="voucher"><span class="ic">🎟️</span> Voucher Saya</a>
+      <a data-page="mutasi"><span class="ic">📒</span> Riwayat Mutasi</a>
+      <a data-page="pelanggan"><span class="ic">👥</span> Pelanggan Saya</a>
+    </nav>
+  </aside>
+  <div class="main">
+    <div class="topbar">
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="menu-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+        <h1 id="judul">Saldo & Ringkasan</h1>
+      </div>
+      <div class="who"><span id="who">…</span>
+        <button class="btn sm secondary" onclick="logout()">Keluar</button></div>
+    </div>
+    <div class="content">
+      <!-- DASHBOARD -->
+      <div data-view="dashboard" data.onload="loadDash">
+        <div class="cards" id="agCards"></div>
+        <div class="panel"><div class="panel-head"><h2>Stok voucher per paket</h2></div>
+          <div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Paket ID</th><th>Status</th><th class="t-num">Jumlah</th></tr></thead>
+          <tbody id="tbStok"><tr><td colspan="3" class="empty">Memuat…</td></tr></tbody></table></div></div>
+      </div>
+
+      <!-- BELI -->
+      <div data-view="beli" data.onload="loadBeli" style="display:none">
+        <div class="panel"><div class="panel-head"><h2>Beli voucher dari stok pusat</h2></div>
+          <div class="panel-body">
+            <div class="form-grid">
+              <div class="form-row"><label>Paket voucher</label><select id="bPaket"></select></div>
+              <div class="form-row"><label>Jumlah</label><input id="bJml" type="number" value="5" min="1" max="100"></div>
+            </div>
+            <button class="btn" onclick="beliVoucher()">Beli (potong saldo)</button>
+            <p class="hint mt">Harga mengikuti <b>harga agen</b> pada paket. Saldo dibayar tunai ke admin bila kurang.</p>
+          </div></div>
+        <div class="panel"><div class="panel-head"><h2>Paket tersedia</h2></div>
+          <div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Paket</th><th class="t-num">Harga agen</th><th class="t-num">Harga jual</th><th>Masa aktif</th></tr></thead>
+          <tbody id="tbPaketAg"><tr><td colspan="4" class="empty">Memuat…</td></tr></tbody></table></div></div>
+      </div>
+
+      <!-- VOUCHER -->
+      <div data-view="voucher" data.onload="loadVoucher" style="display:none">
+        <div class="toolbar">
+          <input id="vq" placeholder="Cari kode…" oninput="loadVoucher()">
+          <select id="vstatus" onchange="loadVoucher()">
+            <option value="">Semua</option><option>stok</option><option>terjual</option><option>terpakai</option></select>
+        </div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Kode</th><th>Paket</th><th class="t-num">Harga jual</th>
+            <th>Status</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbVoucher"><tr><td colspan="5" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+      </div>
+
+      <!-- MUTASI -->
+      <div data-view="mutasi" data.onload="loadMutasi" style="display:none">
+        <div class="panel"><div class="panel-head"><h2>Riwayat mutasi saldo</h2></div>
+          <div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Waktu</th><th>Tipe</th><th class="t-num">Jumlah</th>
+            <th class="t-num">Saldo sisa</th><th>Keterangan</th></tr></thead>
+          <tbody id="tbMutasi"><tr><td colspan="5" class="empty">Kosong</td></tr></tbody></table></div></div>
+      </div>
+
+      <!-- PELANGGAN -->
+      <div data-view="pelanggan" data.onload="loadPelanggan" style="display:none">
+        <div class="panel"><div class="panel-head"><h2>Pelanggan hotspot binaan</h2></div>
+          <div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Nama</th><th>WA</th><th>Paket</th><th>Status</th></tr></thead>
+          <tbody id="tbPel"><tr><td colspan="4" class="empty">Memuat…</td></tr></tbody></table></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/assets/app.js"></script>
+<script src="agen.js"></script>
+</body>
+</html>

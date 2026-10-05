@@ -1,0 +1,20 @@
+# --- rahasia (JANGAN PERNAH di-commit) ---------------------------
+.env
+.secret
+.env.*
+!.env.example
+
+# --- dependensi & build -----------------------------------------
+node_modules/
+android/build/
+android/out/
+*.log
+
+# --- runtime -----------------------------------------------------
+storage/uploads/*
+!storage/uploads/.gitkeep
+storage/cron.log
+
+# --- OS/editor ---------------------------------------------------
+.DS_Store
+*.swp
