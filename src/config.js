@@ -36,10 +36,12 @@ const config = {
   root: ROOT,
   app: {
     name: 'ivvibill',
-    version: '1.0.3',
+    version: '1.0.4',
     tz: env.TZ || 'Asia/Jakarta',
     baseUrl: (env.BASE_URL || '').replace(/\/+$/, ''),
-    env: env.NODE_ENV || 'production'
+    env: env.NODE_ENV || 'production',
+    // true bila BASE_URL https — dipakai untuk CSP upgrade-insecure-requests & HSTS
+    https: /^https:/i.test(env.BASE_URL || '')
   },
   db: {
     host: env.DB_HOST || 'localhost',

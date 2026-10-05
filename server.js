@@ -31,6 +31,9 @@ app.set('trust proxy', config.server.proxy ? 1 : false);
 app.disable('x-powered-by');
 
 // ---------- keamanan dasar -------------------------------------
+// `upgrade-insecure-requests` membuat browser memaksa https untuk SEMUA
+// aset & fetch — di server yang belum punya sertifikat TLS panel jadi
+// tanpa gaya dan datanya tidak termuat. Hanya aktifkan bila BASE_URL https.
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -41,7 +44,8 @@ app.use(helmet({
       connectSrc: ["'self'"],
       fontSrc: ["'self'", 'data:'],
       objectSrc: ["'none'"],
-      frameAncestors: ["'none'"]
+      frameAncestors: ["'none'"],
+      ...(config.app.https ? {} : { upgradeInsecureRequests: null })
     }
   },
   crossOriginEmbedderPolicy: false,

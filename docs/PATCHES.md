@@ -4,6 +4,24 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-05 — v1.0.4 — panel tidak bergaya di HTTP
+
+**Bug fixed**
+
+- Helmet menambahkan CSP `upgrade-insecure-requests`, sehingga browser memaksa
+  `https://` untuk semua aset dan `fetch()`. Karena `ivvinet.my.id` belum punya
+  sertifikat TLS, `style.css`/`panel.js` gagal dimuat: panel tampil polos dan
+  kartu dashboard berhenti di "Memuat…". Direktif tersebut kini hanya dikirim
+  bila `BASE_URL` memakai `https` (`config.app.https`).
+
+**Verifikasi (2026-10-05)**
+
+- Header CSP tidak lagi memuat `upgrade-insecure-requests`; lewat browser
+  (http) landing, `/panel/`, `/agen/`, `/pelanggan/`, `/teknisi/` tampil ber-gaya
+  dan layar login muncul; `/api/dashboard` menjawab 401 `Belum login` untuk
+  sesi kedaluwarsa lalu dialihkan ke `?expired=1` (sesuai desain).
+- `POST /api/auth/login` dengan user tak dikenal → 401, akun asli tidak tersentuh.
+
 ## 2026-10-05 — v1.0.3 — klien RouterOS + import data IVVINET
 
 **Bug fixed**
