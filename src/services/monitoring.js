@@ -27,6 +27,23 @@ function klien(dev) {
 }
 
 /**
+ * Router jauh bisa reachable tapi link-nya sering membuang SYN (EHOSTUNREACH),
+ * jadi koneksi API dicoba beberapa kali sebelum dianggap down.
+ */
+async function sambungkan(c, percobaan = 3, jedaMs = 1200) {
+  let err = new Error('Koneksi RouterOS gagal');
+  for (let i = 1; i <= percobaan; i++) {
+    try { await c.connect(); return; }
+    catch (e) {
+      err = e;
+      c.close();
+      if (i < percobaan) await new Promise(r => setTimeout(r, jedaMs));
+    }
+  }
+  throw err;
+}
+
+/**
  * Polling satu router: interface (tanpa pppoe) + traffic + resource.
  * Hasil disimpan ke interface_log / router_resource_log / setting_mikrotik.
  */
@@ -34,11 +51,12 @@ async function pollRouter(idSetting) {
   const { setting, dev } = await perangkatMikrotik(idSetting);
   const c = klien(dev);
   try {
-    await c.connect();
+    await sambungkan(c);
     const ifaces = await c.listInterfaces();       // ← sudah difilter: tanpa pppoe
-    const names = ifaces.slice(0, 30).map(i => i.name).filter(Boolean);
+    const names = ifaces.map(i => i.name).filter(Boolean);
+    // rate dihitung dari selisih counter rx-byte/tx-byte vs sampel poll sebelumnya
     let traffic = {};
-    try { traffic = await c.monitorTraffic(names); } catch (_) { /* perangkat lama */ }
+    try { traffic = c.monitorRate(names, ifaces); } catch (_) { /* perangkat lama */ }
 
     let res = {};
     try { res = await c.resource(); } catch (_) {}
@@ -111,7 +129,7 @@ async function cekPppoePelanggan(idDataServer = 1) {
       const { setting, dev } = await perangkatMikrotik(r.id);
       const c = klien(dev);
       try {
-        await c.connect();
+        await sambungkan(c);
         const act = await c.pppoeActive();
         act.forEach(a => online.add(String(a.user).toLowerCase()));
       } finally { c.close(); }
@@ -189,4 +207,4 @@ async function pollSemuaRouter() {
   return hasil;
 }
 
-module.exports = { pollRouter, cekPppoePelanggan, pollSemuaRouter, klien, perangkatMikrotik };
+module.exports = { pollRouter, cekPppoePelanggan, pollSemuaRouter, klien, perangkatMikrotik, sambungkan };

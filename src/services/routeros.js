@@ -4,8 +4,16 @@
 // Implementasi sendiri — tanpa dependensi native.
 // Dipakai untuk monitoring interface (KECUALI pppoe), resource,
 // dan status koneksi PPPoE pelanggan.
+//
+// Catatan format: RouterOS mengirim atribut sebagai SATU kata
+// "=kunci=nilai" (contoh "=name=ether1"), bukan dua kata terpisah.
 // ============================================================
 const net = require('net');
+const crypto = require('crypto');
+
+// Sampel counter kumulatif terakhir per (host:port, interface) untuk
+// menghitung bits/detik dari selisih rx-byte/tx-byte.
+const sampelSebelum = new Map();
 
 class RouterOS {
   constructor({ host, port = 8728, user, password, timeout = 8000 }) {
@@ -67,6 +75,25 @@ class RouterOS {
     return { sentences: out, rest: Buffer.alloc(0) };
   }
 
+  /** "name=ether1" -> { key: 'name', value: 'ether1' } (kata tunggal dari router). */
+  static _attr(word) {
+    if (!word.startsWith('=')) return null;
+    const body = word.slice(1);
+    const eq = body.indexOf('=');
+    if (eq < 0) return { key: body, value: '' };
+    return { key: body.slice(0, eq), value: body.slice(eq + 1) };
+  }
+
+  /** Kumpulkan kalimat sampai !done/!fatal — reply router bisa terpecah beberapa paket. */
+  async _recvUntilDone() {
+    const semua = [];
+    for (;;) {
+      const bagian = await this._recv(this.sock);
+      semua.push(...bagian);
+      if (bagian.some(s => s[0] === '!done' || s[0] === '!fatal')) return semua;
+    }
+  }
+
   _connect() {
     return new Promise((resolve, reject) => {
       const sock = net.createConnection({ host: this.host, port: this.port }, () => resolve(sock));
@@ -111,33 +138,58 @@ class RouterOS {
     this.buf = Buffer.alloc(0);
     const sock = await this._connect();
     this.sock = sock;
-    // RouterOS >= 6.43: login plane dengan password polos
-    await this._send(sock, ['/login', `name=${this.user}`, `password=${this.password}`]);
-    const reply = await this._recv(sock);
-    const line = reply[0] || [];
-    if (line[0] === '!trap' || line.some(w => /invalid user name or password/i.test(w))) {
-      sock.destroy();
-      throw new Error('Login RouterOS gagal (kredensial salah)');
-    }
+    await this._login(sock);
     return this;
   }
 
-  /** Jalankan perintah, contoh: ['/interface/print'] atau ['/interface/set', '.id=ether1', 'disabled=no'] */
+  /** ROS >= 6.43 login password polos; versi lama mengirim challenge MD5 (=ret=). */
+  async _login(sock) {
+    await this._send(sock, ['/login', `=name=${this.user}`, `=password=${this.password}`]);
+    const jawab = await this._recvUntilDone();
+    const kata = jawab.flatMap(s => s.slice(1));
+    const ret = kata.map(w => RouterOS._attr(w)).find(a => a && a.key === 'ret');
+    if (ret && ret.value) {
+      // router lama meminta challenge-response
+      const hash = crypto.createHash('md5')
+        .update('\0' + String(this.password) + ret.value, 'utf8').digest('hex');
+      await this._send(sock, ['/login', `=name=${this.user}`, `=password=${hash}`]);
+      const lagi = await this._recvUntilDone();
+      if (lagi.some(s => s[0] === '!trap' || s[0] === '!fatal')) {
+        sock.destroy();
+        throw new Error('Login RouterOS gagal (kredensial salah)');
+      }
+      return;
+    }
+    if (jawab.some(s => s[0] === '!trap' || s[0] === '!fatal')) {
+      sock.destroy();
+      throw new Error('Login RouterOS gagal (kredensial salah)');
+    }
+  }
+
+  /** Jalankan perintah, contoh: ['/interface/print'] atau ['/interface/set', '=.id=*1', '=disabled=no'] */
   async run(words) {
     if (!this.sock) await this.connect();
     await this._send(this.sock, words);
-    const sentences = await this._recv(this.sock);
+    const sentences = await this._recvUntilDone();
     let trap = null;
     const rows = [];
     let cur = null;
+    // RouterOS mengirim baris sebagai satu kalimat: ['!re', '=name=ether1', ...]
     for (const s of sentences) {
-      if (s[0] === '!re') { cur = {}; rows.push(cur); continue; }
-      if (s[0] === '!trap' || s[0] === '!fatal') { trap = s.slice(1).join(' '); continue; }
-      if (s[0] === '!done') { if (cur === null) rows.push({}); continue; }
-      if (cur !== null && s.length >= 2 && s[0].startsWith('=')) {
-        const k = s[0].slice(1);
-        const eq = s.indexOf('=');
-        if (eq >= 0) cur[k] = s.slice(eq + 1).join('=');
+      const head = String(s[0] || '');
+      let kata = s;
+      if (head.startsWith('!')) {
+        if (head === '!re') { cur = {}; rows.push(cur); kata = s.slice(1); }
+        else if (head === '!trap' || head === '!fatal') {
+          const a = RouterOS._attr(s[1]);
+          trap = (a && a.key === 'message') ? a.value : s.slice(1).join(' ');
+          continue;
+        } else { cur = null; continue; }   // !done / !empty
+      }
+      if (cur === null) continue;
+      for (const w of kata) {
+        const a = RouterOS._attr(w);
+        if (a) cur[a.key] = a.value;
       }
     }
     if (trap) throw new Error(`RouterOS: ${trap}`);
@@ -152,7 +204,8 @@ class RouterOS {
 
   /** Daftar interface — PENGECUALIAN tipe pppoe sesuai spesifikasi. */
   async listInterfaces() {
-    const rows = await this.run(['/interface/print']);
+    const rows = await this.run(['/interface/print',
+      '=.proplist=.id,name,type,disabled,running,rx-byte,tx-byte']);
     return rows.filter(r => {
       const t = (r.type || '').toLowerCase();
       const name = (r.name || '').toLowerCase();
@@ -163,23 +216,44 @@ class RouterOS {
     });
   }
 
-  /** Traffic rx/tx (bits per detik) untuk nama interface tertentu. */
-  async monitorTraffic(names) {
-    if (!names.length) return {};
-    const rows = await this.run(['/interface/monitor-traffic', ...names.map(n => `=.proplist=${n}`), '=once=']);
-    // format riil: tiap baris = {name, rx, tx} — tangani varian penulisan
+  /**
+   * Traffic rx/tx (bits per detik) — dihitung dari selisih counter kumulatif
+   * rx-byte/tx-byte terhadap sampel sebelumnya per interface.
+   */
+  monitorRate(names, rows) {
+    const now = Date.now();
+    const kunci = `${this.host}:${this.port}`;
+    const lama = sampelSebelum.get(kunci) || {};
+    const terbaru = {};
     const out = {};
     for (const r of rows) {
-      const n = r.name || r['=name'];
-      if (!n) continue;
-      out[n] = { rx: Number(r.rx || 0), tx: Number(r.tx || 0) };
+      if (!r.name || !names.includes(r.name)) continue;
+      const rx = Number(r['rx-byte'] || 0), tx = Number(r['tx-byte'] || 0);
+      const l = lama[r.name];
+      if (l && now > l.at && rx >= l.rx && tx >= l.tx) {
+        const detik = (now - l.at) / 1000;
+        out[r.name] = {
+          rx: Math.round((rx - l.rx) * 8 / detik),
+          tx: Math.round((tx - l.tx) * 8 / detik)
+        };
+      } else {
+        out[r.name] = { rx: 0, tx: 0 };
+      }
+      terbaru[r.name] = { rx, tx, at: now };
     }
+    sampelSebelum.set(kunci, terbaru);
     return out;
   }
 
   /** resource: cpu, memory, uptime, board */
   async resource() {
-    const [r] = await this.run(['/system/resource/print']);
+    let rows;
+    try {
+      rows = await this.run(['/system/resource/print']);
+    } catch (_) {
+      rows = await this.run(['/resource/print']);   // RouterOS <= 6
+    }
+    const [r] = rows;
     if (!r) return {};
     const memTotal = Number(r['total-memory'] || 0);
     const memFree = Number(r['free-memory'] || 0);
@@ -194,10 +268,12 @@ class RouterOS {
   /** Status koneksi PPPoE aktif (untuk deteksi offline pelanggan). */
   async pppoeActive() {
     try {
-      const rows = await this.run(['/ppp/active/print']);
+      const rows = await this.run(['/ppp/active/print',
+        '=.proplist=.id,name,user,service,address,uptime']);
       return rows.map(r => ({
-        name: r.name || r.user || '',
-        user: r.user || '',
+        // pada beberapa router, kolom user kosong dan nama koneksi = username PPPoE
+        name: r.name || '',
+        user: r.user || r.name || '',
         address: r.address || '',
         uptime: r.uptime || '',
         service: r.service || ''
@@ -212,14 +288,21 @@ class RouterOS {
 async function testConnection(opts) {
   const t0 = Date.now();
   const c = new RouterOS(opts);
-  try {
-    const ifaces = await c.listInterfaces();
-    return { ok: true, ms: Date.now() - t0, interfaces: ifaces.length };
-  } catch (e) {
-    return { ok: false, ms: Date.now() - t0, error: e.message };
-  } finally {
-    c.close();
+  let err = new Error('Koneksi RouterOS gagal');
+  for (let i = 1; i <= 3; i++) {
+    try {
+      await c.connect();
+      const ifaces = await c.listInterfaces();
+      return { ok: true, ms: Date.now() - t0, interfaces: ifaces.length };
+    } catch (e) {
+      err = e;
+      c.close();
+      // kredensial salah / perintah ditolak: percobaan ulang tidak membantu
+      if (/kredensial|RouterOS:/i.test(String(e.message))) break;
+      if (i < 3) await new Promise(r => setTimeout(r, 1200));
+    }
   }
+  return { ok: false, ms: Date.now() - t0, error: String(err.message).slice(0, 200) };
 }
 
 module.exports = { RouterOS, testConnection };

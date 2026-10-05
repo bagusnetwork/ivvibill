@@ -4,6 +4,60 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-05 — v1.0.3 — klien RouterOS + import data IVVINET
+
+**Bug fixed**
+
+- **Parser atribut RouterOS salah.** `run()` mencari kata `'='` terpisah di
+  dalam array kalimat, padahal router mengirim atribut sebagai satu kata
+  `"=kunci=nilai"`. Semua hasil parsing kosong: `listInterfaces()` mengembalikan
+  baris tanpa `name`/`type`, `resource()` selalu `cpu_load: 0`, dan
+  `pppoeActive()` tidak menemukan sesi — pelanggan PPPoE akan ditandai offline
+  semua. Parser sekarang membaca `=kunci=nilai` (`_attr()`), dan reply
+  dikumpulkan sampai `!done`/`!fatal` (`_recvUntilDone()`) karena router bisa
+  memecah reply ke beberapa paket TCP.
+- **Traffic interface.** `/interface/monitor-traffic` diganti perhitungan selisih
+  counter `rx-byte`/`tx-byte` antar polling (`monitorRate()`), disimpan sebagai
+  `rx_bps`/`tx_bps` di `interface_log`. Polling pertama masih 0 (belum ada
+  pembanding).
+- **Login.** Password polos tetap percobaan pertama (ROS >= 6.43); bila router
+  membalas `=ret=` (ROS lama) ulangi dengan `md5("\0" + password + challenge)`.
+- **`pppoeActive()`** memakai `user || name` — di beberapa router kolom `user`
+  kosong dan username PPPoE ada di `name`.
+- **Koneksi tidak stabil.** `sambungkan()` (monitoring) dan `testConnection()`
+  mencoba 3x dengan jeda 1,2 s sebelum menyatakan router `down`; link ke API
+  IVVINET-CBD sering mengembalikan `EHOSTUNREACH`.
+
+**Fitur / data**
+
+- `scripts/import-ivvinet.js` — import idempoten dari DB gratisinaja
+  (`SRC_DB_USER`/`SRC_DB_PASS`, `--src-server=4 --dst-server=1`, `--dry-run`):
+  identitas + jadwal tagihan `data_server`, 8 paket PPPoE, MikroTik
+  `IVVINET-CBD` → `master_perangkat` + `setting_mikrotik`, OLT `OLT-HSAIRPRO`
+  → `master_perangkat` + `setting_olt`, dan 7 template WhatsApp milik IVVINET
+  (placeholder `#usr #tot #lmt` kompatibel). Password perangkat dienkripsi
+  AES-256-GCM dan tidak pernah dicetak.
+- Data demo `budi` / `10M Rumahan` / `Voucher 3 Jam` dinonaktifkan (bukan dihapus).
+
+**Verifikasi (2026-10-05)**
+
+- Mock server format nyata (`=kunci=nilai`): 4 interface non-PPPoE, CPU 17 %,
+  memori 50 %, board/uptime, sesi PPPoE `customer01`, rate `rx≈4,47 Mbps` — PASS.
+- Router nyata `203.0.113.10:8429` (`ivvi`): `pollRouter(1)` OK 18 interface,
+  CPU 26 %, memori 65 %, board `CCR1009-7G-1C`, trafik per interface masuk
+  (`vlan117 rx 59 Mbps / tx 328 Mbps`), `/ppp/active/print` 203 sesi.
+  `alamat` perangkat disimpan sebagai IP publik karena `/etc/hosts`
+  memetakan `ivvinet.my.id` ke `127.0.0.1`.
+- API OLT `203.0.113.11:90` tidak terjangkau dari server (EHOSTUNREACH),
+  `setting_olt.status` dipasang `inaktif` agar scheduler tidak mengulang gagal.
+
+**Catatan cron**
+
+- Cron panel yang ada: `poll_mikrotik_local.php` (menit), `cronjob_tagihan.php`
+  (jam :10) milik gratisinaja, dan renewal SSL. ivvibill tetap mode scheduler
+  in-process (Mode A) — tidak ditambah cron eksternal, jadi tidak ada tugas
+  ivvibill yang berjalan dobel.
+
 ## 2026-10-05 — v1.0.2 — perbaikan antrean WhatsApp
 
 **Bug fixed**
