@@ -6,8 +6,23 @@ const JUDUL = {
   pembayaran: 'Pembayaran', paket: 'Paket Layanan', voucher: 'Voucher',
   agen: 'Agen Hotspot', interface: 'Monitoring Interface', olt: 'Redaman OLT',
   issue: 'Issue PPPoE', perangkat: 'Perangkat', pengguna: 'Pengguna & Audit',
-  wa: 'WhatsApp Gateway', setting: 'Pengaturan'
+  wa: 'WhatsApp Gateway', setting: 'Pengaturan',
+  tenant: 'Data Server (ISP)', group: 'Group Akses'
 };
+
+const LABEL_MENU = {
+  dashboard: 'Dashboard', pelanggan: 'Pelanggan', tagihan: 'Tagihan',
+  pembayaran: 'Pembayaran', paket: 'Paket', voucher: 'Voucher', agen: 'Agen',
+  interface: 'Interface', olt: 'Redaman OLT', issue: 'Issue', perangkat: 'Perangkat',
+  pengguna: 'Pengguna', wa: 'WhatsApp', setting: 'Pengaturan',
+  data_server: 'Data Server', group_akses: 'Group Akses'
+};
+
+/** Hanya pemilik platform (superadmin) yang boleh memindah grup/pengguna antar tenant. */
+function bolehTenantLain() {
+  const s = sesi();
+  return !!(s && s.tenantSemua);
+}
 
 let PAKET_LIST = [], AGEN_LIST = [];
 
@@ -68,7 +83,7 @@ async function loadPelanggan() {
         <td><span class="badge ${p.status === 'aktif' ? 'ok' : p.status === 'isolir' ? 'bad' : 'mute'}">${esc(p.status)}</span></td>
         <td>${p.tipe === 'pppoe' ? (p.pppoe_online ? '<span class="badge ok">online</span>' : '<span class="badge mute">offline</span>') : '-'}</td>
         <td class="t-actions">
-          <button class="btn sm secondary" onclick='formPelanggan(${JSON.stringify(p)})'>Ubah</button>
+          <button class="btn sm secondary" onclick="formPelanggan(${esc(JSON.stringify(p))})">Ubah</button>
         </td>
       </tr>`).join('') || '<tr><td colspan="9" class="empty">Belum ada pelanggan</td></tr>';
     document.getElementById('pelangganTotal').textContent = `${d.total || 0} data ditampilkan (maks 100)`;
@@ -242,7 +257,7 @@ async function loadPaket() {
         <td class="t-num">${rupiah(p.harga_agen)}</td>
         <td>${esc(p.kecepatan || '-')}</td>
         <td><span class="badge ${p.status === 'aktif' ? 'ok' : 'mute'}">${esc(p.status)}</span></td>
-        <td class="t-actions"><button class="btn sm secondary" onclick='formPaket(${JSON.stringify(p)})'>Ubah</button></td>
+        <td class="t-actions"><button class="btn sm secondary" onclick="formPaket(${esc(JSON.stringify(p))})">Ubah</button></td>
       </tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada paket</td></tr>';
   } catch (e) { toast(e.message, true); }
 }
@@ -309,7 +324,7 @@ async function loadAgen() {
       <tr><td><b>${esc(a.nama)}</b></td><td>${esc(a.no_hp || '-')}</td>
         <td class="t-num">${rupiah(a.saldo)}</td><td class="t-num">${esc(a.komisi_pct)}</td>
         <td><span class="badge ${a.status === 'aktif' ? 'ok' : 'mute'}">${esc(a.status)}</span></td>
-        <td class="t-actions"><button class="btn sm secondary" onclick='formAgen(${JSON.stringify(a)})'>Ubah</button></td>
+        <td class="t-actions"><button class="btn sm secondary" onclick="formAgen(${esc(JSON.stringify(a))})">Ubah</button></td>
       </tr>`).join('') || '<tr><td colspan="6" class="empty">Belum ada agen</td></tr>';
   } catch (e) { toast(e.message, true); }
 }
@@ -382,7 +397,7 @@ async function loadOlt() {
         <td>${x.last_check_at ? `<span class="badge ${/kritis|error|gagal/i.test(x.last_check_msg || '') ? 'bad' : 'ok'}">${esc(String(x.last_check_at).slice(5, 16))}</span>` : '<span class="badge mute">belum</span>'}
             <div class="hint">${esc(x.last_check_msg || '')}</div></td>
         <td class="t-actions">
-          <button class="btn sm secondary" onclick='formOlt(${JSON.stringify(x)})'>Ambang</button>
+          <button class="btn sm secondary" onclick="formOlt(${esc(JSON.stringify(x))})">Ambang</button>
           <button class="btn sm" onclick="pollOlt(${x.id})">Poll</button></td></tr>`).join('')
       || '<tr><td colspan="8" class="empty">Belum ada OLT — daftarkan di menu Perangkat</td></tr>';
 
@@ -453,7 +468,7 @@ async function loadPerangkat() {
         <td><span class="badge ${p.status === 'aktif' ? 'ok' : 'mute'}">${esc(p.status)}</span></td>
         <td class="t-actions">
           <button class="btn sm ghost" onclick="testPerangkat(${p.id})">Tes</button>
-          <button class="btn sm secondary" onclick='formPerangkat(${JSON.stringify(p)})'>Ubah</button>
+          <button class="btn sm secondary" onclick="formPerangkat(${esc(JSON.stringify(p))})">Ubah</button>
         </td></tr>`).join('') || '<tr><td colspan="8" class="empty">Belum ada perangkat</td></tr>';
   } catch (e) { toast(e.message, true); }
 }
@@ -505,10 +520,13 @@ async function loadPengguna() {
       <tr><td><b>${esc(u.username)}</b></td><td>${esc(u.nama)}</td>
         <td><span class="badge ${u.role === 'superadmin' ? 'bad' : u.role === 'teknisi' ? 'info' : 'warn'}">${esc(u.role)}</span></td>
         <td>${esc(u.id_ref ?? '-')}</td>
+        <td>${esc(u.id_data_server || 'semua')}</td>
+        <td>${esc(u.nama_grup || 'semua menu')}</td>
         <td>${u.last_login ? esc(String(u.last_login).slice(0, 16)) : '-'}</td>
         <td><span class="badge ${u.status === 'aktif' ? 'ok' : 'bad'}">${esc(u.status)}</span></td>
-        <td class="t-actions"><button class="btn sm secondary" onclick='formPengguna(${JSON.stringify(u)})'>Ubah</button></td>
-      </tr>`).join('') || '<tr><td colspan="7" class="empty">Kosong</td></tr>';
+        <td class="t-actions"><button class="btn sm secondary" onclick="formPengguna(${esc(JSON.stringify(u))})">Ubah</button></td>
+      </tr>`).join('') || '<tr><td colspan="9" class="empty">Kosong</td></tr>';
+    await isiOpsiGrup();
 
     const a = await API.get('/api/audit');
     document.getElementById('tbAudit').innerHTML = (a.data || []).slice(0, 30).map(x => `
@@ -526,6 +544,14 @@ function formPengguna(u) {
   document.getElementById('uRef').value = u && u.id_ref ? u.id_ref : '';
   document.getElementById('uPass').value = '';
   document.getElementById('uStatus').value = u ? u.status : 'aktif';
+  const bebas = bolehTenantLain();
+  document.getElementById('uDsRow').style.display = bebas ? '' : 'none';
+  document.getElementById('uGrupRow').style.display = bebas ? '' : 'none';
+  if (bebas) {
+    document.getElementById('uDs').value = u && u.id_data_server ? String(u.id_data_server) : '';
+    saringOpsiGrup();
+    document.getElementById('uGrup').value = u && u.id_group_akses ? String(u.id_group_akses) : '';
+  }
   modalOpen('mPengguna');
 }
 async function simpanPengguna() {
@@ -535,15 +561,24 @@ async function simpanPengguna() {
     if (id) {
       const body = { nama: document.getElementById('uNama').value, status: document.getElementById('uStatus').value };
       if (pass) body.password = pass;
+      if (bolehTenantLain()) {
+        body.id_data_server = document.getElementById('uDs').value || 'all';
+        body.id_group_akses = document.getElementById('uGrup').value || null;
+      }
       await API.put(`/api/pengguna/${id}`, body);
     } else {
-      await API.post('/api/pengguna', {
+      const body = {
         username: document.getElementById('uUsername').value,
         nama: document.getElementById('uNama').value,
         role: document.getElementById('uRole').value,
         id_ref: document.getElementById('uRef').value || null,
         password: pass
-      });
+      };
+      if (bolehTenantLain()) {
+        body.id_data_server = document.getElementById('uDs').value || 'all';
+        body.id_group_akses = document.getElementById('uGrup').value || null;
+      }
+      await API.post('/api/pengguna', body);
     }
     modalClose('mPengguna'); toast('Tersimpan'); loadPengguna();
   } catch (e) { toast(e.message, true); }
@@ -650,7 +685,7 @@ async function simpanTemplate() {
 
 // ============================================================ INIT
 document.addEventListener('DOMContentLoaded', async () => {
-  try { await requireLogin(['superadmin']); } catch (_) { return; }
+  try { await requireLogin(['superadmin', 'master']); } catch (_) { return; }
   document.querySelectorAll('.nav a[data-page]').forEach(a => {
     a.addEventListener('click', (e) => { e.preventDefault(); go(a.dataset.page); });
   });
@@ -660,3 +695,249 @@ document.addEventListener('DOMContentLoaded', async () => {
   window.go(cur);
   loadPelanggan && muatOpsi();
 });
+
+
+// ============================================================ DATA SERVER (ISP)
+let TENANT_ROWS = [];
+
+async function loadTenant() {
+  try {
+    const d = await API.get('/api/data-server');
+    TENANT_ROWS = d.data || [];
+    document.getElementById('tbTenant').innerHTML = TENANT_ROWS.map((t, i) => `
+      <tr><td>${esc(t.id)}</td><td><b>${esc(t.nama_server)}</b></td>
+        <td>${esc(t.nama_pemilik || '-')}</td>
+        <td>${t.username ? esc(t.username) : '<span class="badge mute">tanpa login master</span>'}</td>
+        <td>${esc(t.prefix_invoice || '-')}</td>
+        <td class="hint">buat ${esc(t.jadwal_buat_hari)} · kirim ${esc(t.jadwal_kirim_hari)} · tempo ${esc(t.jadwal_limit_hari)} · ${esc(t.jam_kirim || '00:00')}</td>
+        <td>${t.expaired_date ? esc(String(t.expaired_date).slice(0, 10)) : '-'}</td>
+        <td><span class="badge ${t.status === 'Aktif' ? 'ok' : 'mute'}">${esc(t.status)}</span></td>
+        <td class="t-actions">
+          <button class="btn sm secondary" onclick="formTenant(${i})">Ubah</button>
+          ${Number(t.id) === 1 ? '' : `<button class="btn sm danger" onclick="hapusTenant(${t.id})">Hapus</button>`}
+        </td></tr>`).join('')
+      || '<tr><td colspan="9" class="empty">Belum ada data server</td></tr>';
+  } catch (e) { toast(e.message, true); }
+}
+
+function formTenant(i) {
+  const t = typeof i === 'number' ? TENANT_ROWS[i] : null;
+  document.getElementById('mTenantTitle').textContent = t ? 'Ubah Data Server' : 'Tambah Data Server';
+  const isi = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  isi('tId', t ? t.id : '');
+  isi('tNama', t ? t.nama_server : '');
+  isi('tPemilik', t ? t.nama_pemilik || '' : '');
+  isi('tUser', t ? t.username || '' : '');
+  isi('tPass', '');
+  isi('tPrefix', t ? t.prefix_invoice || '' : '');
+  isi('tExp', t && t.expaired_date ? String(t.expaired_date).slice(0, 10) : '');
+  isi('tWa', t ? t.nomor_whatsapp || '' : '');
+  isi('tEmail', t ? t.email || '' : '');
+  isi('tAlamat', t ? t.alamat || '' : '');
+  isi('tBuat', t ? Number(t.jadwal_buat_hari || 1) : 1);
+  isi('tKirim', t ? Number(t.jadwal_kirim_hari || 2) : 2);
+  isi('tLimit', t ? Number(t.jadwal_limit_hari || 10) : 10);
+  isi('tJam', t ? t.jam_kirim || '07:00' : '07:00');
+  isi('tPpn', t ? Number(t.ppn_persen || 0) : 0);
+  isi('tStatus', t ? t.status : 'Aktif');
+  modalOpen('mTenant');
+}
+
+async function simpanTenant() {
+  const id = document.getElementById('tId').value;
+  const ambil = (id2) => document.getElementById(id2).value;
+  const body = {
+    nama_server: ambil('tNama'),
+    nama_pemilik: ambil('tPemilik'),
+    username: ambil('tUser'),
+    prefix_invoice: ambil('tPrefix'),
+    expaired_date: ambil('tExp') || null,
+    nomor_whatsapp: ambil('tWa'),
+    email: ambil('tEmail'),
+    alamat: ambil('tAlamat'),
+    jadwal_buat_hari: ambil('tBuat'),
+    jadwal_kirim_hari: ambil('tKirim'),
+    jadwal_limit_hari: ambil('tLimit'),
+    jam_kirim: ambil('tJam'),
+    ppn_persen: ambil('tPpn'),
+    status: ambil('tStatus')
+  };
+  if (body.jam_kirim && body.jam_kirim.length === 5) body.jam_kirim = body.jam_kirim.slice(0, 5);
+  const pass = ambil('tPass');
+  if (pass) body.password = pass;
+  try {
+    if (id) await API.put(`/api/data-server/${id}`, body);
+    else await API.post('/api/data-server', body);
+    modalClose('mTenant'); toast('Tersimpan');
+    await muatSesi();
+    loadTenant();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function hapusTenant(id) {
+  const t = TENANT_ROWS.find(x => Number(x.id) === Number(id)) || {};
+  if (!confirm(`Hapus data server "${t.nama_server || id}"? Hanya tenant kosong yang bisa dihapus.`)) return;
+  try {
+    await API.del(`/api/data-server/${id}`);
+    toast('Data server dihapus');
+    await muatSesi();
+    loadTenant();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ GROUP AKSES
+let MENU_LIST = [];
+let GROUP_ROWS = [];
+let GRUP_SEMUA = [];
+
+async function loadGroup() {
+  try {
+    const d = await API.get('/api/group-akses');
+    MENU_LIST = d.menus || Object.keys(LABEL_MENU);
+    GROUP_ROWS = d.data || [];
+    await muatLabelTenant();
+    document.getElementById('tbGroup').innerHTML = GROUP_ROWS.map((g, i) => {
+      const a = bacaAkses(g.akses);
+      const buka = a === 'all' ? 'semua menu'
+        : Object.keys(a).filter(k => a[k] !== false).map(k => LABEL_MENU[k] || k).join(', ') || 'tidak ada';
+      return `<tr><td><b>${esc(g.nama)}</b></td>
+        <td>${esc(LABEL_TENANT[g.id_data_server] || ('tenant ' + g.id_data_server))}</td>
+        <td class="hint">${esc(buka)}</td>
+        <td><span class="badge ${g.status === 'aktif' ? 'ok' : 'mute'}">${esc(g.status)}</span></td>
+        <td class="t-actions">
+          <button class="btn sm secondary" onclick="formGroup(${i})">Ubah</button>
+          <button class="btn sm danger" onclick="hapusGroup(${g.id})">Hapus</button>
+        </td></tr>`;
+    }).join('') || '<tr><td colspan="5" class="empty">Belum ada group</td></tr>';
+    await isiOpsiGrup();
+  } catch (e) { toast(e.message, true); }
+}
+
+function bacaAkses(nilai) {
+  let a = nilai;
+  if (typeof a === 'string') { try { a = JSON.parse(a || '{}'); } catch (_) { a = {}; } }
+  a = a || {};
+  if (!a.menu || a.menu === 'all') return 'all';
+  return a.menu || {};
+}
+
+let LABEL_TENANT = {};
+async function muatLabelTenant() {
+  try {
+    const s = await API.get('/api/auth/servers');
+    LABEL_TENANT = {};
+    (s.data || []).forEach(x => { LABEL_TENANT[x.id] = x.nama_server; });
+  } catch (_) {}
+}
+
+/** Isi dropdown grup (modal pengguna) + dropdown tenant (modal grup & pengguna). */
+async function isiOpsiGrup() {
+  let grup = { data: [] };
+  try { grup = await API.get('/api/group-akses'); } catch (_) {}
+  MENU_LIST = grup.menus || MENU_LIST;
+  GRUP_SEMUA = grup.data || [];
+  const servers = (sesi() && sesi().servers) || [];
+  const pasang = (id, html, pilih) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = html;
+    if (pilih !== undefined) el.value = pilih;
+  };
+  pasang('gDs', servers.map(s => `<option value="${s.id}">${esc(s.nama_server)}</option>`).join(''),
+    sesi() ? sesi().ds : 1);
+  saringOpsiGrup();
+}
+
+/** Opsi grup dibatasi ke tenant yang tertulis di kolom data server (kosong = semua tenant). */
+function saringOpsiGrup() {
+  const el = document.getElementById('uGrup');
+  if (!el) return;
+  const pilih = el.value;
+  const batasi = daftarTenantDariForm();
+  const daftar = GRUP_SEMUA.filter(g => !batasi || batasi.includes(Number(g.id_data_server)));
+  el.innerHTML = '<option value="">— semua menu —</option>' + daftar.map(g =>
+    `<option value="${g.id}">${esc(g.nama)} (tenant ${g.id_data_server})</option>`).join('');
+  el.value = daftar.some(g => String(g.id) === pilih) ? pilih : '';
+}
+
+function daftarTenantDariForm() {
+  const el = document.getElementById('uDs');
+  const teks = el ? String(el.value || '').trim() : '';
+  if (!teks || teks.toLowerCase() === 'all') return null;
+  const ids = teks.split(',').map(s => Number(s.trim())).filter(n => Number.isInteger(n) && n > 0);
+  return ids.length ? [...new Set(ids)] : null;
+}
+
+function formGroup(i) {
+  const g = typeof i === 'number' ? GROUP_ROWS[i] : null;
+  document.getElementById('mGroupTitle').textContent = g ? 'Ubah Group Akses' : 'Tambah Group Akses';
+  document.getElementById('gId').value = g ? g.id : '';
+  document.getElementById('gNama').value = g ? g.nama : '';
+  document.getElementById('gStatus').value = g ? g.status : 'aktif';
+  document.getElementById('gDsRow').style.display = bolehTenantLain() ? '' : 'none';
+  if (g) document.getElementById('gDs').value = g.id_data_server;
+  const a = g ? bacaAkses(g.akses) : 'all';
+  const semua = a === 'all';
+  document.getElementById('gAll').checked = semua;
+  gambarMenuAkses(semua ? {} : a, semua);
+  modalOpen('mGroup');
+}
+
+function toggleGroupAll() {
+  const semua = document.getElementById('gAll').checked;
+  document.querySelectorAll('#gMenu select').forEach(s => { s.disabled = semua; });
+}
+
+function gambarMenuAkses(grant, semua) {
+  const daftar = MENU_LIST.length ? MENU_LIST : Object.keys(LABEL_MENU);
+  document.getElementById('gMenu').innerHTML = daftar.map(m => {
+    const g = grant[m];
+    const nilai = (g === true || g === 'all') ? 'all'
+      : (g === undefined || g === false) ? '' : 'lihat';
+    return `<label class="chk"><span>${esc(LABEL_MENU[m] || m)}</span>
+      <select data-menu="${esc(m)}" ${semua ? 'disabled' : ''}>
+        <option value="">tanpa akses</option>
+        <option value="all"${nilai === 'all' ? ' selected' : ''}>penuh</option>
+        <option value="lihat"${nilai === 'lihat' ? ' selected' : ''}>hanya lihat</option>
+      </select></label>`;
+  }).join('');
+}
+
+function ambilAksesForm() {
+  if (document.getElementById('gAll').checked) return { menu: 'all' };
+  const menu = {};
+  document.querySelectorAll('#gMenu select').forEach(s => {
+    if (!s.value) return;
+    menu[s.dataset.menu] = s.value === 'all' ? true : { sub_menu: [] };
+  });
+  return { menu };
+}
+
+async function simpanGroup() {
+  const id = document.getElementById('gId').value;
+  const akses = ambilAksesForm();
+  if (akses.menu !== 'all' && !Object.keys(akses.menu).length) {
+    toast('Pilih minimal satu menu, atau aktifkan akses penuh', true);
+    return;
+  }
+  const body = {
+    nama: document.getElementById('gNama').value,
+    status: document.getElementById('gStatus').value,
+    akses
+  };
+  if (bolehTenantLain()) body.id_data_server = document.getElementById('gDs').value || null;
+  try {
+    if (id) await API.put(`/api/group-akses/${id}`, body);
+    else await API.post('/api/group-akses', body);
+    modalClose('mGroup'); toast('Tersimpan'); loadGroup();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function hapusGroup(id) {
+  const g = GROUP_ROWS.find(x => Number(x.id) === Number(id)) || {};
+  if (!confirm(`Hapus group "${g.nama || id}"?`)) return;
+  try {
+    await API.del(`/api/group-akses/${id}`);
+    toast('Group dihapus'); loadGroup();
+  } catch (e) { toast(e.message, true); }
+}

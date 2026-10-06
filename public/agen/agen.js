@@ -103,5 +103,5 @@ document.addEventListener('DOMContentLoaded', async () => {
   const origGo = window.go;
   window.go = (p) => { origGo(p); document.getElementById('judul').textContent = JUDUL[p] || p; };
   loadBeli();
-  window.go(location.hash.replace('#', '') || 'dashboard');
+  window.go(halamanAwal());
 });

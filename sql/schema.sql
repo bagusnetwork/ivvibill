@@ -33,10 +33,16 @@ CREATE TABLE IF NOT EXISTS data_server (
   jadwal_limit_hari TINYINT NOT NULL DEFAULT 10,    -- tgl jatuh tempo
   jam_kirim         VARCHAR(5)  NOT NULL DEFAULT '07:00',
   ppn_persen        DECIMAL(5,2) NOT NULL DEFAULT 0,
+  -- akun master ISP ini (model gratisinaja: login master ada di baris tenant)
+  username          VARCHAR(50)  DEFAULT NULL,
+  password_hash     VARCHAR(255) DEFAULT NULL,
+  prefix_invoice    VARCHAR(10)  NOT NULL DEFAULT 'IVV',
+  expaired_date     DATE         DEFAULT NULL,
   status            ENUM('Aktif','Tidak Aktif') NOT NULL DEFAULT 'Aktif',
   created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ds_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
@@ -49,6 +55,8 @@ CREATE TABLE IF NOT EXISTS app_user (
   nama          VARCHAR(100) NOT NULL,
   role          ENUM('superadmin','agen','teknisi','pelanggan') NOT NULL,
   id_ref        INT DEFAULT NULL,       -- id agen / pelanggan terkait
+  id_data_server VARCHAR(100) DEFAULT NULL,  -- CSV id data_server; NULL = semua tenant
+  id_group_akses INT DEFAULT NULL,      -- grant menu (lihat group_akses)
   no_hp         VARCHAR(20) DEFAULT NULL,
   status        ENUM('aktif','blokir') NOT NULL DEFAULT 'aktif',
   gagal_login   TINYINT NOT NULL DEFAULT 0,
@@ -56,7 +64,24 @@ CREATE TABLE IF NOT EXISTS app_user (
   created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_user_username (username),
-  KEY idx_user_role (role)
+  KEY idx_user_role (role),
+  KEY idx_user_server (id_data_server(20)),
+  KEY idx_user_group (id_group_akses)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Grup hak akses menu per ISP (meniru group_akses gratisinaja).
+-- akses = JSON: {"menu":{"pelanggan":{"halaman":["tambah","hapus"],"sub_menu":[]}}}
+-- atau {"menu":"all"} untuk semua menu.
+CREATE TABLE IF NOT EXISTS group_akses (
+  id             INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL DEFAULT 1,
+  nama           VARCHAR(100) NOT NULL,
+  akses          TEXT NOT NULL,
+  status         ENUM('aktif','nonaktif') NOT NULL DEFAULT 'aktif',
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_group (id_data_server, nama),
+  KEY idx_group_server (id_data_server)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS login_attempt (
@@ -72,12 +97,14 @@ CREATE TABLE IF NOT EXISTS login_attempt (
 CREATE TABLE IF NOT EXISTS audit_log (
   id         BIGINT NOT NULL AUTO_INCREMENT,
   user_id    INT DEFAULT NULL,
+  id_data_server INT DEFAULT NULL,
   aksi       VARCHAR(80) NOT NULL,
   detail     TEXT,
   ip         VARCHAR(45) DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_audit_user (user_id),
+  KEY idx_audit_server (id_data_server),
   KEY idx_audit_waktu (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -142,7 +169,7 @@ CREATE TABLE IF NOT EXISTS tagihan (
   periode       CHAR(7) NOT NULL,             -- YYYY-MM
   keterangan    VARCHAR(120) DEFAULT NULL,
   jumlah        DECIMAL(15,2) NOT NULL DEFAULT 0,
-  kode_unik     TINYINT NOT NULL DEFAULT 0,
+  kode_unik     SMALLINT NOT NULL DEFAULT 0,   -- 100..999, tidak muat di TINYINT
   ppn           DECIMAL(15,2) NOT NULL DEFAULT 0,
   total         DECIMAL(15,2) NOT NULL DEFAULT 0,
   tanggal_buat  DATE NOT NULL,
@@ -175,11 +202,13 @@ CREATE TABLE IF NOT EXISTS pembayaran (
 
 CREATE TABLE IF NOT EXISTS rekening (
   id         INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL DEFAULT 1,
   bank       VARCHAR(40) NOT NULL,
   no_rek     VARCHAR(40) NOT NULL,
   atas_nama  VARCHAR(100) NOT NULL,
   status     ENUM('aktif','nonaktif') NOT NULL DEFAULT 'aktif',
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  KEY idx_rek_server (id_data_server)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ------------------------------------------------------------
@@ -387,6 +416,7 @@ CREATE TABLE IF NOT EXISTS tiket (
 
 CREATE TABLE IF NOT EXISTS pekerjaan (
   id           INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL DEFAULT 1,
   jenis        ENUM('pasang','pindah','bongkar','perbaikan','survey') NOT NULL DEFAULT 'pasang',
   id_pelanggan INT DEFAULT NULL,
   nama         VARCHAR(100) DEFAULT NULL,
@@ -399,7 +429,8 @@ CREATE TABLE IF NOT EXISTS pekerjaan (
   updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_kerja_status (status, tanggal),
-  KEY idx_kerja_teknisi (id_teknisi)
+  KEY idx_kerja_teknisi (id_teknisi),
+  KEY idx_kerja_server (id_data_server)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
@@ -447,9 +478,10 @@ CREATE TABLE IF NOT EXISTS wa_log (
 -- 12. Pengaturan aplikasi (key/value) + snapshot status pppoe
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS setting_app (
+  id_data_server INT NOT NULL DEFAULT 1,
   kunci   VARCHAR(60) NOT NULL,
   nilai   TEXT,
-  PRIMARY KEY (kunci)
+  PRIMARY KEY (id_data_server, kunci)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS pppoe_status (

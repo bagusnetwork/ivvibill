@@ -54,12 +54,23 @@ async function requireLogin(roles) {
     const r = await API.get('/api/auth/me');
     const u = r.user;
     if (roles && roles.length && !roles.includes(u.role)) {
-      location.href = '/panel/';
+      // Rumah tiap role: teknisi/agen/pelanggan punya aplikasi sendiri.
+      // Navigasi ke halaman yang sedang dibuka = reload tanpa henti (login berkedip).
+      const rumah = ({ teknisi: '/teknisi/', agen: '/agen/', pelanggan: '/pelanggan/' })[u.role] || '/panel/';
+      const sekarang = location.pathname.replace(/\/+$/, '');
+      if (sekarang === rumah.replace(/\/+$/, '')) throw new Error('Akses ditolak');
+      location.href = rumah;
       throw new Error('Akses ditolak');
     }
     sessionStorage.setItem('ivvi_user', JSON.stringify(u));
     const el = document.getElementById('who');
     if (el) el.textContent = `${u.nama} · ${u.role}`;
+    SESI = {
+      user: u, ds: r.ds, servers: r.servers || [],
+      akses: r.akses || { menu: 'all' }, tenantSemua: !!r.tenantSemua
+    };
+    terapkanAksesMenu();
+    isiPickerTenant();
     return u;
   } catch (e) {
     showLogin();
@@ -134,4 +145,80 @@ function go(page) {
   });
   const sb = document.querySelector('.sidebar');
   if (sb) sb.classList.remove('open');
+}
+
+/* ============ multitenant: tenant aktif + grant menu ============ */
+let SESI = null;          // { user, ds, servers, akses, tenantSemua }
+const sesi = () => SESI;
+
+/** Menu yang tidak bisa diberikan lewat group — hanya role tertentu yang melihatnya. */
+const MENU_KHUSUS = { data_server: ['superadmin'] };
+
+/** Cerminan bolehMenu() di server — dipakai hanya untuk menyembunyikan menu. */
+function bolehMenu(menu) {
+  if (!SESI) return true;
+  const khusus = MENU_KHUSUS[menu];
+  if (khusus && !khusus.includes(SESI.user.role)) return false;
+  if (SESI.user.tipe === 'master' || SESI.user.role === 'superadmin') return true;
+  const a = SESI.akses || {};
+  if (!a.menu || a.menu === 'all') return true;
+  const g = a.menu[menu];
+  return g !== undefined && g !== false;
+}
+
+function terapkanAksesMenu() {
+  document.querySelectorAll('.nav a[data-menu]').forEach(a => {
+    a.style.display = bolehMenu(a.dataset.menu) ? '' : 'none';
+  });
+}
+
+/** Halaman awal yang aman: kalau tab tujuan disembunyikan grant, lompat ke tab pertama yang boleh.
+ *  Tanpa ini, user bergroup sempit tetap mendarat di #dashboard yang tabnya tak terlihat. */
+function halamanAwal(bawaan = 'dashboard') {
+  const ingin = location.hash.replace('#', '') || bawaan;
+  const a = document.querySelector(`.nav a[data-page="${ingin}"]`);
+  if (a && a.style.display === 'none') {
+    const lain = Array.from(document.querySelectorAll('.nav a[data-page]')).find(x => x.style.display !== 'none');
+    if (lain) return lain.dataset.page;
+  }
+  return ingin;
+}
+
+/** Pemilih data server: muncul hanya bila akun ini punya lebih dari satu tenant. */
+function isiPickerTenant() {
+  const sel = document.getElementById('dsPick');
+  if (!sel) return;
+  const box = sel.closest('.tenant-pick');
+  if (!SESI || !SESI.servers || SESI.servers.length < 2) {
+    if (box) box.style.display = 'none';
+    return;
+  }
+  sel.innerHTML = SESI.servers.map(s => `<option value="${s.id}">${esc(s.nama_server)}</option>`).join('');
+  sel.value = SESI.ds;
+  if (box) box.style.display = '';
+}
+
+async function gantiServer(id) {
+  const ds = Number(id);
+  if (!ds || (SESI && ds === Number(SESI.ds))) return;
+  try {
+    await API.post('/api/auth/server', { id: ds });
+    location.reload();
+  } catch (e) {
+    toast(e.message, true);
+    isiPickerTenant();
+  }
+}
+
+/** Muat ulang sesi + daftar tenant setelah data server berubah (tanpa reload halaman). */
+async function muatSesi() {
+  try {
+    const r = await API.get('/api/auth/me');
+    SESI = {
+      user: r.user, ds: r.ds, servers: r.servers || [],
+      akses: r.akses || { menu: 'all' }, tenantSemua: !!r.tenantSemua
+    };
+    terapkanAksesMenu();
+    isiPickerTenant();
+  } catch (_) {}
 }

@@ -159,5 +159,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     a.addEventListener('click', (e) => { e.preventDefault(); go(a.dataset.page); }));
   const origGo = window.go;
   window.go = (p) => { origGo(p); document.getElementById('judul').textContent = JUDUL[p] || p; };
-  window.go(location.hash.replace('#', '') || 'dashboard');
+  window.go(halamanAwal());
 });

@@ -217,11 +217,13 @@ async function cekPppoePelanggan(idDataServer = 1) {
 }
 
 /** Poll semua router + cek pppoe — dipanggil scheduler. */
-async function pollSemuaRouter() {
+async function pollSemuaRouter(idDataServer = null) {
+  const filter = idDataServer ? ' AND s.id_data_server = ?' : '';
   const rows = await db.q(
     `SELECT s.id FROM setting_mikrotik s
      JOIN master_perangkat d ON d.id = s.id_perangkat
-     WHERE d.status = 'aktif'`
+     WHERE d.status = 'aktif'${filter}`,
+    idDataServer ? [Number(idDataServer)] : []
   );
   const hasil = [];
   for (const r of rows) {

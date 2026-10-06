@@ -38,7 +38,7 @@ async function loadKerja() {
         <td class="t-actions">
           ${k.status === 'antrian' ? `<button class="btn sm" onclick="kerja(${k.id},'dikerjakan')">Kerjakan</button> ` : ''}
           ${k.status === 'dikerjakan' ? `<button class="btn sm" onclick="kerja(${k.id},'selesai')">Selesai</button> ` : ''}
-          <button class="btn sm secondary" onclick='formKerja(${JSON.stringify(k)})'>Ubah</button>
+          <button class="btn sm secondary" onclick="formKerja(${esc(JSON.stringify(k))})">Ubah</button>
         </td></tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada order</td></tr>';
   } catch (e) { toast(e.message, true); }
 }
@@ -81,7 +81,7 @@ async function loadTiket() {
       <tr><td>${t.id}</td><td>${esc(t.nama_pelanggan)}</td><td>${esc(t.judul)}</td>
         <td><span class="badge ${t.prioritas === 'tinggi' ? 'bad' : t.prioritas === 'sedang' ? 'warn' : 'mute'}">${esc(t.prioritas)}</span></td>
         <td><span class="badge ${badge(t.status)}">${esc(t.status)}</span></td>
-        <td class="t-actions"><button class="btn sm secondary" onclick='formTiket(${JSON.stringify(t)})'>Proses</button></td>
+        <td class="t-actions"><button class="btn sm secondary" onclick="formTiket(${esc(JSON.stringify(t))})">Proses</button></td>
       </tr>`).join('') || '<tr><td colspan="6" class="empty">Tidak ada tiket</td></tr>';
   } catch (e) { toast(e.message, true); }
 }
@@ -184,5 +184,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     a.addEventListener('click', (e) => { e.preventDefault(); go(a.dataset.page); }));
   const origGo = window.go;
   window.go = (p) => { origGo(p); document.getElementById('judul').textContent = JUDUL[p] || p; };
-  window.go(location.hash.replace('#', '') || 'dashboard');
+  window.go(halamanAwal());
 });

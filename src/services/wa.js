@@ -63,19 +63,23 @@ async function kirimSatu(item, server) {
  * Proses antrean: kirim semua pesan pending (maks `limit`).
  * Dipanggil cron tiap menit.
  */
-async function prosesAntrean(limit = 30) {
+async function prosesAntrean(limit = 30, idDataServer = null) {
+  const filter = idDataServer ? ' AND id_data_server = ?' : '';
+  const params = idDataServer ? ['pending', Number(idDataServer), Number(limit)] : ['pending', Number(limit)];
   const rows = await db.q(
-    'SELECT * FROM wa_queue WHERE status = ? ORDER BY id ASC LIMIT ?',
-    ['pending', Number(limit)]
+    `SELECT * FROM wa_queue WHERE status = ?${filter} ORDER BY id ASC LIMIT ?`, params
   );
   if (!rows.length) return { sent: 0, failed: 0 };
 
-  const server = await cfgUtil.getServer(1);
+  // tiap ISP punya URL + apiKey sendiri — kredensial tenant lain tidak boleh dipakai
+  const serverTenant = new Map();
   let sent = 0, failed = 0;
   for (const item of rows) {
     let status = 'gagal', err = null;
     try {
-      const r = await kirimSatu(item, server);
+      const ds = Number(item.id_data_server) || 1;
+      if (!serverTenant.has(ds)) serverTenant.set(ds, await cfgUtil.getServer(ds));
+      const r = await kirimSatu(item, serverTenant.get(ds));
       if (r.ok) { status = 'terkirim'; sent++; }
       else { failed++; err = `HTTP ${r.code}: ${r.message}`; }
     } catch (e) {

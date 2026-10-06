@@ -50,7 +50,7 @@ async function buatTagihanBulanan(idDataServer = 1, force = false) {
     const tanggalBuat = `${periode}-${String(srv.jadwal_buat_hari).padStart(2, '0')}`;
     const jt = `${periode}-${String(srv.jadwal_limit_hari).padStart(2, '0')}`;
 
-    const invoice = await cfgData.nomorInvoice();
+    const invoice = await cfgData.nomorInvoice(idDataServer);
     await db.insert(
       `INSERT INTO tagihan
        (id_data_server, id_pelanggan, nomor_invoice, periode, keterangan, jumlah, kode_unik, ppn, total, tanggal_buat, jatuh_tempo, status)

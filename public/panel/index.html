@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ivvibill — Panel Data Server</title>
 <link rel="stylesheet" href="/assets/style.css">
+<style>
+  .menu-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:8px; margin-top:6px; }
+  .menu-grid .chk { display:flex; align-items:center; justify-content:space-between; gap:10px;
+    border:1px solid rgba(255,255,255,.14); border-radius:8px; padding:7px 10px; font-size:13px; }
+  .chk { display:flex; align-items:center; gap:8px; }
+  .tenant-pick select { background:transparent; color:inherit; border:1px solid rgba(255,255,255,.2);
+    border-radius:8px; padding:5px 8px; font:inherit; max-width:190px; }
+  .tenant-pick option { color:#111; }
+</style>
 <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
 </head>
 <body data-app="/panel">
@@ -14,29 +23,31 @@
     <div class="logo"><span class="mark">iV</span> ivvibill</div>
     <div class="nav-group">Utama</div>
     <nav class="nav">
-      <a data-page="dashboard"><span class="ic">📊</span> Dashboard</a>
-      <a data-page="pelanggan"><span class="ic">👥</span> Pelanggan</a>
-      <a data-page="tagihan"><span class="ic">🧾</span> Tagihan</a>
-      <a data-page="pembayaran"><span class="ic">💳</span> Pembayaran</a>
+      <a data-page="dashboard" data-menu="dashboard"><span class="ic">📊</span> Dashboard</a>
+      <a data-page="pelanggan" data-menu="pelanggan"><span class="ic">👥</span> Pelanggan</a>
+      <a data-page="tagihan" data-menu="tagihan"><span class="ic">🧾</span> Tagihan</a>
+      <a data-page="pembayaran" data-menu="pembayaran"><span class="ic">💳</span> Pembayaran</a>
     </nav>
     <div class="nav-group">Hotspot</div>
     <nav class="nav">
-      <a data-page="paket"><span class="ic">📦</span> Paket</a>
-      <a data-page="voucher"><span class="ic">🎟️</span> Voucher</a>
-      <a data-page="agen"><span class="ic">🧑‍🤝‍🧑</span> Agen</a>
+      <a data-page="paket" data-menu="paket"><span class="ic">📦</span> Paket</a>
+      <a data-page="voucher" data-menu="voucher"><span class="ic">🎟️</span> Voucher</a>
+      <a data-page="agen" data-menu="agen"><span class="ic">🧑‍🤝‍🧑</span> Agen</a>
     </nav>
     <div class="nav-group">Monitoring</div>
     <nav class="nav">
-      <a data-page="interface"><span class="ic">🌐</span> Interface Router</a>
-      <a data-page="olt"><span class="ic">📡</span> Redaman OLT</a>
-      <a data-page="issue"><span class="ic">⚠️</span> Issue PPPoE</a>
+      <a data-page="interface" data-menu="interface"><span class="ic">🌐</span> Interface Router</a>
+      <a data-page="olt" data-menu="olt"><span class="ic">📡</span> Redaman OLT</a>
+      <a data-page="issue" data-menu="issue"><span class="ic">⚠️</span> Issue PPPoE</a>
     </nav>
     <div class="nav-group">Sistem</div>
     <nav class="nav">
-      <a data-page="perangkat"><span class="ic">🖧</span> Perangkat</a>
-      <a data-page="pengguna"><span class="ic">🔐</span> Pengguna</a>
-      <a data-page="wa"><span class="ic">💬</span> WhatsApp</a>
-      <a data-page="setting"><span class="ic">⚙️</span> Pengaturan</a>
+      <a data-page="perangkat" data-menu="perangkat"><span class="ic">🖧</span> Perangkat</a>
+      <a data-page="pengguna" data-menu="pengguna"><span class="ic">🔐</span> Pengguna</a>
+      <a data-page="group" data-menu="group_akses"><span class="ic">🗂️</span> Group Akses</a>
+      <a data-page="tenant" data-menu="data_server"><span class="ic">🏢</span> Data Server</a>
+      <a data-page="wa" data-menu="wa"><span class="ic">💬</span> WhatsApp</a>
+      <a data-page="setting" data-menu="setting"><span class="ic">⚙️</span> Pengaturan</a>
     </nav>
   </aside>
 
@@ -45,6 +56,9 @@
       <div style="display:flex;align-items:center;gap:12px">
         <button class="menu-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
         <h1 id="judul">Dashboard</h1>
+      </div>
+      <div class="tenant-pick" style="display:none">
+        <select id="dsPick" onchange="gantiServer(this.value)" title="Data server aktif"></select>
       </div>
       <div class="who"><span id="who">…</span>
         <button class="btn sm secondary" onclick="logout()">Keluar</button></div>
@@ -236,13 +250,42 @@
           <button class="btn" onclick="formPengguna()">+ Tambah Pengguna</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
           <table><thead><tr><th>Username</th><th>Nama</th><th>Role</th><th>Ref ID</th>
+            <th>Data server</th><th>Group akses</th>
             <th>Login terakhir</th><th>Status</th><th class="t-actions">Aksi</th></tr></thead>
-          <tbody id="tbPengguna"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
+          <tbody id="tbPengguna"><tr><td colspan="9" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
         <div class="panel"><div class="panel-head"><h2>Audit log</h2></div>
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Waktu</th><th>User</th><th>Aksi</th><th>Detail</th></tr></thead>
           <tbody id="tbAudit"><tr><td colspan="4" class="empty">Kosong</td></tr></tbody></table></div></div>
+      </div>
+
+      <!-- ================= DATA SERVER (ISP) ================= -->
+      <div data-view="tenant" data-onload="loadTenant" style="display:none">
+        <div class="toolbar"><div class="spacer"></div>
+          <button class="btn" onclick="formTenant()">+ Tambah Data Server</button></div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>ID</th><th>Nama server</th><th>Pemilik</th><th>Login master</th>
+            <th>Prefix</th><th>Jadwal tagihan</th><th>Kedaluwarsa</th><th>Status</th>
+            <th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbTenant"><tr><td colspan="9" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <p class="hint">Satu data server = satu ISP. Username &amp; password pada barisnya adalah login
+          master ISP itu. Seluruh datanya (paket, pelanggan, tagihan, perangkat, gateway, WhatsApp,
+          template) terpisah antar data server.</p>
+      </div>
+
+      <!-- ================= GROUP AKSES ================= -->
+      <div data-view="group" data-onload="loadGroup" style="display:none">
+        <div class="toolbar"><div class="spacer"></div>
+          <button class="btn" onclick="formGroup()">+ Tambah Group</button></div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Nama grup</th><th>Data server</th><th>Menu yang dibuka</th>
+            <th>Status</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbGroup"><tr><td colspan="5" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <p class="hint">Group membatasi menu panel bagi pengguna non-master. Pengguna tanpa group
+          mendapat seluruh menu pada data server-nya.</p>
       </div>
 
       <!-- ================= WA ================= -->
@@ -420,6 +463,10 @@
       <div class="form-row"><label>Password</label><input id="uPass" type="password"></div>
       <div class="form-row"><label>Status</label><select id="uStatus">
         <option>aktif</option><option>blokir</option></select></div>
+      <div class="form-row" id="uDsRow"><label>Data server (id dipisah koma, kosong = semua)</label>
+        <input id="uDs" placeholder="1,2" oninput="saringOpsiGrup()"></div>
+      <div class="form-row" id="uGrupRow"><label>Group akses</label>
+        <select id="uGrup"><option value="">— semua menu —</option></select></div>
     </div>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mPengguna')">Batal</button>
@@ -454,6 +501,57 @@
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mOlt')">Batal</button>
     <button class="btn" onclick="simpanOlt()">Simpan</button></div>
+</div></div>
+
+
+<div class="modal-bg" id="mTenant"><div class="modal">
+  <div class="modal-head"><h2 id="mTenantTitle">Tambah Data Server</h2>
+    <button class="btn sm ghost" onclick="modalClose('mTenant')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="tId">
+    <div class="form-grid">
+      <div class="form-row"><label>Nama server *</label><input id="tNama" placeholder="Nama ISP"></div>
+      <div class="form-row"><label>Pemilik</label><input id="tPemilik"></div>
+      <div class="form-row"><label>Username master *</label><input id="tUser" placeholder="login ISP"></div>
+      <div class="form-row"><label>Password master</label><input id="tPass" type="password"
+        placeholder="(kosongkan bila tidak diubah)"></div>
+      <div class="form-row"><label>Prefix invoice *</label><input id="tPrefix" placeholder="MAN" maxlength="10"></div>
+      <div class="form-row"><label>Kedaluwarsa langganan</label><input id="tExp" type="date"></div>
+      <div class="form-row"><label>Nomor WhatsApp</label><input id="tWa" placeholder="628xx"></div>
+      <div class="form-row"><label>Email</label><input id="tEmail"></div>
+      <div class="form-row"><label>Tgl buat tagihan</label><input id="tBuat" type="number" min="1" max="28"></div>
+      <div class="form-row"><label>Tgl kirim WA</label><input id="tKirim" type="number" min="1" max="28"></div>
+      <div class="form-row"><label>Tgl jatuh tempo</label><input id="tLimit" type="number" min="1" max="28"></div>
+      <div class="form-row"><label>Jam kirim</label><input id="tJam" placeholder="07:00"></div>
+      <div class="form-row"><label>PPN %</label><input id="tPpn" type="number" min="0" max="100" step="0.5"></div>
+      <div class="form-row"><label>Status</label><select id="tStatus">
+        <option value="Aktif">Aktif</option><option value="Tidak Aktif">Tidak Aktif</option></select></div>
+    </div>
+    <div class="form-row"><label>Alamat</label><input id="tAlamat"></div>
+    <p class="hint">Data server baru mulai sebagai salinan template WhatsApp milik tenant 1.
+      Gateway pembayaran &amp; WhatsApp diisi lewat menu Pengaturan setelah berpindah ke tenant itu.</p>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mTenant')">Batal</button>
+    <button class="btn" onclick="simpanTenant()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mGroup"><div class="modal">
+  <div class="modal-head"><h2 id="mGroupTitle">Tambah Group Akses</h2>
+    <button class="btn sm ghost" onclick="modalClose('mGroup')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="gId">
+    <div class="form-grid">
+      <div class="form-row"><label>Nama grup *</label><input id="gNama" placeholder="Admin tagihan"></div>
+      <div class="form-row" id="gDsRow"><label>Data server</label><select id="gDs"></select></div>
+      <div class="form-row"><label>Status</label><select id="gStatus">
+        <option value="aktif">aktif</option><option value="nonaktif">nonaktif</option></select></div>
+    </div>
+    <div class="form-row"><label class="chk">
+      <input type="checkbox" id="gAll" onchange="toggleGroupAll()"> Buka semua menu (akses penuh)</label></div>
+    <div id="gMenu" class="menu-grid"></div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mGroup')">Batal</button>
+    <button class="btn" onclick="simpanGroup()">Simpan</button></div>
 </div></div>
 
 <script src="/assets/app.js"></script>

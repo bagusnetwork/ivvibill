@@ -4,6 +4,116 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-06 — v1.1.1 — grant grup akses benar-benar menyembunyikan tab aplikasi role
+
+**Diubah**
+
+- Sidebar aplikasi **teknisi** (7 tab), **agen** (5 tab) dan **pelanggan** (4 tab) kini
+  membawa atribut `data-menu` seperti panel, sehingga `terapkanAksesMenu()` punya sesuatu
+  untuk disembunyikan: tab dipetaikan ke kunci grant yang sama dengan `requireMenu()` di
+  server — teknisi: `dashboard`, `pelanggan`, `interface`, `olt`, `issue`; agen: `dashboard`,
+  `beli`+`voucher` → `voucher`, `pelanggan`; pelanggan: `dashboard`, `tagihan`.
+- Tab yang tidak punya padanan kunci grant dibiarkan selalu terlihat, karena memakainya
+  akan membuat pekerjaan inti hilang tanpa bisa dikonfigurasi lewat grup akses:
+  *Order Pekerjaan*, *Tiket Gangguan*, *Status Koneksi*, *Riwayat Mutasi*.
+- `public/assets/app.js` dapat helper `halamanAwal()`: kalau hash/tab tujuan disembunyikan
+  grant, aplikasi dibuka pada tab pertama yang boleh. Tanpa ini user bergroup sempit
+  mendarat di `#dashboard` yang tabnya tidak tampil, dan datanya tetap termuat.
+
+**Verifikasi (staging, `mt/reset_staging.sh` → `mt/uji_staging.sh` → `mt/uji_lanjutan.sh`)**
+
+- 35/35 dan 16/16 lulus — tidak ada regresi API/scope.
+- Browser: `bispel` (teknisi, grup hanya *Pelanggan*) melihat **3 dari 7** tab
+  (`pekerjaan`, `tiket`, `pelanggan`) dan langsung mendarat di `#pekerjaan`;
+  `adminisp2` (agen, grup hanya *Pelanggan*) melihat **2 dari 5** tab
+  (`mutasi`, `pelanggan`) dan mendarat di `#mutasi`;
+  `ujiwaing` (teknisi, grup `menu:"all"`) tetap melihat **7/7** dan mendarat di `#dashboard`.
+- Panel tidak berubah perilakunya: hanya superadmin/master yang bisa masuk, dan bagi
+  keduanya `bolehMenu()` memang selalu benar — kecuali *Data Server* yang untuk master
+  sudah disembunyikan sejak v1.1.0 (teruji: master melihat 15 dari 16 anchor).
+- `mt/uji_produksi.sh` menambahkan bagian 2b: jumlah anchor berkunci grant per aplikasi
+  role + kehadiran `halamanAwal()`, supaya hook ini tidak hilang diam-diam saat upgrade.
+
+**Catatan keamanan**
+
+Sembunyi tab ini kosmetik. Penahan sesungguhnya tetap di server, dan sampai versi ini
+`requireMenu()` hanya dipasang di rute tulis (26 titik, nol di GET): user terautentikasi di
+sebuah tenant masih bisa membaca data tenant itu lewat API walau menunya tidak diberikan.
+Itu disengaja supaya aplikasi teknisi/agen/pelanggan tidak kehilangan data induknya.
+
+## 2026-10-06 — v1.1.0 — multi-ISP penuh (satu data_server = satu ISP)
+
+**Ditambahkan**
+
+- Akun master ISP ikut disimpan di `data_server` (username + `password_hash`
+  bcrypt, `prefix_invoice`, `expaired_date`) — persis model gratisinaja, jadi
+  tiap ISP punya login sendiri tanpa menaruh baris di `app_user`.
+- Isolasi tenant di seluruh API (pelanggan, tagihan, pembayaran, paket,
+  voucher, agen, monitoring, perangkat, pengguna, WhatsApp, pengaturan):
+  klausa `id_data_server` diambil dari klaim tenant di JWT; tabel anak
+  (pembayaran, agen_mutasi, redaman_log, issue_pelanggan, wa_log, dst.)
+  di-scope lewat JOIN ke induknya.
+- CRUD `data_server` (khusus pemilik platform) dan `group_akses` per tenant
+  dengan grant menu/submenu; pengguna bawahan mengikat daftar data server
+  (`app_user.id_data_server` CSV) + satu grup akses.
+- Panel: picker tenant di topbar, menu **Data Server** dan **Group Akses**,
+  kolom *Data server* + *Group akses* pada daftar Pengguna, menu sidebar
+  otomatis sembunyi sesuai grant.
+- Scheduler, antrean WhatsApp, dan webhook berjalan per tenant; kredensial
+  gateway WA satu ISP tidak pernah dipakai untuk antrean ISP lain.
+
+**Bug fixed**
+
+- `tagihan.kode_unik` bertipe `TINYINT` sementara kodenya 100..999 →
+  `Out of range value` dan pembuatan tagihan bulanan tidak pernah berhasil
+  pada instalasi baru. Skema diubah ke `SMALLINT` + migrasi pelebaran kolom.
+- `daftarServerUser()` memakai `IN (?)` dengan parameter array; karena
+  `pool.execute` memakai prepared statement, array tidak pernah mengembang →
+  placeholder dibuat satu per id.
+- `tentukanTenantUser()` dan `tentukanGrupTenant()` membaca
+  `req.user.tenantSemua`, padahal middleware auth mengisi `req.tenantSemua`.
+  Akibatnya superadmin platform membuat grup/pengguna diam-diam di tenant 1
+  dan tidak bisa membuatkannya untuk ISP lain.
+- `requireLogin(roles)` melakukan `location.href = '/panel/'` saat role tidak
+  cocok. teknisi/agen yang membuka /panel/ jadi reload tanpa henti (gejala
+  "login berkedip" yang sama dengan v1.0.6). Sekarang diarahkan ke aplikasi
+  rumahnya dan tidak dinavigasi bila sedang berada di halaman itu.
+- helmet CSP mengirim `script-src-attr 'none'` sehingga seluruh atribut
+  `onclick` panel mati; di-override `'unsafe-inline'`, dan 8 pemanggilan
+  `onclick='fn(${JSON.stringify(row)})'` ditulis ulang memakai `esc()` supaya
+  nilai berkutip (mis. `O'Brien`) tidak memec keluar atribut.
+- Dropdown grup akses di form Pengguna kini disaring menurut kolom data
+  server, bukan menampilkan grup dari semua tenant.
+
+**Verifikasi (staging, 2026-10-06)**
+
+- Stack staging terisolasi milik pengembang: mysqld 8.0.45 pada port 3307 +
+  aplikasi pada port 3011 dengan `DISABLE_SCHEDULER=1` (tidak mengirim WA,
+  tidak memanggil router/OLT). Data produksi tidak tersentuh.
+- `mt/uji_staging.sh` — 35/35 lolos: login superadmin dan master ISP, CRUD
+  data_server, tolak pindah tenant paksa (403), lintas tenant pada pelanggan
+  → 404 (baca/ubah/hapus), daftar tenant hanya berisi baris miliknya, grup
+  akses tanpa menu → 403 sedangkan grup bermenu → 200, grup/pengguna untuk
+  tenant lain dibuat benar oleh platform owner, hapus tenant berisi → 400.
+- `mt/uji_scheduler.js` — tugas billing scheduler membuat tagihan untuk kedua
+  tenant sekaligus dengan prefix masing-masing (IVV dan ISP2), dan baris
+  `wa_queue` terikat `id_data_server`.
+- Uji browser (keempat aplikasi, sesi cookie asli): panel superadmin — picker
+  berisi semua tenant, CRUD Data Server lewat tombol (tambah tenant "ISP Tiga
+  UI" → langsung terisolasi penuh → hapus), opsi grup pada form Pengguna
+  terfilter sesuai isi kolom tenant; master ISP2 — picker disembunyikan, menu
+  Data Server tidak tampil, daftar pelanggan hanya 3 baris miliknya, baca
+  tenant lain 404, daftar data_server 403; teknisi bergrup tagihan-saja —
+  `pengguna`/`data-server` 403; agen — hanya 3 pelanggan yang benar-benar
+  miliknya; aplikasi warga — hanya tagihan sendiri (prefix ISP2), akun warga
+  lain 403, tenant lain 404, tidak bisa mengubah datanya sendiri. Tidak ada
+  error console selain 4xx hasil probe.
+- Perilaku yang disengaja (bukan bug): grant menu menahan **tulis**
+  (POST/PUT/DELETE) tetapi baca tetap terbuka bagi user terautentikasi di
+  tenant yang sama, supaya aplikasi teknisi/agen/warga tidak kehilangan data
+  induknya; dan superadmin pemilik platform (`tenantSemua`) tidak difilter per
+  tenant — picker tenant hanya menentukan tenant tujuan untuk data baru.
+
 ## 2026-10-05 — v1.0.7 — semua halaman panel berhenti di "Memuat…"
 
 **Bug fixed**

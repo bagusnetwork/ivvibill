@@ -39,6 +39,10 @@ app.use(helmet({
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'"],
+      // Panel & 3 app lain memanggil fungsinya lewat atribut onclick/onchange,
+      // sedangkan helmet memakai script-src-attr 'none' secara default — tanpa
+      // baris ini seluruh tombol di halaman admin tidak berjalan.
+      scriptSrcAttr: ["'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'blob:'],
       connectSrc: ["'self'"],
@@ -73,6 +77,7 @@ app.use('/api', require('./src/routes/webhook'));
 
 // ---------- API (wajib login — router menerapkan requireAuth) --
 app.use('/api/auth', require('./src/routes/auth'));
+app.use('/api', require('./src/routes/tenant'));      // data_server + group_akses
 app.use('/api', require('./src/routes/pelanggan'));
 app.use('/api', require('./src/routes/tagihan'));
 app.use('/api', require('./src/routes/agen'));

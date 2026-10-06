@@ -1,11 +1,14 @@
 'use strict';
 // ============================================================
 // Tagihan + Pembayaran (manual pay & payment gateway)
+// Semua akses terisolasi per tenant (data_server); tabel anak
+// (pembayaran, rekening) discope lewat JOIN ke induknya.
 // ============================================================
 const express = require('express');
 const db = require('../db');
 const v = require('../util/validate');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, requirePJ } = require('../middleware/auth');
+const { tenantSql, tenantAktif, requireMenu } = require('../util/scope');
 const billing = require('../services/billing');
 const cfgData = require('../services/configData');
 const crypto = require('../util/crypto');
@@ -34,17 +37,27 @@ const upload = multer({
   }
 });
 
-function scopeTagihan(user) {
-  if (user.role === 'pelanggan') return { where: 't.id_pelanggan = ?', params: [user.id_ref] };
-  if (user.role === 'teknisi') return { where: '1=1', params: [] }; // teknisi boleh lihat untuk bantu bayar
-  if (user.role === 'agen') return { where: 'p.id_agen = ?', params: [user.id_ref] };
-  return { where: '1=1', params: [] };
+function scopeTagihan(req) {
+  const ts = tenantSql(req, 't.id_data_server');
+  const u = req.user;
+  if (u.role === 'pelanggan') return { where: `t.id_pelanggan = ?${ts.sql}`, params: [u.id_ref, ...ts.params] };
+  if (u.role === 'agen') return { where: `p.id_agen = ?${ts.sql}`, params: [u.id_ref, ...ts.params] };
+  return { where: `1=1${ts.sql}`, params: [...ts.params] };
+}
+
+/** Tagihan satu baris dalam scope tenant pemohon (null bila lintas tenant). */
+async function cariTagihan(req, id) {
+  const ts = tenantSql(req, 't.id_data_server');
+  return db.one(
+    `SELECT t.* FROM tagihan t JOIN pelanggan p ON p.id = t.id_pelanggan WHERE t.id = ?${ts.sql}`,
+    [id, ...ts.params]
+  );
 }
 
 // ------------------------------------------------------- tagihan
 router.get('/tagihan', async (req, res, next) => {
   try {
-    const s = scopeTagihan(req.user);
+    const s = scopeTagihan(req);
     const status = v.enumOf(req.query.status, ['buat', 'terkirim', 'menunggu', 'lunas', 'jatuh_tempo', 'batal'], null);
     const cari = v.str(req.query.q, { max: 100, def: '' });
     const limit = v.num(req.query.limit, { min: 1, max: 200, def: 50, int: true });
@@ -78,9 +91,11 @@ router.get('/tagihan', async (req, res, next) => {
 router.get('/tagihan/:id', async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });
+    const ts = tenantSql(req, 't.id_data_server');
     const t = await db.one(
       `SELECT t.*, p.nama AS nama_pelanggan, p.nomor_whatsapp, p.alamat
-       FROM tagihan t JOIN pelanggan p ON p.id = t.id_pelanggan WHERE t.id = ?`, [id]);
+       FROM tagihan t JOIN pelanggan p ON p.id = t.id_pelanggan WHERE t.id = ?${ts.sql}`,
+      [id, ...ts.params]);
     if (!t) return res.status(404).json({ error: 'Tagihan tidak ada' });
     if (req.user.role === 'pelanggan' && Number(t.id_pelanggan) !== Number(req.user.id_ref)) {
       return res.status(403).json({ error: 'Akses ditolak' });
@@ -90,25 +105,27 @@ router.get('/tagihan/:id', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/tagihan/buat', requireRole('superadmin'), async (req, res, next) => {
+router.post('/tagihan/buat', requirePJ(), requireMenu('tagihan', 'tambah'), async (req, res, next) => {
   try {
     const force = req.body.force === true || req.body.force === '1';
-    const r = await billing.buatTagihanBulanan(1, force);
+    const r = await billing.buatTagihanBulanan(tenantAktif(req), force);
     res.json(r);
   } catch (e) { next(e); }
 });
 
-router.post('/tagihan/kirim-wa', requireRole('superadmin'), async (req, res, next) => {
-  try { res.json(await billing.kirimTagihanWajib(1, 100)); }
+router.post('/tagihan/kirim-wa', requirePJ(), requireMenu('tagihan', 'kirim'), async (req, res, next) => {
+  try { res.json(await billing.kirimTagihanWajib(tenantAktif(req), 100)); }
   catch (e) { next(e); }
 });
 
-router.post('/tagihan/:id/batal', requireRole('superadmin'), async (req, res, next) => {
+router.post('/tagihan/:id/batal', requirePJ(), requireMenu('tagihan', 'batal'), async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });
+    const t = await cariTagihan(req, id);
+    if (!t) return res.status(404).json({ error: 'Tagihan tidak ada' });
     await db.run(`UPDATE tagihan SET status='batal' WHERE id=? AND status!='lunas'`, [id]);
-    await db.insert('INSERT INTO audit_log (user_id, aksi, detail, ip) VALUES (?,?,?,?)',
-      [req.user.id, 'batal_tagihan', `#${id}`, (req.ip || '').replace('::ffff:', '')]);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, t.id_data_server, 'batal_tagihan', `#${id}`, (req.ip || '').replace('::ffff:', '')]);
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
@@ -117,7 +134,7 @@ router.post('/tagihan/:id/batal', requireRole('superadmin'), async (req, res, ne
 router.post('/tagihan/:id/bayar', upload.single('bukti'), async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });
-    const t = await db.one('SELECT * FROM tagihan WHERE id = ?', [id]);
+    const t = await cariTagihan(req, id);
     if (!t) return res.status(404).json({ error: 'Tagihan tidak ada' });
     if (t.status === 'lunas') return res.status(400).json({ error: 'Tagihan sudah lunas' });
     if (req.user.role === 'pelanggan' && Number(t.id_pelanggan) !== Number(req.user.id_ref)) {
@@ -125,9 +142,9 @@ router.post('/tagihan/:id/bayar', upload.single('bukti'), async (req, res, next)
     }
     const keterangan = v.str(req.body.keterangan, { max: 255, def: null });
     const bukti = req.file ? `/uploads/${req.file.filename}` : null;
-    // Pelanggan mengunggah bukti → status menunggu verifikasi admin.
-    // Superadmin boleh langsung tandai lunas.
-    const langsungLunas = req.user.role === 'superadmin';
+    // Pelanggan mengunggah bukti → status menunggu verifikasi penanggung jawab.
+    // Pemilik ISP / superadmin boleh langsung tandai lunas.
+    const langsungLunas = req.user.role === 'superadmin' || req.user.role === 'master';
 
     await db.insert(
       `INSERT INTO pembayaran (id_tagihan, jumlah, metode, status, bukti, keterangan, verified_by)
@@ -139,30 +156,37 @@ router.post('/tagihan/:id/bayar', upload.single('bukti'), async (req, res, next)
     } else {
       await db.run(`UPDATE tagihan SET status='menunggu' WHERE id=?`, [id]);
     }
-    await db.insert('INSERT INTO audit_log (user_id, aksi, detail, ip) VALUES (?,?,?,?)',
-      [req.user.id, 'bayar_manual', `tagihan #${id}`, (req.ip || '').replace('::ffff:', '')]);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, t.id_data_server, 'bayar_manual', `tagihan #${id}`, (req.ip || '').replace('::ffff:', '')]);
     res.json({ ok: true, status: langsungLunas ? 'lunas' : 'menunggu' });
   } catch (e) { next(e); }
 });
 
-router.get('/pembayaran/menunggu', requireRole('superadmin'), async (req, res, next) => {
+router.get('/pembayaran/menunggu', requirePJ(), async (req, res, next) => {
   try {
+    const ts = tenantSql(req, 't.id_data_server');
     const rows = await db.q(
-      `SELECT b.*, t.nomor_invoice, t.total, p.nama AS nama_pelanggan
+      `SELECT b.*, t.nomor_invoice, t.total, t.id_data_server, p.nama AS nama_pelanggan
        FROM pembayaran b
        JOIN tagihan t ON t.id = b.id_tagihan
        JOIN pelanggan p ON p.id = t.id_pelanggan
-       WHERE b.status = 'menunggu' ORDER BY b.id DESC LIMIT 100`
+       WHERE b.status = 'menunggu'${ts.sql} ORDER BY b.id DESC LIMIT 100`,
+      ts.params
     );
     res.json({ data: rows });
   } catch (e) { next(e); }
 });
 
-router.post('/pembayaran/:id/verifikasi', requireRole('superadmin'), async (req, res, next) => {
+router.post('/pembayaran/:id/verifikasi', requirePJ(), requireMenu('pembayaran', 'verifikasi'), async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });
     const aksi = v.enumOf(req.body.aksi, ['terima', 'tolak']);
-    const b = await db.one('SELECT * FROM pembayaran WHERE id = ?', [id]);
+    const ts = tenantSql(req, 't.id_data_server');
+    const b = await db.one(
+      `SELECT b.*, t.id_data_server FROM pembayaran b
+       JOIN tagihan t ON t.id = b.id_tagihan WHERE b.id = ?${ts.sql}`,
+      [id, ...ts.params]
+    );
     if (!b) return res.status(404).json({ error: 'Pembayaran tidak ada' });
     if (b.status !== 'menunggu') return res.status(400).json({ error: 'Sudah diproses' });
     if (aksi === 'terima') {
@@ -172,16 +196,16 @@ router.post('/pembayaran/:id/verifikasi', requireRole('superadmin'), async (req,
       await db.run(`UPDATE pembayaran SET status='ditolak', verified_by=? WHERE id=?`, [req.user.id, id]);
       await db.run(`UPDATE tagihan SET status='terkirim' WHERE id=? AND status='menunggu'`, [b.id_tagihan]);
     }
-    await db.insert('INSERT INTO audit_log (user_id, aksi, detail, ip) VALUES (?,?,?,?)',
-      [req.user.id, `verifikasi_${aksi}`, `pembayaran #${id}`, (req.ip || '').replace('::ffff:', '')]);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, b.id_data_server, `verifikasi_${aksi}`, `pembayaran #${id}`, (req.ip || '').replace('::ffff:', '')]);
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
 
 // --------------------------------------------- payment gateway
-router.get('/gateway', requireRole('superadmin'), async (req, res, next) => {
+router.get('/gateway', requirePJ(), async (req, res, next) => {
   try {
-    const s = await cfgData.getServer(1, true);
+    const s = await cfgData.getServer(tenantAktif(req), true);
     res.json({
       data: {
         pg_active: s.pg_active,
@@ -197,8 +221,9 @@ router.get('/gateway', requireRole('superadmin'), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.put('/gateway', requireRole('superadmin'), async (req, res, next) => {
+router.put('/gateway', requirePJ(), requireMenu('setting', 'gateway'), async (req, res, next) => {
   try {
+    const ds = tenantAktif(req);
     const aktif = v.enumOf(req.body.pg_active, ['manual', 'midtrans', 'flip'], 'manual');
     const msKey = v.str(req.body.midtrans_server_key, { max: 400, def: null });
     const mcKey = v.str(req.body.midtrans_client_key, { max: 200, def: null });
@@ -215,22 +240,26 @@ router.put('/gateway', requireRole('superadmin'), async (req, res, next) => {
     if (fPub) { patch.push('pg_flip_public_key = ?'); vals.push(fPub); }
     if (waUrl !== null) { patch.push('wa_gateway_url = ?'); vals.push(waUrl); }
     if (waKey && waKey !== '****') { patch.push('wa_gateway_key = ?', 'wa_status = ?'); vals.push(crypto.encrypt(waKey), 'Aktif'); }
-    vals.push(1);
+    vals.push(ds);
     await db.run(`UPDATE data_server SET ${patch.join(', ')} WHERE id = ?`, vals);
-    cfgData.invalidate();
-    await db.insert('INSERT INTO audit_log (user_id, aksi, detail, ip) VALUES (?,?,?,?)',
-      [req.user.id, 'ubah_gateway', aktif, (req.ip || '').replace('::ffff:', '')]);
+    cfgData.invalidate(ds);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'ubah_gateway', aktif, (req.ip || '').replace('::ffff:', '')]);
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
 
 /** Checkout Midtrans Snap — membuat transaksi, mengembalikan snap URL. */
-router.post('/gateway/midtrans/snap', requireRole('superadmin', 'pelanggan'), async (req, res, next) => {
+router.post('/gateway/midtrans/snap', requireRole('superadmin', 'master', 'pelanggan'), async (req, res, next) => {
   try {
     const tagihanId = v.num(req.body.tagihan_id, { int: true, min: 1 });
-    const t = await db.one('SELECT * FROM tagihan WHERE id = ?', [tagihanId]);
+    const t = await cariTagihan(req, tagihanId);
     if (!t || t.status === 'lunas') return res.status(400).json({ error: 'Tagihan tidak valid' });
-    const s = await cfgData.getServer(1, true);
+    if (req.user.role === 'pelanggan' && Number(t.id_pelanggan) !== Number(req.user.id_ref)) {
+      return res.status(403).json({ error: 'Akses ditolak' });
+    }
+    const ds = Number(t.id_data_server);
+    const s = await cfgData.getServer(ds, true);
     if (s.pg_active !== 'midtrans' || !s.pg_midtrans_server_key) {
       return res.status(400).json({ error: 'Midtrans belum diaktifkan' });
     }
@@ -239,7 +268,7 @@ router.post('/gateway/midtrans/snap', requireRole('superadmin', 'pelanggan'), as
       ? 'https://app.sandbox.midtrans.com/snap/v1'
       : 'https://app.midtrans.com/snap/v1';
     const payload = {
-      transaction_details: { order_id: `IVV-${t.id}-${Date.now()}`, gross_amount: Number(t.total) },
+      transaction_details: { order_id: `${s.prefix_invoice || 'IVV'}-${t.id}-${Date.now()}`, gross_amount: Number(t.total) },
       customer_details: { first_name: String(t.id_pelanggan), email: null }
     };
     const r = await http.post(`${snapBase}/transactions`, JSON.stringify(payload), {
@@ -259,7 +288,8 @@ router.post('/gateway/midtrans/snap', requireRole('superadmin', 'pelanggan'), as
 
 router.get('/rekening', async (req, res, next) => {
   try {
-    res.json({ data: await db.q(`SELECT * FROM rekening WHERE status='aktif'`) });
+    const ts = tenantSql(req, 'id_data_server');
+    res.json({ data: await db.q(`SELECT * FROM rekening WHERE status='aktif'${ts.sql}`, ts.params) });
   } catch (e) { next(e); }
 });
 

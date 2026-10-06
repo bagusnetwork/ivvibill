@@ -20,6 +20,14 @@ const wa = require('./services/wa');
 const monitor = require('./services/monitoring');
 const olt = require('./services/olt');
 
+/** Daftar ISP aktif; kolom jadwal dipilih eksplisit agar rahasia gateway tidak terbawa. */
+async function daftarTenant() {
+  return db.q(
+    `SELECT id, nama_server, jadwal_buat_hari, jadwal_kirim_hari, jadwal_limit_hari, jam_kirim
+     FROM data_server WHERE status = 'Aktif' ORDER BY id`
+  );
+}
+
 const log = (...a) => console.log(`[ivvibill ${new Date().toISOString()}]`, ...a);
 
 let timers = [];
@@ -107,25 +115,27 @@ async function tugasBilling() {
   try {
     const now = new Date();
     const jam = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
-    const srv = await require('./services/configData').getServer(1, true);
 
-    if (now.getUTCDate() === Number(srv.jadwal_buat_hari)) {
-      const r = await billing.buatTagihanBulanan(1, false);
-      if (r.dibuat) log('Tagihan dibuat:', r.dibuat);
-    }
-    if (now.getUTCDate() === Number(srv.jadwal_kirim_hari) && jam === srv.jam_kirim) {
-      const r = await billing.kirimTagihanWajib(1, 50);
-      log('Tagihan dikirim WA:', r.dikirim);
-    }
-    // peringatan tiap hari jam 08:00
-    if (jam === '08:00') {
-      const r = await billing.peringatanTagihan(1, 50);
-      if (r.diperingat) log('Peringatan:', r.diperingat);
-    }
-    // isolir tiap hari jam 09:00
-    if (jam === '09:00') {
-      const r = await billing.isolirJatuhTempo(1);
-      if (r.isolir) log('Isolir:', r.isolir);
+    for (const srv of await daftarTenant()) {
+      const tag = `[${srv.id} ${srv.nama_server}]`;
+      if (now.getUTCDate() === Number(srv.jadwal_buat_hari)) {
+        const r = await billing.buatTagihanBulanan(srv.id, false);
+        if (r.dibuat) log('Tagihan dibuat', tag + ':', r.dibuat);
+      }
+      if (now.getUTCDate() === Number(srv.jadwal_kirim_hari) && jam === srv.jam_kirim) {
+        const r = await billing.kirimTagihanWajib(srv.id, 50);
+        log('Tagihan dikirim WA', tag + ':', r.dikirim);
+      }
+      // peringatan tiap hari jam 08:00
+      if (jam === '08:00') {
+        const r = await billing.peringatanTagihan(srv.id, 50);
+        if (r.diperingat) log('Peringatan', tag + ':', r.diperingat);
+      }
+      // isolir tiap hari jam 09:00
+      if (jam === '09:00') {
+        const r = await billing.isolirJatuhTempo(srv.id);
+        if (r.isolir) log('Isolir', tag + ':', r.isolir);
+      }
     }
   } catch (e) { log('Billing error:', e.message); }
   finally { running.billing = false; }
@@ -135,8 +145,12 @@ async function tugasIssue() {
   if (running.issue) return;
   running.issue = true;
   try {
-    const r = await monitor.cekPppoePelanggan(1);
-    if (r.offline) log('PPPoE offline:', r.offline, '/', r.dicek);
+    let dicek = 0, offline = 0;
+    for (const srv of await daftarTenant()) {
+      const r = await monitor.cekPppoePelanggan(srv.id);
+      dicek += r.dicek; offline += r.offline;
+    }
+    if (offline) log('PPPoE offline:', offline, '/', dicek);
   } catch (e) { log('Issue error:', e.message); }
   finally { running.issue = false; }
 }
