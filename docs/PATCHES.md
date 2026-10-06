@@ -4,6 +4,56 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-06 — v1.1.2 — penampil QR pairing WhatsApp gateway di panel
+
+**Masalah**
+
+Pengaturan → *Gateway* hanya punya kolom URL + API key. Untuk menautkan nomor WhatsApp
+pemilik ISP harus membuka dashboard WHAPI sendiri, yang berarti hafal URL dashboard,
+login memakai kredensial gateway, dan tidak jelas device mana yang sedang dipasangkan.
+Panel juga tidak pernah menampilkan *state* device, sehingga pesan "tagihan tidak terkirim"
+selalu berujung tebak-tebakan.
+
+**Diubah**
+
+- `src/services/wa.js` — dua fungsi baru di atas helper `metodeGateway()` yang sudah
+  memakai API publik WHAPI (`GET {wa_gateway_url}/getState|getQR|serviceStart?apiKey=…`):
+  * `pairing(server)` → `{ state, qr, pesan }`; QR (data URL) hanya diambil saat
+    `state === 'SERVICE_SCAN'`, karena di luar state itu `getQR` selalu kosong.
+  * `mulaiPairing(server)` → memanggil `serviceStart` lalu **baca ulang lewat `pairing()`**,
+    sebab respons `serviceStart` tidak selalu membawa `state`. Kalau pembacaan ulang gagal,
+    jawaban `serviceStart` yang dipakai — tombol tidak gagal hanya karena gateway lambat.
+- `src/routes/tagihan.js` — `GET /api/gateway/wa/pairing` (baca status) dan
+  `POST /api/gateway/wa/start` (jalankan service, dijaga `requireMenu('setting','gateway')`
+  dan dicatat ke `audit_log` sebagai `wa_pairing_start`). Keduanya proxy: **API key tidak
+  pernah turun ke browser**, dan `wa_gateway_key` tetap tersimpan terenkripsi AES.
+- Panel (`index.html` + `panel.js` pada view *setting*): baris `#waPair` menampilkan status
+  gateway dengan label berbahasa Indonesia (`terhubung` / `menunggu pairing` /
+  `QR siap dipindai` / `service mati`), `#waQr` menampilkan QR, dan ada tombol
+  **Mulai pairing** saat `SERVICE_OFF`. Status di-poll tiap 5 detik dan timer berhenti
+  begitu halaman *setting* ditinggalkan.
+- QR dibuka lewat `<img src>` hanya bila datanya `data:`/`blob:`/`/` — format lain
+  dirender sebagai tautan, karena CSP `img-src 'self' data: blob:` akan menolak host lain
+  dan yang hilang adalah gambarnya, bukan pesannya.
+- Placeholder kolom URL kini `http://127.0.0.1:3000/api`. Kurang `/api` adalah penyebab
+  paling umum QR tidak muncul, dan `metodeGateway()` kini menjawab dengan kalimat itu
+  alih-alih `JSON.parse` error.
+
+**Verifikasi (staging, `mt/reset_staging.sh` → `mt/uji_staging.sh` → `mt/uji_lanjutan.sh`)**
+
+- 35/35 dan 19/19 lulus; `mt/uji_lanjutan.sh` bagian 6 mengunci dua rute baru ini tetap
+  401 tanpa sesi dan menolak dengan "API key WhatsApp gateway belum disimpan" di DB segar.
+- curl terhadap WHAPI asli: `SERVICE_OFF` + pesan "you haven't started the WhatsApp service",
+  setelah tekan *Mulai pairing* → `PAIRING`, dan URL tanpa `/api` → HTTP 404 bukan JSON.
+- Browser: `#waPair` hidup di `http://127.0.0.1:3011/panel/#setting`, QR tetap tersembunyi
+  selama state belum `SERVICE_SCAN`.
+
+**Catatan**
+
+QR hanya muncul bila `serviceStart` berhasil lolos pemeriksaan lisensi ke
+`whapi-server.my.id`. Pada server ini rute ke host tersebut sering `EHOSTUNREACH`, sehingga
+device berhenti di `PAIRING` lalu timeout — itu kendala jaringan gateway, bukan panel.
+
 ## 2026-10-06 — v1.1.1 — grant grup akses benar-benar menyembunyikan tab aplikasi role
 
 **Diubah**

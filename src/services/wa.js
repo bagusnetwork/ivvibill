@@ -1,7 +1,8 @@
 'use strict';
 // ============================================================
-// WhatsApp gateway — antrean + pengiriman (kompatibel WHAPI-style:
-//   POST {wa_gateway_url}sendMessage  apiKey, phone, message)
+// WhatsApp gateway — antrean, pengiriman, dan pairing (WHAPI-style:
+//   GET  {wa_gateway_url}/getState|getQR|serviceStart?apiKey=...
+//   POST {wa_gateway_url}/sendMessage  apiKey, phone, message)
 // Template memakai placeholder: #usr #ppp #add #lyn #tot #ket
 // #lmt #jum #ppn #unk #hly #jly #lnk #inv #prd #srv #jam #judul
 // ============================================================
@@ -42,14 +43,58 @@ async function enqueue({ tujuan, jenis, pesan, idRef = null, idDataServer = 1 })
   );
 }
 
-/** Kirim satu pesan langsung ke gateway. */
-async function kirimSatu(item, server) {
+/** Basis URL gateway tanpa slash di ujung. */
+function basisUrl(server) {
   const url = String(server.wa_gateway_url || '').replace(/\/+$/, '');
   if (!url) throw new Error('URL WhatsApp gateway belum diatur');
+  return url;
+}
+
+/**
+ * Panggil satu metode WHAPI: GET {url}/{metode}?apiKey=...
+ * Wa_gateway_url HARUS menunjuk folder API-nya (contoh http://127.0.0.1:3000/api),
+ * karena WHAPI melayani /api/getState, /api/getQR, /api/serviceStart, /api/sendMessage.
+ * Kalau yang balik bukan JSON, hampir pasti URL-nya kurang "/api".
+ */
+async function metodeGateway(server, metode) {
+  const key = crypto.decrypt(server.wa_gateway_key) || '';
+  if (!key) throw new Error('API key WhatsApp gateway belum disimpan');
+  const res = await http.get(`${basisUrl(server)}/${metode}?apiKey=${encodeURIComponent(key)}`, { timeout: 15000 });
+  if (!res.body || typeof res.body !== 'object') {
+    throw new Error(`Gateway membalas HTTP ${res.status} bukan JSON — URL harus sampai folder API, contoh http://127.0.0.1:3000/api`);
+  }
+  return res.body;
+}
+
+/** Status pairing tenant: state gateway + QR (data URL) saat gateway sedang scan. */
+async function pairing(server) {
+  const st = await metodeGateway(server, 'getState');
+  const r = st.results || {};
+  let qr = null;
+  if (r.state === 'SERVICE_SCAN') {
+    const q = await metodeGateway(server, 'getQR');
+    qr = (q.results && q.results.qrString) || null;
+  }
+  return { state: r.state || null, qr, pesan: r.message || '' };
+}
+
+/** Jalankan service gateway supaya device masuk masa pairing. */
+async function mulaiPairing(server) {
+  const r = await metodeGateway(server, 'serviceStart');
+  const d = r.results || {};
+  // serviceStart sering balik tanpa state — baca ulang lewat getState supaya
+  // panel dan audit log langsung menampilkan kondisi device yang sebenarnya.
+  let l = {};
+  try { l = await pairing(server); } catch (e) { /* jawab seadanya kalau gateway belum stabil */ }
+  return { state: l.state || d.state || null, qr: l.qr || null, pesan: d.message || l.pesan || '' };
+}
+
+/** Kirim satu pesan langsung ke gateway. */
+async function kirimSatu(item, server) {
+  const url = basisUrl(server);
   // apiKey disimpan terenkripsi AES (lihat PUT /gateway di routes/tagihan.js)
   const key = crypto.decrypt(server.wa_gateway_key) || '';
-  const endpoint = url.endsWith('/') ? url + 'sendMessage' : url + '/sendMessage';
-  const res = await http.post(endpoint, new URLSearchParams({
+  const res = await http.post(`${url}/sendMessage`, new URLSearchParams({
     apiKey: key, phone: item.tujuan, message: item.pesan
   }).toString(), {
     timeout: 12000,
@@ -97,4 +142,4 @@ async function prosesAntrean(limit = 30, idDataServer = null) {
   return { sent, failed };
 }
 
-module.exports = { normalizePhone, render, ambilTemplate, enqueue, prosesAntrean };
+module.exports = { normalizePhone, render, ambilTemplate, enqueue, prosesAntrean, pairing, mulaiPairing };

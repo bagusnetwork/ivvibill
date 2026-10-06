@@ -10,6 +10,7 @@ const v = require('../util/validate');
 const { requireAuth, requireRole, requirePJ } = require('../middleware/auth');
 const { tenantSql, tenantAktif, requireMenu } = require('../util/scope');
 const billing = require('../services/billing');
+const wa = require('../services/wa');
 const cfgData = require('../services/configData');
 const crypto = require('../util/crypto');
 const http = require('../util/http');
@@ -218,6 +219,25 @@ router.get('/gateway', requirePJ(), async (req, res, next) => {
         wa_status: s.wa_status
       }
     });
+  } catch (e) { next(e); }
+});
+
+/** Pairing WhatsApp — proxy ke gateway WHAPI tenant; API key tidak pernah turun ke browser. */
+router.get('/gateway/wa/pairing', requirePJ(), async (req, res, next) => {
+  try {
+    const s = await cfgData.getServer(tenantAktif(req), true);
+    res.json(await wa.pairing(s));
+  } catch (e) { next(e); }
+});
+
+router.post('/gateway/wa/start', requirePJ(), requireMenu('setting', 'gateway'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const s = await cfgData.getServer(ds, true);
+    const hasil = await wa.mulaiPairing(s);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'wa_pairing_start', hasil.state || 'tanpa state', (req.ip || '').replace('::ffff:', '')]);
+    res.json(hasil);
   } catch (e) { next(e); }
 });
 

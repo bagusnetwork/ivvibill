@@ -336,8 +336,12 @@
               <div class="form-row"><label>Midtrans client key</label><input id="gMc"></div>
               <div class="form-row"><label>Flip secret key</label><input id="gFs"></div>
               <div class="form-row"><label>Flip public key</label><input id="gFp"></div>
-              <div class="form-row"><label>URL WhatsApp gateway</label><input id="gWaUrl" placeholder="http://127.0.0.1:3000/"></div>
+              <div class="form-row"><label>URL WhatsApp gateway</label><input id="gWaUrl" placeholder="http://127.0.0.1:3000/api"></div>
               <div class="form-row"><label>API key WhatsApp gateway</label><input id="gWaKey" placeholder="(kosongkan bila tak diubah)"></div>
+              <div class="form-row"><label>Pairing WhatsApp</label>
+                <div id="waPair" class="hint">Status gateway: memuat…</div>
+                <img id="waQr" alt="QR WhatsApp" style="max-width:260px;display:none;margin-top:8px">
+              </div>
               <button class="btn" onclick="simpanGateway()">Simpan gateway</button>
             </div></div>
         </div>

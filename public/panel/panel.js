@@ -636,6 +636,7 @@ async function loadSetting() {
     document.getElementById('gFp').value = gw.flip_public || '';
     document.getElementById('gWaUrl').value = gw.wa_gateway_url || '';
     document.getElementById('gWaKey').value = '';
+    muatPairingWa();
 
     const tpl = d.template || [];
     document.getElementById('tplBox').innerHTML =
@@ -671,6 +672,55 @@ async function simpanGateway() {
       wa_gateway_key: document.getElementById('gWaKey').value
     });
     toast('Gateway tersimpan'); loadSetting();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ PAIRING WHATSAPP GATEWAY
+const WA_LABEL = {
+  CONNECTED: 'terhubung', PAIRING: 'menunggu pairing',
+  SERVICE_SCAN: 'QR siap dipindai', SERVICE_OFF: 'service mati'
+};
+let waTimer = null;
+
+/** QR dari WHAPI bisa berupa data URL atau URL host gateway; hanya yang
+ *  boleh-CSP yang dipasang sebagai <img>, sisanya jadi tautan. */
+function renderWaPair(d) {
+  const kotak = document.getElementById('waPair');
+  const img = document.getElementById('waQr');
+  if (!kotak) return;
+  const state = d.state || 'TIDAK DIKETAHUI';
+  let isi = `Status gateway: <b>${esc(WA_LABEL[state] || state)}</b>`;
+  if (d.pesan) isi += ` <span class="hint">${esc(d.pesan)}</span>`;
+  if (state === 'SERVICE_OFF') isi += ' <button class="btn" onclick="mulaiPairingWa()">Mulai pairing</button>';
+  if (state === 'CONNECTED') isi += ' — nomor sudah tertaut, tidak perlu scan lagi.';
+  if (d.qr && /^(data:|blob:|\/)/.test(d.qr)) {
+    img.src = d.qr; img.style.display = 'block';
+  } else {
+    img.style.display = 'none'; img.removeAttribute('src');
+    if (d.qr) isi += ` <a href="${esc(d.qr)}" target="_blank" rel="noopener">buka QR di tab baru</a>`;
+  }
+  kotak.innerHTML = isi;
+}
+
+/** Baca status gateway lewat backend — API key tidak pernah dikirim ke browser. */
+async function muatPairingWa() {
+  const kotak = document.getElementById('waPair');
+  if (!kotak) return;
+  try {
+    renderWaPair(await API.get('/api/gateway/wa/pairing'));
+    if (!waTimer) waTimer = setInterval(() => {
+      const v = document.querySelector('[data-view="setting"]');
+      if (v && !v.hidden) muatPairingWa();
+    }, 5000);
+  } catch (e) {
+    kotak.innerHTML = `<span class="hint">${esc(e.message)}</span>`;
+  }
+}
+
+async function mulaiPairingWa() {
+  try {
+    renderWaPair(await API.post('/api/gateway/wa/start', {}));
+    toast('Service gateway dijalankan — pindai QR sebelum masa pairing habis');
   } catch (e) { toast(e.message, true); }
 }
 async function simpanTemplate() {
