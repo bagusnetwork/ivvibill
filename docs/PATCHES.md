@@ -4,6 +4,64 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-07 — v1.3.1 — seragamkan collation database (perbaikan menu Pelanggan gagal)
+
+**Masalah**
+
+Menu Pelanggan di produksi melempar 500 dan mencatat error ini berulang di log:
+
+```
+ER_CANT_AGGREGATE_2COLLATIONS: Illegal mix of collations
+(utf8mb4_0900_ai_ci,IMPLICIT) and (utf8mb4_unicode_ci,IMPLICIT) for operation '='
+  at src/routes/pelanggan.js:180 (GET /api/pelanggan)
+```
+
+14 tabel (`pppoe_status`, `redaman_log`, `wa_queue`, `wa_log`, `setting_app`,
+`setting_olt`, `login_attempt`, `audit_log`, `agen_mutasi`, `interface_log`,
+`router_resource_log`, `issue_pelanggan`, `pesan_template`, `rekening`)
+memakai collation bawaan MySQL 8 (`utf8mb4_0900_ai_ci`), sedangkan sisanya
+`utf8mb4_unicode_ci` sesuai `sql/schema.sql`. Tabel-tabel itu dibuat sebelum
+`schema.sql` menetapkan `COLLATE`, dan `CREATE TABLE IF NOT EXISTS` tidak
+pernah menyentuhnya lagi.
+
+Kegagalan muncul tepat pada perbandingan kolom string dua-tabel dengan
+`IMPLICIT` collation — `redaman_log.sn = master_onu.sn` pada subquery
+redaman di `GET /api/pelanggan` — sehingga daftar pelanggan (inti panel)
+tidak bisa dibuka sama sekali. Kolom angka tidak terpengaruh, jadi tagihan
+dan pembayaran tetap jalan; errornya mudah terlewat kalau hanya cek
+`/api/health`.
+
+**Diubah**
+
+- `scripts/migrate-collation.js` **baru** — idempoten, baca
+  `information_schema.TABLES` dan hanya menyentuh tabel yang collation-nya
+  berbeda dari `utf8mb4_unicode_ci`. `ALTER TABLE ... CONVERT TO CHARACTER
+  SET utf8mb4 COLLATE utf8mb4_unicode_ci` mengubah kolom + indeks sekaligus.
+  Default database ikut diseragamkan lewat `ALTER DATABASE` supaya
+  `CREATE TABLE` mendatang tanpa `COLLATE` eksplisit tidak kembali memakai
+  bawaan MySQL 8. Mendukung `--dry-run`, dan setelah konversi memverifikasi
+  ulang ke `information_schema` — bila masih ada sisa, skrip **gagal**
+  (exit 1) alih-alih diam-diam melapor sukses.
+- `mt/install_fase2.sh` — `node scripts/migrate-collation.js` ditambahkan
+  ke rantai migrasi setelah `migrate-v13.js`, plus lompatan versi
+  `1.3.0 -> 1.3.1`.
+- `mt/daftar_target.sh` — `migrate-collation.js` masuk peta pemasangan.
+
+**Cara dipasang ke produksi**
+
+`sudo bash mt/install_fase2.sh` — jalankan seperti biasa; tidak ada
+dependensi baru, jadi jangan `npm install`/`npm ci`. Rantai migrasi kini
+menjalankan empat skrip (multitenant -> v12 -> v13 -> collation),
+semuanya idempoten.
+
+**Catatan**
+
+Konversi menyalin ulang isi tabel (paling besar `interface_log`, ~3,5 MB
+dari ~50 ribu baris) dan berlangsung di bawah kunci `ALTER`;
+jalankan di lalu lintas sepi. Backup database wajib ada sebelum
+dijalankan — `install_fase2.sh` sudah membuat `mysqldump` sendiri di
+langkah 2.
+
 ## 2026-10-07 — v1.3.0 — Invoice penjualan barang terpisah + uraian internet diketik manual + bukti lunas bergambar ke WhatsApp, dipasang di atas v1.2.1
 
 **Masalah**
