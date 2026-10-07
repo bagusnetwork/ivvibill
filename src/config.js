@@ -36,7 +36,7 @@ const config = {
   root: ROOT,
   app: {
     name: 'ivvibill',
-    version: '1.1.2',
+    version: '1.3.0',
     tz: env.TZ || 'Asia/Jakarta',
     baseUrl: (env.BASE_URL || '').replace(/\/+$/, ''),
     env: env.NODE_ENV || 'production',

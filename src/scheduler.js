@@ -135,6 +135,10 @@ async function tugasBilling() {
       if (jam === '09:00') {
         const r = await billing.isolirJatuhTempo(srv.id);
         if (r.isolir) log('Isolir', tag + ':', r.isolir);
+        // status DB sudah isolir tapi secret masih hidup = layanan tidak putus
+        if (r.router_gagal && r.router_gagal.length) {
+          log('Isolir TANPA router', tag + ':', r.router_gagal.slice(0, 3).join(' | '));
+        }
       }
     }
   } catch (e) { log('Billing error:', e.message); }

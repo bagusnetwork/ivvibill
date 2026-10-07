@@ -21,7 +21,7 @@ router.use(requireAuth);
 
 /** Menu panel yang bisa dibatasi per grup akses. */
 const MENU = [
-  'dashboard', 'pelanggan', 'tagihan', 'pembayaran', 'paket', 'voucher', 'agen',
+  'dashboard', 'pelanggan', 'tagihan', 'invoice', 'pembayaran', 'paket', 'voucher', 'agen',
   'interface', 'olt', 'issue', 'perangkat', 'pengguna', 'wa', 'setting',
   'data_server', 'group_akses'
 ];

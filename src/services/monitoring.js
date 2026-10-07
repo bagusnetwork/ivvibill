@@ -233,4 +233,84 @@ async function pollSemuaRouter(idDataServer = null) {
   return hasil;
 }
 
-module.exports = { pollRouter, cekPppoePelanggan, pollSemuaRouter, klien, perangkatMikrotik, sambungkan };
+/** Router aktif milik satu tenant (urut, belum disentuh). */
+async function routerTenant(idDataServer) {
+  return db.q(
+    `SELECT s.id, d.nama FROM setting_mikrotik s
+     JOIN master_perangkat d ON d.id = s.id_perangkat
+     WHERE s.id_data_server = ? AND d.status = 'aktif'`,
+    [Number(idDataServer)]
+  );
+}
+
+/**
+ * Aktifkan/nonaktifkan secret PPPoE milik pelanggan di router.
+ * Pelanggan tidak punya kolom router di skema ini, jadi tiap router tenant
+ * dicoba sampai username-nya ketemu. Saat mematikan, sesi yang sedang jalan
+ * ikut dibuang: secret cacat (disabled) tidak memutus koneksi yang sudah naik.
+ */
+async function setSecret(user, { disabled, idDataServer }) {
+  const nama = String(user || '').trim();
+  if (!nama) throw new Error('Username PPPoE kosong');
+  const hasil = { router: null, disabled: !!disabled, sesi_dibuang: 0, gagal: [] };
+  for (const r of await routerTenant(idDataServer)) {
+    let c;
+    try {
+      const { dev } = await perangkatMikrotik(r.id);
+      c = klien(dev);
+      await sambungkan(c);
+      const secret = await c.run(['/ppp/secret/print', '?name=' + nama]);
+      if (!secret.length || !secret[0]['.id']) continue;
+      await c.run(['/ppp/secret/set', '=.id=' + secret[0]['.id'],
+        '=disabled=' + (disabled ? 'yes' : 'no')]);
+      if (disabled) {
+        const sesi = await c.run(['/ppp/active/print', '?user=' + nama]);
+        for (const s of sesi) {
+          if (!s['.id']) continue;
+          try { await c.run(['/ppp/active/remove', '=.id=' + s['.id']]); hasil.sesi_dibuang++; }
+          catch (_) { /* sesi sudah putus sendiri */ }
+        }
+      }
+      hasil.router = dev.nama;
+      return hasil;
+    } catch (e) {
+      hasil.gagal.push(`${r.nama}: ${String(e.message).slice(0, 120)}`);
+    } finally { if (c) c.close(); }
+  }
+  return hasil;
+}
+
+/**
+ * Sesi PPPoE yang sedang aktif di router tenant tetapi usernya tidak ada di
+ * tabel pelanggan — akun internet yang tidak akan pernah tertagih.
+ */
+async function sesiTakTerkenal(idDataServer) {
+  const akun = new Set((await db.q(
+    `SELECT username_pppoe FROM pelanggan WHERE id_data_server = ?
+       AND username_pppoe IS NOT NULL AND username_pppoe != ''`,
+    [Number(idDataServer)]
+  )).map(r => String(r.username_pppoe).toLowerCase()));
+  const out = [];
+  const routerGagal = [];
+  for (const r of await routerTenant(idDataServer)) {
+    let c;
+    try {
+      const { dev } = await perangkatMikrotik(r.id);
+      c = klien(dev);
+      await sambungkan(c);
+      for (const a of await c.pppoeActive()) {
+        const u = String(a.user || '').trim();
+        if (!u || akun.has(u.toLowerCase())) continue;
+        out.push({ router: dev.nama, user: u, address: a.address || '', uptime: a.uptime || '' });
+      }
+    } catch (e) {
+      routerGagal.push(`${r.nama}: ${String(e.message).slice(0, 120)}`);
+    } finally { if (c) c.close(); }
+  }
+  return { data: out, router_gagal: routerGagal, tercatat: akun.size };
+}
+
+module.exports = {
+  pollRouter, cekPppoePelanggan, pollSemuaRouter, klien, perangkatMikrotik, sambungkan,
+  setSecret, sesiTakTerkenal, routerTenant
+};

@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS login_attempt (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_attempt_user (username, created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS audit_log (
   id         BIGINT NOT NULL AUTO_INCREMENT,
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   KEY idx_audit_user (user_id),
   KEY idx_audit_server (id_data_server),
   KEY idx_audit_waktu (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
 -- 3. Paket layanan (PPPoE & Hotspot)
@@ -147,6 +147,11 @@ CREATE TABLE IF NOT EXISTS pelanggan (
   mac_address    VARCHAR(40) DEFAULT NULL,
   tanggal_masuk  DATE DEFAULT NULL,
   hari_tagihan   TINYINT NOT NULL DEFAULT 1,      -- tanggal jatuh tempo bulanan
+  id_master_topologi INT DEFAULT NULL,            -- ODP / topologi (master_topologi)
+  id_master_desa     INT DEFAULT NULL,            -- desa (master_desa)
+  port_odp           VARCHAR(20) DEFAULT NULL,    -- port ODP yang dipakai pelanggan
+  latitude           VARCHAR(30) DEFAULT NULL,    -- koordinat lokasi pelanggan
+  longitude          VARCHAR(30) DEFAULT NULL,
   status         ENUM('baru','aktif','isolir','nonaktif') NOT NULL DEFAULT 'baru',
   catatan        TEXT,
   created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -155,7 +160,9 @@ CREATE TABLE IF NOT EXISTS pelanggan (
   UNIQUE KEY uq_pelanggan_kode (kode),
   KEY idx_pelanggan_server (id_data_server, status),
   KEY idx_pelanggan_pppoe (username_pppoe),
-  KEY idx_pelanggan_agen (id_agen)
+  KEY idx_pelanggan_agen (id_agen),
+  KEY idx_pelanggan_topologi (id_master_topologi),
+  KEY idx_pelanggan_desa (id_master_desa)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
@@ -177,11 +184,53 @@ CREATE TABLE IF NOT EXISTS tagihan (
   status        ENUM('buat','terkirim','menunggu','lunas','jatuh_tempo','batal') NOT NULL DEFAULT 'buat',
   metode_bayar  VARCHAR(30) DEFAULT NULL,
   paid_at       DATETIME DEFAULT NULL,
+  img_invoice   VARCHAR(150) DEFAULT NULL,   -- berkas kwitansi PNG (dikirim ke WA)
   created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_tagihan_invoice (nomor_invoice),
   KEY idx_tagihan_pelanggan (id_pelanggan, status),
   KEY idx_tagihan_server_status (id_data_server, status, jatuh_tempo)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- 6b. Invoice penjualan barang/jasa (modul terpisah dari tagihan
+--     langganan — mengikuti invoice + invoice_list gratisinaja).
+--     Uraian butir diketik manual, tidak terikat paket maupun stok.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS invoice (
+  id            INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL DEFAULT 1,
+  nomor         VARCHAR(25) NOT NULL,             -- INV<yyMM><urut> per data server
+  tanggal       DATE NOT NULL,
+  jatuh_tempo   DATE DEFAULT NULL,
+  id_pelanggan  INT DEFAULT NULL,                 -- boleh kosong: pembeli umum/B2B
+  id_agen       INT DEFAULT NULL,
+  nama_tujuan   VARCHAR(100) DEFAULT NULL,        -- bila bukan pelanggan terdaftar
+  alamat_tujuan VARCHAR(200) DEFAULT NULL,
+  whatsapp_tujuan VARCHAR(20) DEFAULT NULL,
+  catatan       VARCHAR(255) DEFAULT NULL,        -- mis. catatan pengiriman
+  status        ENUM('buat','terkirim','lunas','batal') NOT NULL DEFAULT 'buat',
+  metode_bayar  VARCHAR(30) DEFAULT NULL,
+  paid_at       DATETIME DEFAULT NULL,
+  img_invoice   VARCHAR(150) DEFAULT NULL,
+  dibuat_oleh   INT DEFAULT NULL,
+  created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_invoice_nomor (nomor),
+  KEY idx_invoice_server (id_data_server, status, tanggal),
+  KEY idx_invoice_pelanggan (id_pelanggan)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS invoice_item (
+  id         INT NOT NULL AUTO_INCREMENT,
+  id_invoice INT NOT NULL,
+  tanggal    DATE NOT NULL,
+  uraian     VARCHAR(150) NOT NULL,               -- teks bebas, mis. 'ONU ZTE F663 V9'
+  quantity   DECIMAL(10,2) NOT NULL DEFAULT 1,
+  harga      DECIMAL(15,2) NOT NULL DEFAULT 0,
+  PRIMARY KEY (id),
+  KEY idx_invitem_invoice (id_invoice),
+  CONSTRAINT fk_invitem_invoice FOREIGN KEY (id_invoice) REFERENCES invoice (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS pembayaran (
@@ -209,7 +258,7 @@ CREATE TABLE IF NOT EXISTS rekening (
   status     ENUM('aktif','nonaktif') NOT NULL DEFAULT 'aktif',
   PRIMARY KEY (id),
   KEY idx_rek_server (id_data_server)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
 -- 6. Agen hotspot (saldo & mutasi)
@@ -240,7 +289,7 @@ CREATE TABLE IF NOT EXISTS agen_mutasi (
   created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_mutasi_agen (id_agen, created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS voucher (
   id          INT NOT NULL AUTO_INCREMENT,
@@ -299,7 +348,7 @@ CREATE TABLE IF NOT EXISTS setting_olt (
   updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_setting_olt (id_perangkat)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS master_onu (
   id             INT NOT NULL AUTO_INCREMENT,
@@ -331,7 +380,7 @@ CREATE TABLE IF NOT EXISTS redaman_log (
   cek_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_redaman_perangkat (id_perangkat, cek_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
 -- 8. Monitoring router: interface (KECUALI interface pppoe) & resource
@@ -348,6 +397,9 @@ CREATE TABLE IF NOT EXISTS setting_mikrotik (
   uptime         VARCHAR(60) DEFAULT NULL,
   board_name     VARCHAR(80) DEFAULT NULL,
   status         ENUM('active','down') NOT NULL DEFAULT 'active',
+  port_remote    SMALLINT DEFAULT NULL,             -- dst-port NAT remote ONU (web ONU pelanggan)
+  user_remote    VARCHAR(60) DEFAULT NULL,          -- akun panel yang sedang remote
+  last_remote    DATETIME DEFAULT NULL,             -- kunci 180 detik antar teknisi
   created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_mt_perangkat (id_perangkat),
@@ -366,7 +418,7 @@ CREATE TABLE IF NOT EXISTS interface_log (
   PRIMARY KEY (id),
   KEY idx_iface_setting (id_setting, cek_at),
   KEY idx_iface_nama (iface, cek_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS router_resource_log (
   id          BIGINT NOT NULL AUTO_INCREMENT,
@@ -377,7 +429,7 @@ CREATE TABLE IF NOT EXISTS router_resource_log (
   cek_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_res_setting (id_setting, cek_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
 -- 9. Peringatan issue pelanggan PPPoE (offline, isolir, redaman)
@@ -393,7 +445,7 @@ CREATE TABLE IF NOT EXISTS issue_pelanggan (
   PRIMARY KEY (id),
   KEY idx_issue_pelanggan (id_pelanggan, status),
   KEY idx_issue_status (status, created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
 -- 10. Tiket gangguan & pekerjaan teknisi/karyawan
@@ -444,7 +496,7 @@ CREATE TABLE IF NOT EXISTS pesan_template (
   konten       TEXT NOT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uq_template (id_data_server, jenis)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS wa_queue (
   id         BIGINT NOT NULL AUTO_INCREMENT,
@@ -452,6 +504,7 @@ CREATE TABLE IF NOT EXISTS wa_queue (
   tujuan     VARCHAR(20) NOT NULL,
   jenis      VARCHAR(40) NOT NULL,
   pesan      TEXT NOT NULL,
+  media      VARCHAR(255) DEFAULT NULL,      -- URL gambar/PDF dilampirkan (WHAPI sendMediaFromUrl)
   id_ref     INT DEFAULT NULL,
   status     ENUM('pending','terkirim','gagal') NOT NULL DEFAULT 'pending',
   percobaan  TINYINT NOT NULL DEFAULT 0,
@@ -460,7 +513,7 @@ CREATE TABLE IF NOT EXISTS wa_queue (
   sent_at    DATETIME DEFAULT NULL,
   PRIMARY KEY (id),
   KEY idx_waq_status (status, created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS wa_log (
   id         BIGINT NOT NULL AUTO_INCREMENT,
@@ -472,7 +525,7 @@ CREATE TABLE IF NOT EXISTS wa_log (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_walog_waktu (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
 -- 12. Pengaturan aplikasi (key/value) + snapshot status pppoe
@@ -482,7 +535,7 @@ CREATE TABLE IF NOT EXISTS setting_app (
   kunci   VARCHAR(60) NOT NULL,
   nilai   TEXT,
   PRIMARY KEY (id_data_server, kunci)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS pppoe_status (
   id_pelanggan INT NOT NULL,
@@ -493,7 +546,47 @@ CREATE TABLE IF NOT EXISTS pppoe_status (
   last_seen    DATETIME DEFAULT NULL,
   updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id_pelanggan)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- Master Topologi ODP & Master Desa (meniru gratisinaja)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS master_topologi (
+  id              INT NOT NULL AUTO_INCREMENT,
+  id_data_server  INT NOT NULL DEFAULT 1,
+  nama            VARCHAR(100) NOT NULL,
+  titik_koordinat VARCHAR(100) DEFAULT NULL,   -- "lat, long" titik ODP
+  jumlah_port     SMALLINT NOT NULL DEFAULT 16,
+  created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_topologi_nama (id_data_server, nama)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS master_desa (
+  id             INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL DEFAULT 1,
+  nama           VARCHAR(100) NOT NULL,
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_desa_nama (id_data_server, nama)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- Kas / laporan keuangan (pemasukan & pengeluaran)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS kas (
+  id             INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL DEFAULT 1,
+  tipe           ENUM('masuk','keluar') NOT NULL DEFAULT 'masuk',
+  kategori       VARCHAR(40) NOT NULL DEFAULT 'umum',  -- pembayaran, topup, gaji, perbaikan, listrik, dll
+  jumlah         DECIMAL(15,2) NOT NULL DEFAULT 0,
+  keterangan     VARCHAR(255) DEFAULT NULL,
+  id_ref         INT DEFAULT NULL,             -- id pembayaran/tagihan bila terkait
+  dibuat_oleh    INT DEFAULT NULL,             -- app_user.id
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_kas_server (id_data_server, tipe, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;
 

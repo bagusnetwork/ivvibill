@@ -59,13 +59,22 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 app.use(cookieParser());
 
-// rate-limit umum
+// rate-limit umum — /api/noc dikecualikan (polling ping tiap detik per target)
 app.use('/api/', rateLimit({
   windowMs: 60 * 1000,
   max: 240,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.path.startsWith('/noc/'),
   message: { error: 'Terlalu banyak permintaan' }
+}));
+// rate-limit khusus NOC (6 target × 1 ping/detik + jitter)
+app.use('/api/noc', rateLimit({
+  windowMs: 60 * 1000,
+  max: 900,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Terlalu banyak permintaan NOC' }
 }));
 
 // ---------- API (tanpa auth: health + webhook gateway) ---------
@@ -80,8 +89,12 @@ app.use('/api/auth', require('./src/routes/auth'));
 app.use('/api', require('./src/routes/tenant'));      // data_server + group_akses
 app.use('/api', require('./src/routes/pelanggan'));
 app.use('/api', require('./src/routes/tagihan'));
+app.use('/api', require('./src/routes/invoice'));      // invoice penjualan barang/jasa
 app.use('/api', require('./src/routes/agen'));
 app.use('/api', require('./src/routes/monitoring'));
+app.use('/api', require('./src/routes/master'));         // topologi ODP + desa
+app.use('/api', require('./src/routes/noc'));            // NOC ping test
+app.use('/api', require('./src/routes/keuangan'));       // kas & laporan keuangan
 app.use('/api', require('./src/routes/lain'));
 
 // ---------- upload (bukti pembayaran) ---------------------------
@@ -111,6 +124,8 @@ app.use('/agen', express.static(path.join(pub, 'agen')));
 app.use('/teknisi', express.static(path.join(pub, 'teknisi')));
 app.use('/pelanggan', express.static(path.join(pub, 'pelanggan')));
 app.use('/assets', express.static(path.join(pub, 'assets')));
+// halaman cetak invoice (dibuka panel via /cetak/invoice.html?no=…)
+app.use('/cetak', express.static(path.join(pub, 'cetak')));
 // unduhan APK — harus sebelum fallback 404
 app.use('/apk', express.static(path.join(pub, 'apk'), {
   dotfiles: 'deny', index: false, maxAge: '7d'
@@ -153,3 +168,9 @@ app.use((err, req, res, next) => {   // eslint-disable-line no-unused-vars
 
 process.on('SIGTERM', () => { scheduler.berhenti(); process.exit(0); });
 process.on('SIGINT', () => { scheduler.berhenti(); process.exit(0); });
+
+// Express 4 tidak meneruskan error dari handler async ke middleware — tanpa
+// penahan ini satu request yang jelek bisa mematikan seluruh panel.
+process.on('unhandledRejection', (e) => {
+  console.error('[ivvibill] janji ditolak:', (e && e.stack) || e);
+});

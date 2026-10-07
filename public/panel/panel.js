@@ -3,19 +3,24 @@
 
 const JUDUL = {
   dashboard: 'Dashboard', pelanggan: 'Pelanggan', tagihan: 'Tagihan',
+  invoice: 'Invoice Penjualan',
   pembayaran: 'Pembayaran', paket: 'Paket Layanan', voucher: 'Voucher',
   agen: 'Agen Hotspot', interface: 'Monitoring Interface', olt: 'Redaman OLT',
   issue: 'Issue PPPoE', perangkat: 'Perangkat', pengguna: 'Pengguna & Audit',
   wa: 'WhatsApp Gateway', setting: 'Pengaturan',
-  tenant: 'Data Server (ISP)', group: 'Group Akses'
+  tenant: 'Data Server (ISP)', group: 'Group Akses',
+  topologi: 'Master Topologi (ODP)', desa: 'Master Desa',
+  noc: 'NOC — Ping Test Internet', keuangan: 'Keuangan (Kas)', tiket: 'Tiket Gangguan'
 };
 
 const LABEL_MENU = {
   dashboard: 'Dashboard', pelanggan: 'Pelanggan', tagihan: 'Tagihan',
+  invoice: 'Invoice Penjualan',
   pembayaran: 'Pembayaran', paket: 'Paket', voucher: 'Voucher', agen: 'Agen',
   interface: 'Interface', olt: 'Redaman OLT', issue: 'Issue', perangkat: 'Perangkat',
   pengguna: 'Pengguna', wa: 'WhatsApp', setting: 'Pengaturan',
-  data_server: 'Data Server', group_akses: 'Group Akses'
+  data_server: 'Data Server', group_akses: 'Group Akses',
+  topologi: 'Topologi', desa: 'Desa', noc: 'NOC', keuangan: 'Keuangan', tiket: 'Tiket'
 };
 
 /** Hanya pemilik platform (superadmin) yang boleh memindah grup/pengguna antar tenant. */
@@ -24,26 +29,46 @@ function bolehTenantLain() {
   return !!(s && s.tenantSemua);
 }
 
-let PAKET_LIST = [], AGEN_LIST = [];
+let PAKET_LIST = [], AGEN_LIST = [], TOPO_LIST = [], DESA_LIST = [];
+let GRAFIK = null;
+let PLG_ROWS = [], PLG_TOTAL = 0, PLG_OFFSET = 0, PLG_TAB = '', PLG_WAKTU = null;
+const PLG_LIMIT = 50;
 
 // ============================================================ DASHBOARD
 async function loadDashboard() {
   try {
     const d = await API.get('/api/dashboard');
     const r = d.ringkas || {};
-    document.getElementById('dashCards').innerHTML = `
-      <div class="card green"><div class="label">Pelanggan aktif</div>
-        <div class="value">${r.pelanggan_aktif || 0}</div>
-        <div class="sub">PPPoE ${r.pppoe_aktif || 0} · Hotspot ${r.hotspot_aktif || 0}</div></div>
-      <div class="card blue"><div class="label">Pemasukan bulan ini</div>
-        <div class="value">${rupiah(r.pemasukan)}</div>
-        <div class="sub">${r.lunas_bulan_ini || 0} tagihan lunas</div></div>
-      <div class="card amber"><div class="label">Belum lunas</div>
-        <div class="value">${rupiah(r.belum_lunas)}</div>
-        <div class="sub">${r.jatuh_tempo || 0} lewat tempo</div></div>
-      <div class="card red"><div class="label">Issue terbuka</div>
-        <div class="value">${r.issue_open || 0}</div>
-        <div class="sub">${r.tiket_open || 0} tiket · ${r.voucher_stok || 0} voucher</div></div>`;
+    const t = d.tenant || {};
+
+    const peringatan = [];
+    if (t.expaired_date) {
+      const sisa = Math.ceil((new Date(t.expaired_date) - new Date()) / 86400000);
+      if (sisa < 0) peringatan.push(`<div class="peringatan bad">Masa aktif ${esc(t.nama_server || 'data server')} habis ${esc(tgl(t.expaired_date))} — perpanjang sebelum tagihan terhenti.</div>`);
+      else if (sisa <= 30) peringatan.push(`<div class="peringatan">Masa aktif ${esc(t.nama_server || 'data server')} tinggal ${sisa} hari (${esc(tgl(t.expaired_date))}).</div>`);
+    }
+    if (Number(r.pppoe_offline) > 0) peringatan.push(`<div class="peringatan">${r.pppoe_offline} pelanggan aktif sedang tidak terhubung ke router.</div>`);
+    document.getElementById('dashPeringatan').innerHTML = peringatan.join('');
+
+    const kartu = [
+      ['Pelanggan aktif', r.pelanggan_aktif || 0, `PPPoE ${r.pppoe_aktif || 0} · Hotspot ${r.hotspot_aktif || 0}`, 'green'],
+      ['Offline di router', r.pppoe_offline || 0, 'aktif tapi tidak terhubung', 'amber'],
+      ['Pemasukan bulan ini', rupiah(r.pemasukan), `${r.lunas_bulan_ini || 0} tagihan lunas · ${rupiah(r.pemasukan_bulan_lalu)} bulan lalu`, 'blue'],
+      ['Pemasukan tahun ini', rupiah(r.pemasukan_tahun), 'akumulasi pembayaran', 'blue'],
+      ['Belum lunas', rupiah(r.belum_lunas), `${r.jatuh_tempo || 0} lewat tempo`, 'amber'],
+      ['Isolir', r.pelanggan_isolir || 0, 'putus karena tunggakan', 'red'],
+      ['Register', r.pelanggan_baru || 0, 'belum diaktifkan', ''],
+      ['Tidak aktif', r.pelanggan_nonaktif || 0, 'pelanggan nonaktif', ''],
+      ['Pasang baru', r.pasang_baru_bulan || 0, `${r.pasang_baru_tahun || 0} sepanjang tahun`, 'green'],
+      ['Order pekerjaan', r.order_antrian || 0, `${r.order_dikerjakan || 0} dikerjakan · ${r.order_selesai_bulan || 0} selesai bulan ini`, 'blue'],
+      ['Issue terbuka', r.issue_open || 0, `${r.tiket_open || 0} tiket`, 'red'],
+      ['Voucher stok', r.voucher_stok || 0, `${r.voucher_terjual_bulan || 0} terjual bulan ini`, '']
+    ];
+    document.getElementById('dashCards').innerHTML = kartu.map(k => `
+      <div class="card ${k[3]}"><div class="label">${k[0]}</div><div class="value">${k[1]}</div>
+      <div class="sub">${k[2]}</div></div>`).join('');
+
+    await muatGrafik();
 
     document.getElementById('dashOlt').innerHTML = (d.olt || []).length ? d.olt.map(o => `
       <tr><td>${esc(o.nama)}</td><td>${esc(o.brand).toUpperCase()}</td>
@@ -65,39 +90,239 @@ async function loadDashboard() {
   } catch (e) { toast(e.message, true); }
 }
 
+/** Deret batang pemasukan vs piutang untuk satu tahun. */
+async function muatGrafik() {
+  try {
+    const sel = document.getElementById('dashTahun');
+    const k = await API.get(`/api/dashboard/keuangan?tahun=${sel.value || new Date().getFullYear()}`);
+    if (!sel.options.length) {
+      sel.innerHTML = (k.tahun_tersedia || [k.tahun]).map(y => `<option value="${y}">${y}</option>`).join('');
+    }
+    sel.value = k.tahun;
+    const jumlah = (a) => (a || []).reduce((x, y) => x + Number(y || 0), 0);
+    const hint = document.getElementById('dashChartHint');
+    if (!window.Chart) {
+      hint.textContent = `${k.tahun}: pemasukan ${rupiah(jumlah(k.pemasukan))} · piutang ${rupiah(jumlah(k.piutang))} (grafik butuh chart.js)`;
+      return;
+    }
+    if (GRAFIK) GRAFIK.destroy();
+    GRAFIK = new Chart(document.getElementById('dashChart'), {
+      type: 'bar',
+      data: {
+        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'],
+        datasets: [
+          { label: 'Pemasukan (lunas)', data: k.pemasukan, backgroundColor: '#2f6fed' },
+          { label: 'Piutang (belum lunas)', data: k.piutang, backgroundColor: '#d9a441' }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#dfe6f1' } } },
+        scales: {
+          x: { ticks: { color: '#9fb0c8' }, grid: { color: 'rgba(255,255,255,.06)' } },
+          y: { ticks: { color: '#9fb0c8' }, grid: { color: 'rgba(255,255,255,.06)' } }
+        }
+      }
+    });
+    hint.textContent = `${k.tahun}: ${jumlah(k.tagihan_lunas)} tagihan lunas · ${jumlah(k.pasang_baru)} pasang baru · piutang ${rupiah(jumlah(k.piutang))}`;
+  } catch (e) { toast(e.message, true); }
+}
+
 // ============================================================ PELANGGAN
 async function loadPelanggan() {
   try {
     const q = encodeURIComponent(document.getElementById('pq').value || '');
-    const st = document.getElementById('pstatus').value;
     const tp = document.getElementById('ptipe').value;
-    const d = await API.get(`/api/pelanggan?q=${q}&status=${st}&tipe=${tp}&limit=100`);
-    document.getElementById('tbPelanggan').innerHTML = (d.data || []).map(p => `
+    const d = await API.get(
+      `/api/pelanggan?q=${q}&status=${PLG_TAB}&tipe=${tp}&limit=${PLG_LIMIT}&offset=${PLG_OFFSET}`);
+    PLG_ROWS = d.data || [];
+    PLG_TOTAL = Number(d.total || 0);
+    const badgeRedaman = (s) => ({ ok: 'ok', warning: 'warn', kritis: 'bad' }[s] || 'mute');
+    const koor = (p) => {
+      const lat = p.latitude, long = p.longitude;
+      if (lat && long) return `<a href="https://google.com/maps/?q=${esc(lat)},${esc(long)}" target="_blank" rel="noopener" title="${esc(lat)}, ${esc(long)}">📍 koordinat</a>`;
+      if (p.titik_koordinat) return `<a href="https://google.com/maps/?q=${encodeURIComponent(p.titik_koordinat)}" target="_blank" rel="noopener" title="${esc(p.titik_koordinat)}">📍 ODP</a>`;
+      return '<span class="hint">-</span>';
+    };
+    document.getElementById('tbPelanggan').innerHTML = PLG_ROWS.map(p => `
       <tr>
+        <td><input type="checkbox" class="plgSel" value="${p.id}" onchange="plgPilihBaris()"></td>
         <td>${esc(p.kode)}</td>
-        <td><b>${esc(p.nama)}</b></td>
-        <td><span class="badge ${p.tipe === 'pppoe' ? 'info' : 'warn'}">${esc(p.tipe)}</span></td>
-        <td>${esc(p.nama_paket || '-')}</td>
+        <td><b>${esc(p.nama)}</b><div class="hint">${koor(p)}</div></td>
+        <td><span class="badge ${p.tipe === 'pppoe' ? 'info' : 'warn'}">${esc(p.tipe)}</span>
+          <div class="hint">${esc(p.nama_paket || '-')}</div></td>
+        <td>${esc(p.nama_topologi || '-')}${p.port_odp ? ' · port ' + esc(p.port_odp) : ''}
+          <div class="hint">${esc(p.nama_desa || '')}</div></td>
         <td>${esc(p.username_pppoe || '-')}</td>
-        <td>${esc(p.nomor_whatsapp || '-')}</td>
-        <td><span class="badge ${p.status === 'aktif' ? 'ok' : p.status === 'isolir' ? 'bad' : 'mute'}">${esc(p.status)}</span></td>
-        <td>${p.tipe === 'pppoe' ? (p.pppoe_online ? '<span class="badge ok">online</span>' : '<span class="badge mute">offline</span>') : '-'}</td>
+        <td>${esc(p.ip_lokal || '-')}
+          <div class="hint">MAC: ${esc(p.mac_onu || p.mac_address || '-')}</div></td>
+        <td>${esc(p.nomor_whatsapp || '-')}
+          ${p.nomor_whatsapp ? `<br><a class="btn sm wa" style="background:#16a34a;color:#fff" target="_blank" rel="noopener" href="https://wa.me/${esc(p.nomor_whatsapp)}">WA</a>` : ''}</td>
+        <td>${p.redaman_db != null
+          ? `<span class="badge ${badgeRedaman(p.status_redaman)}">${esc(p.redaman_db)} dB</span>`
+          : '<span class="badge mute">-</span>'}</td>
+        <td><span class="badge ${p.status === 'aktif' ? 'ok' : p.status === 'isolir' ? 'bad' : 'mute'}">${esc(p.status)}</span>
+          ${p.tipe === 'pppoe' ? `<div class="hint">${p.pppoe_online ? '🟢 online' : '⚪ offline'}</div>` : ''}</td>
         <td class="t-actions">
+          <button class="btn sm" onclick="remoteOnu(${p.id})" title="Auto-generate NAT MikroTik → web ONU">Remote ONU</button>
           <button class="btn sm secondary" onclick="formPelanggan(${esc(JSON.stringify(p))})">Ubah</button>
+          ${p.status !== 'aktif' ? `<button class="btn sm" onclick="plgStatus(${p.id},'aktif')">Aktifkan</button>` : ''}
+          ${p.status !== 'isolir' ? `<button class="btn sm secondary" onclick="plgStatus(${p.id},'isolir')">Isolir</button>` : ''}
+          ${p.status !== 'nonaktif' ? `<button class="btn sm secondary" onclick="plgStatus(${p.id},'nonaktif')">Nonaktif</button>` : ''}
+          <button class="btn sm ghost" onclick="plgHapus(${p.id})">Hapus</button>
         </td>
-      </tr>`).join('') || '<tr><td colspan="9" class="empty">Belum ada pelanggan</td></tr>';
-    document.getElementById('pelangganTotal').textContent = `${d.total || 0} data ditampilkan (maks 100)`;
+      </tr>`).join('') || '<tr><td colspan="11" class="empty">Belum ada pelanggan</td></tr>';
+
+    const halaman = Math.floor(PLG_OFFSET / PLG_LIMIT) + 1;
+    const terakhir = Math.max(1, Math.ceil(PLG_TOTAL / PLG_LIMIT));
+    document.getElementById('plgHalInfo').textContent = `Halaman ${halaman} / ${terakhir}`;
+    document.getElementById('pelangganTotal').textContent = `${PLG_TOTAL} pelanggan`;
+    document.getElementById('lnEkspor').href = `/api/pelanggan/export?q=${q}&status=${PLG_TAB}&tipe=${tp}`;
+    document.getElementById('plgAll').checked = false;
+    plgPilihBaris();
+    muatJumlah();
   } catch (e) { toast(e.message, true); }
+}
+
+/** Jumlah per status untuk label tab (mengikuti pencarian & tipe yang aktif). */
+async function muatJumlah() {
+  try {
+    const q = encodeURIComponent(document.getElementById('pq').value || '');
+    const tp = document.getElementById('ptipe').value;
+    const j = await API.get(`/api/pelanggan/jumlah?q=${q}&tipe=${tp}`);
+    document.getElementById('jnSemua').textContent = j.semua;
+    document.getElementById('jnAktif').textContent = j.aktif;
+    document.getElementById('jnBaru').textContent = j.baru;
+    document.getElementById('jnIsolir').textContent = j.isolir;
+    document.getElementById('jnNonaktif').textContent = j.nonaktif;
+  } catch (_) { /* label tab tidak sampai mengganggu daftar */ }
+}
+
+function plgTab(el) {
+  document.querySelectorAll('#plgTabs .tab').forEach(t => t.classList.remove('on'));
+  el.classList.add('on');
+  document.getElementById('plgUnmanageBox').style.display = 'none';
+  PLG_TAB = el.dataset.status || '';
+  PLG_OFFSET = 0;
+  loadPelanggan();
+}
+
+function plgCari() {
+  clearTimeout(PLG_WAKTU);
+  PLG_WAKTU = setTimeout(() => { PLG_OFFSET = 0; loadPelanggan(); }, 300);
+}
+
+function plgHal(arah) {
+  const maks = Math.max(0, Math.ceil((PLG_TOTAL - PLG_LIMIT) / PLG_LIMIT) * PLG_LIMIT);
+  PLG_OFFSET = Math.max(0, Math.min(PLG_OFFSET + arah * PLG_LIMIT, maks));
+  loadPelanggan();
+}
+
+function plgTerpilih() {
+  return [...document.querySelectorAll('.plgSel:checked')].map(c => Number(c.value));
+}
+
+function plgPilihAll(chk) {
+  document.querySelectorAll('.plgSel').forEach(c => { c.checked = chk.checked; });
+  plgPilihBaris();
+}
+
+function plgPilihBaris() {
+  const ids = plgTerpilih();
+  document.getElementById('plgBulk').style.display = ids.length ? 'flex' : 'none';
+  document.getElementById('plgBulkJml').textContent = `${ids.length} dipilih`;
+}
+
+function plgBulkBersihkan() {
+  document.querySelectorAll('.plgSel').forEach(c => { c.checked = false; });
+  document.getElementById('plgAll').checked = false;
+  plgPilihBaris();
+}
+
+async function plgBulkTerapkan() {
+  const ids = plgTerpilih();
+  if (!ids.length) return toast('Belum ada pelanggan dipilih', true);
+  const status = document.getElementById('plgBulkStatus').value;
+  try {
+    const r = await API.post('/api/pelanggan/status', { ids, status });
+    const gagal = (r.gagal || []).length;
+    toast(`${(r.diubah || []).length} pelanggan -> ${status}${gagal ? ` · ${gagal} gagal` : ''}`, gagal > 0);
+    (r.gagal || []).slice(0, 3).forEach(g => toast(`#${g.id}: ${g.alasan}`, true));
+    plgBulkBersihkan();
+    loadPelanggan();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function plgStatus(id, status) {
+  try {
+    const r = await API.post(`/api/pelanggan/${id}/status`, { status });
+    const g = (r.diubah || [])[0] || {};
+    const rb = g.router;
+    if (rb && rb.gagal && rb.gagal.length) toast(`Status diubah, tapi router gagal: ${rb.gagal[0]}`, true);
+    else if (rb && !rb.router) toast(`Status -> ${status} (username PPPoE tidak ditemukan di router)`, true);
+    else if (rb) toast(`${status === 'aktif' ? 'Secret diaktifkan' : 'Secret dimatikan'}${rb.sesi_dibuang ? ` · ${rb.sesi_dibuang} sesi putus` : ''}`);
+    else toast(`Status -> ${status} (pelanggan ini tidak punya secret PPPoE)`);
+    (r.gagal || []).slice(0, 3).forEach(x => toast(`#${x.id}: ${x.alasan}`, true));
+  } catch (e) { toast(e.message, true); }
+  loadPelanggan();
+}
+
+async function plgHapus(id) {
+  if (!confirm('Hapus pelanggan ini? Riwayat tagihan harus kosong.')) return;
+  try {
+    await API.del(`/api/pelanggan/${id}`);
+    toast('Pelanggan dihapus');
+    loadPelanggan();
+  } catch (e) { toast(e.message, true); }
+}
+
+function plgUnmanage() {
+  const box = document.getElementById('plgUnmanageBox');
+  const tampil = box.style.display === 'none';
+  box.style.display = tampil ? 'block' : 'none';
+  document.querySelectorAll('#plgTabs .tab').forEach(t => t.classList.remove('on'));
+  document.querySelector('#plgTabs .tab[data-unmanage]').classList.add('on');
+  if (tampil) muatUnmanage();
+}
+
+/** Lihat saja: sesi PPPoE di router yang tidak ada di daftar pelanggan. */
+async function muatUnmanage() {
+  const tb = document.getElementById('tbUnmanage');
+  tb.innerHTML = '<tr><td colspan="4" class="empty">Menghubungi router…</td></tr>';
+  try {
+    const d = await API.get('/api/pelanggan/unmanage');
+    document.getElementById('jnUnmanage').textContent = (d.data || []).length;
+    tb.innerHTML = (d.data || []).length ? d.data.map(s => `
+      <tr><td>${esc(s.router)}</td><td><b>${esc(s.user)}</b></td>
+        <td>${esc(s.address || '-')}</td><td>${esc(s.uptime || '-')}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty">Semua sesi PPPoE tercatat sebagai pelanggan</td></tr>';
+    if ((d.router_gagal || []).length) {
+      document.getElementById('unmanageHint').textContent =
+        `Router gagal disentuh: ${d.router_gagal.join(' | ')}`;
+    }
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`;
+  }
 }
 
 async function muatOpsi() {
   try {
-    const [pk, ag] = await Promise.all([API.get('/api/paket'), API.get('/api/agen')]);
+    const [pk, ag, tp, ds] = await Promise.all([
+      API.get('/api/paket'), API.get('/api/agen'),
+      API.get('/api/master/topologi'), API.get('/api/master/desa')
+    ]);
     PAKET_LIST = pk.data || []; AGEN_LIST = ag.data || [];
+    TOPO_LIST = tp.data || []; DESA_LIST = ds.data || [];
     const oPaket = PAKET_LIST.map(p => `<option value="${p.id}">${esc(p.nama_paket)} (${esc(p.jenis)})</option>`).join('');
     const oAgen = '<option value="">— tanpa agen —</option>' + AGEN_LIST.map(a => `<option value="${a.id}">${esc(a.nama)}</option>`).join('');
+    const kosong = (t) => `<option value="">— ${t} —</option>`;
+    const oTopo = kosong('tanpa topologi') + TOPO_LIST.map(t =>
+      `<option value="${t.id}">${esc(t.nama)} (${t.jumlah_terpakai}/${t.jumlah_port} port)</option>`).join('');
+    const oDesa = kosong('tanpa desa') + DESA_LIST.map(x => `<option value="${x.id}">${esc(x.nama)}</option>`).join('');
     ['fPaket', 'vPaket'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = oPaket; });
     const fA = document.getElementById('fAgen'); if (fA) fA.innerHTML = oAgen;
+    const fT = document.getElementById('fTopo'); if (fT) fT.innerHTML = oTopo;
+    const fD = document.getElementById('fDesa'); if (fD) fD.innerHTML = oDesa;
   } catch (_) {}
 }
 
@@ -114,6 +339,11 @@ function formPelanggan(p) {
   document.getElementById('fAgen').value = p && p.id_agen ? p.id_agen : '';
   document.getElementById('fStatus').value = p ? p.status : 'baru';
   document.getElementById('fAlamat').value = p ? (p.alamat || '') : '';
+  document.getElementById('fTopo').value = p && p.id_master_topologi ? p.id_master_topologi : '';
+  document.getElementById('fDesa').value = p && p.id_master_desa ? p.id_master_desa : '';
+  document.getElementById('fPortOdp').value = p ? (p.port_odp || '') : '';
+  document.getElementById('fLat').value = p ? (p.latitude || '') : '';
+  document.getElementById('fLong').value = p ? (p.longitude || '') : '';
   modalOpen('mPelanggan');
 }
 
@@ -128,7 +358,12 @@ async function simpanPelanggan() {
     password_pppoe: document.getElementById('fPass').value,
     id_agen: document.getElementById('fAgen').value || null,
     status: document.getElementById('fStatus').value,
-    alamat: document.getElementById('fAlamat').value
+    alamat: document.getElementById('fAlamat').value,
+    id_master_topologi: document.getElementById('fTopo').value || null,
+    id_master_desa: document.getElementById('fDesa').value || null,
+    port_odp: document.getElementById('fPortOdp').value || null,
+    latitude: document.getElementById('fLat').value || null,
+    longitude: document.getElementById('fLong').value || null
   };
   try {
     if (id) await API.put(`/api/pelanggan/${id}`, body);
@@ -137,7 +372,35 @@ async function simpanPelanggan() {
   } catch (e) { toast(e.message, true); }
 }
 
+// ------------------------------------------- export / import pelanggan
+function formImporPelanggan() {
+  document.getElementById('impFile').value = '';
+  document.getElementById('impHasil').innerHTML = '';
+  modalOpen('mImporPelanggan');
+}
+
+async function jalankanImport() {
+  const f = document.getElementById('impFile').files[0];
+  if (!f) return toast('Pilih file Excel atau CSV terlebih dulu', true);
+  const fd = new FormData();
+  fd.append('file', f);
+  const box = document.getElementById('impHasil');
+  box.textContent = 'Mengimpor…';
+  try {
+    const r = await API.post('/api/pelanggan/import', fd, true);
+    box.innerHTML = `<b>${r.sukses}</b> dari ${r.total} baris berhasil ditambahkan` +
+      (r.gagal ? `, <b>${r.gagal}</b> gagal:` : '.') +
+      (r.detail && r.detail.length
+        ? '\n' + r.detail.map(d => `Baris ${d.baris}${d.nama ? ' — ' + esc(d.nama) : ''}: ${esc(d.error)}`).join('\n')
+        : '');
+    toast(r.gagal ? `Import: ${r.sukses} berhasil, ${r.gagal} gagal` : `Import ${r.sukses} pelanggan selesai`, !!r.gagal);
+    loadPelanggan();
+  } catch (e) { box.textContent = ''; toast(e.message, true); }
+}
+
 // ============================================================ TAGIHAN
+let TQ_ROWS = [];
+
 async function loadTagihan() {
   try {
     const q = encodeURIComponent(document.getElementById('tq').value || '');
@@ -149,7 +412,8 @@ async function loadTagihan() {
       buat: 'info', terkirim: 'info', menunggu: 'warn',
       lunas: 'ok', jatuh_tempo: 'bad', batal: 'mute'
     }[s] || 'mute');
-    document.getElementById('tbTagihan').innerHTML = (d.data || []).map(t => `
+    TQ_ROWS = d.data || [];
+    document.getElementById('tbTagihan').innerHTML = TQ_ROWS.map(t => `
       <tr>
         <td><b>${esc(t.nomor_invoice)}</b></td>
         <td>${esc(t.nama_pelanggan)}</td>
@@ -158,9 +422,13 @@ async function loadTagihan() {
         <td>${tgl(t.jatuh_tempo)}</td>
         <td><span class="badge ${badge(t.status)}">${esc(t.status)}</span></td>
         <td class="t-actions">
+          <button class="btn sm ghost" onclick="cetakInvoice('${esc(t.nomor_invoice)}')" title="Cetak / simpan PDF invoice">Cetak</button>
           ${t.status !== 'lunas' && t.status !== 'batal'
             ? `<button class="btn sm" onclick="bayarTagihan(${t.id})">Bayar</button>
-               <button class="btn sm ghost" onclick="batalTagihan(${t.id})">Batal</button>` : '-'}
+               <button class="btn sm ghost" onclick="formKeteranganTagihan(${TQ_ROWS.indexOf(t)})">Keterangan</button>
+               <button class="btn sm ghost" onclick="batalTagihan(${t.id})">Batal</button>`
+            : t.status === 'lunas'
+              ? `<button class="btn sm ghost" onclick="kirimKwitansi(${t.id})" title="Kirim bukti lunas (gambar) ke WA">Kwitansi WA</button>` : ''}
         </td>
       </tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada tagihan</td></tr>';
   } catch (e) { toast(e.message, true); }
@@ -193,6 +461,241 @@ async function bayarTagihan(id) {
 async function batalTagihan(id) {
   if (!confirm('Batalkan tagihan ini?')) return;
   try { await API.post(`/api/tagihan/${id}/batal`, {}); toast('Dibatalkan'); loadTagihan(); }
+  catch (e) { toast(e.message, true); }
+}
+
+function cetakInvoice(no) {
+  window.open('/cetak/invoice.html?no=' + encodeURIComponent(no), '_blank');
+}
+
+// ------------------------------------------- tagihan satuan + kwitansi
+async function opsiPelanggan(pilih = '') {
+  // selalu ambil ulang: daftar pelanggan berubah saat pemilih tenant berpindah ISP
+  await muatPelangganCache();
+  return '<option value="">— pilih pelanggan —</option>' + PELANGGAN_CACHE.map(p =>
+    `<option value="${p.id}" ${String(p.id) === String(pilih) ? 'selected' : ''}>${esc(p.nama)} (${esc(p.kode || p.id)})</option>`).join('');
+}
+
+async function formTagihanSatuan() {
+  try {
+    document.getElementById('tsPel').innerHTML = await opsiPelanggan();
+    document.getElementById('tsPeriode').value = new Date().toISOString().slice(0, 7);
+    ['tsKet', 'tsJumlah', 'tsJt'].forEach(i => { document.getElementById(i).value = ''; });
+    document.getElementById('tsDiskon').value = '0';
+    modalOpen('mTagSatuan');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function simpanTagihanSatuan() {
+  try {
+    const r = await API.post('/api/tagihan/buat-satuan', {
+      id_pelanggan: document.getElementById('tsPel').value,
+      periode: document.getElementById('tsPeriode').value,
+      keterangan: document.getElementById('tsKet').value || null,
+      jumlah: document.getElementById('tsJumlah').value || null,
+      diskon: document.getElementById('tsDiskon').value || 0,
+      jatuh_tempo: document.getElementById('tsJt').value || null
+    });
+    modalClose('mTagSatuan');
+    toast(r.sudah_ada ? `Sudah ada tagihan periode ini (#${r.id})` : `Tagihan ${r.nomor} — ${rupiah(r.total)}`);
+    loadTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function formKeteranganTagihan(i) {
+  const t = TQ_ROWS[i];
+  if (!t) return;
+  document.getElementById('tkTagId').value = t.id;
+  document.getElementById('tkTagKet').value = t.keterangan || '';
+  modalOpen('mTagKet');
+}
+
+async function simpanKeteranganTagihan() {
+  const id = document.getElementById('tkTagId').value;
+  try {
+    await API.put(`/api/tagihan/${id}/keterangan`, { keterangan: document.getElementById('tkTagKet').value });
+    modalClose('mTagKet'); toast('Keterangan disimpan'); loadTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function kirimKwitansi(id) {
+  if (!confirm('Kirim ulang bukti lunas (gambar kwitansi) ke WhatsApp pelanggan?')) return;
+  try {
+    const r = await API.post(`/api/tagihan/${id}/kwitansi`, {});
+    toast(r.ok ? 'Kwitansi masuk antrean WA' : `Tidak dikirim: ${r.alasan || 'unknown'}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ INVOICE PENJUALAN
+let INV_ROWS = [], INV_ITEMS = [];
+
+async function loadInvoice() {
+  try {
+    const q = encodeURIComponent(document.getElementById('ivq').value || '');
+    const st = document.getElementById('ivstatus').value;
+    const [d, j] = await Promise.all([
+      API.get(`/api/invoice?q=${q}&status=${st}&limit=100`),
+      API.get('/api/invoice/jumlah')
+    ]);
+    document.getElementById('ivJml').textContent = j.semua || 0;
+    document.getElementById('ivLunas').textContent = rupiah(j.lunas ? j.lunas.nilai : 0);
+    const belum = ['buat', 'terkirim'].reduce((s, k) => s + (j[k] ? j[k].nilai : 0), 0);
+    document.getElementById('ivBelum').textContent = rupiah(belum);
+    const badge = (s) => ({ lunas: 'ok', terkirim: 'warn', buat: 'info', batal: 'mute' }[s] || 'mute');
+    INV_ROWS = d.data || [];
+    document.getElementById('tbInvoice').innerHTML = INV_ROWS.map(iv => `
+      <tr>
+        <td><b>${esc(iv.nomor)}</b></td>
+        <td>${tgl(iv.tanggal)}</td>
+        <td>${esc(iv.nama_tujuan || iv.nama_pelanggan || '-')}</td>
+        <td>${iv.butir || 0} butir</td>
+        <td class="t-num">${rupiah(iv.total)}</td>
+        <td><span class="badge ${badge(iv.status)}">${esc(iv.status)}</span></td>
+        <td class="t-actions">
+          <button class="btn sm ghost" onclick="cetakInvoiceBarang('${esc(iv.nomor)}')">Cetak</button>
+          ${iv.status === 'lunas'
+            ? `<button class="btn sm ghost" onclick="kirimKwitansiInvoice(${iv.id})">Kwitansi WA</button>`
+            : `<button class="btn sm" onclick="formInvoice(${INV_ROWS.indexOf(iv)})">Ubah</button>
+               <button class="btn sm" onclick="kirimInvoiceWA(${iv.id})">Kirim WA</button>
+               <button class="btn sm ghost" onclick="lunasInvoice(${iv.id})">Lunas</button>
+               <button class="btn sm ghost" onclick="batalInvoice(${iv.id})">Batal</button>`}
+        </td>
+      </tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada invoice</td></tr>';
+  } catch (e) { toast(e.message, true); }
+}
+
+async function formInvoice(i) {
+  const iv = typeof i === 'number' ? INV_ROWS[i] : null;
+  document.getElementById('mInvTitle').textContent = iv ? `Invoice ${iv.nomor}` : 'Invoice Penjualan Barang / Jasa';
+  document.getElementById('ivId').value = iv ? iv.id : '';
+  document.getElementById('ivTanggal').value = iv ? String(iv.tanggal).slice(0, 10) : new Date().toISOString().slice(0, 10);
+  document.getElementById('ivJt').value = iv && iv.jatuh_tempo ? String(iv.jatuh_tempo).slice(0, 10) : '';
+  document.getElementById('ivPel').innerHTML = await opsiPelanggan(iv ? iv.id_pelanggan : '');
+  document.getElementById('ivNama').value = iv ? (iv.nama_tujuan || '') : '';
+  document.getElementById('ivAlamat').value = iv ? (iv.alamat_tujuan || '') : '';
+  document.getElementById('ivWa').value = iv ? (iv.whatsapp_tujuan || '') : '';
+  document.getElementById('ivCatatan').value = iv ? (iv.catatan || '') : '';
+  document.getElementById('ivButirWrap').style.display = iv ? '' : 'none';
+  if (iv) await muatButirInvoice(iv.id);
+  modalOpen('mInvoice');
+}
+
+async function muatButirInvoice(id) {
+  const d = await API.get(`/api/invoice/${id}`);
+  INV_ITEMS = d.item || [];
+  const total = INV_ITEMS.reduce((s, it) => s + Number(it.quantity) * Number(it.harga), 0);
+  document.getElementById('ivTotalLabel').textContent = `total ${rupiah(total)}`;
+  document.getElementById('tbInvItem').innerHTML = INV_ITEMS.map(it => `
+    <tr><td>${tgl(it.tanggal)}</td><td>${esc(it.uraian)}</td>
+      <td class="t-num">${Number(it.quantity)}</td>
+      <td class="t-num">${rupiah(it.harga)}</td>
+      <td class="t-num">${rupiah(Number(it.quantity) * Number(it.harga))}</td>
+      <td class="t-actions">
+        <button class="btn sm ghost" onclick="formInvItem(${INV_ITEMS.indexOf(it)})">Ubah</button>
+        <button class="btn sm danger" onclick="hapusInvItem(${it.id})">Hapus</button></td></tr>`).join('')
+    || '<tr><td colspan="6" class="empty">Belum ada butir — klik "Tambah butir"</td></tr>';
+}
+
+async function simpanInvoice() {
+  const id = document.getElementById('ivId').value;
+  const body = {
+    tanggal: document.getElementById('ivTanggal').value,
+    jatuh_tempo: document.getElementById('ivJt').value || null,
+    id_pelanggan: document.getElementById('ivPel').value || null,
+    nama_tujuan: document.getElementById('ivNama').value || null,
+    alamat_tujuan: document.getElementById('ivAlamat').value || null,
+    whatsapp_tujuan: document.getElementById('ivWa').value || null,
+    catatan: document.getElementById('ivCatatan').value || null
+  };
+  try {
+    if (id) {
+      await API.put(`/api/invoice/${id}`, body);
+      toast('Invoice diperbarui');
+      modalClose('mInvoice');
+    } else {
+      const r = await API.post('/api/invoice', body);
+      toast(`Invoice ${r.nomor} dibuat — sekarang tambah butir barangnya`);
+      document.getElementById('ivId').value = r.id;
+      document.getElementById('mInvTitle').textContent = `Invoice ${r.nomor}`;
+      document.getElementById('ivButirWrap').style.display = '';
+      INV_ITEMS = [];
+      await muatButirInvoice(r.id);
+    }
+    loadInvoice();
+  } catch (e) { toast(e.message, true); }
+}
+
+function formInvItem(idx) {
+  const it = typeof idx === 'number' ? INV_ITEMS[idx] : null;
+  const id = document.getElementById('ivId').value;
+  if (!id) { toast('Simpan invoice dulu sebelum menambah butir', true); return; }
+  document.getElementById('mInvItemTitle').textContent = it ? 'Ubah Butir' : 'Tambah Butir';
+  document.getElementById('iviId').value = it ? it.id : '';
+  document.getElementById('iviTanggal').value = it ? String(it.tanggal).slice(0, 10) : new Date().toISOString().slice(0, 10);
+  document.getElementById('iviUraian').value = it ? it.uraian : '';
+  document.getElementById('iviQty').value = it ? it.quantity : 1;
+  document.getElementById('iviHarga').value = it ? it.harga : '';
+  modalOpen('mInvoiceItem');
+}
+
+async function simpanInvItem() {
+  const iid = document.getElementById('iviId').value;
+  const id = document.getElementById('ivId').value;
+  const body = {
+    tanggal: document.getElementById('iviTanggal').value,
+    uraian: document.getElementById('iviUraian').value,
+    quantity: document.getElementById('iviQty').value,
+    harga: document.getElementById('iviHarga').value
+  };
+  try {
+    if (iid) await API.put(`/api/invoice/item/${iid}`, body);
+    else await API.post(`/api/invoice/${id}/item`, body);
+    modalClose('mInvoiceItem'); toast('Butir tersimpan');
+    await muatButirInvoice(id); loadInvoice();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function hapusInvItem(iid) {
+  if (!confirm('Hapus butir ini?')) return;
+  const id = document.getElementById('ivId').value;
+  try {
+    await API.del(`/api/invoice/item/${iid}`);
+    await muatButirInvoice(id); loadInvoice();
+  } catch (e) { toast(e.message, true); }
+}
+
+function cetakInvoiceBarang(no) {
+  window.open('/cetak/invoice-barang.html?no=' + encodeURIComponent(no), '_blank');
+}
+
+async function kirimInvoiceWA(id) {
+  try {
+    const r = await API.post(`/api/invoice/${id}/kirim`, {});
+    toast(r.ok ? 'Invoice masuk antrean WA' : 'Gagal'); loadInvoice();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function lunasInvoice(id) {
+  if (!confirm('Tandai invoice LUNAS? Kwitansi gambar akan dikirim ke WhatsApp tujuan.')) return;
+  try {
+    const r = await API.post(`/api/invoice/${id}/lunas`, { metode: 'manual' });
+    toast(r.kwitansi && r.kwitansi.ok ? 'Lunas — kwitansi masuk antrean WA'
+      : `Lunas${r.kwitansi_gagal ? ' (kwitansi: ' + r.kwitansi_gagal + ')' : ''}`);
+    loadInvoice();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function kirimKwitansiInvoice(id) {
+  if (!confirm('Kirim ulang kwitansi invoice ke WhatsApp?')) return;
+  try {
+    const r = await API.post(`/api/invoice/${id}/kwitansi`, {});
+    toast(r.ok ? 'Kwitansi masuk antrean WA' : `Tidak dikirim: ${r.alasan || 'unknown'}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function batalInvoice(id) {
+  if (!confirm('Batalkan invoice ini?')) return;
+  try { await API.post(`/api/invoice/${id}/batal`, {}); toast('Dibatalkan'); loadInvoice(); }
   catch (e) { toast(e.message, true); }
 }
 
@@ -468,8 +971,15 @@ async function loadPerangkat() {
         <td><span class="badge ${p.status === 'aktif' ? 'ok' : 'mute'}">${esc(p.status)}</span></td>
         <td class="t-actions">
           <button class="btn sm ghost" onclick="testPerangkat(${p.id})">Tes</button>
+          <button class="btn sm ghost" onclick="bukaWebfig(${esc(JSON.stringify(p))})" title="Buka halaman web perangkat (WebFig/GUI)">WebFig</button>
           <button class="btn sm secondary" onclick="formPerangkat(${esc(JSON.stringify(p))})">Ubah</button>
         </td></tr>`).join('') || '<tr><td colspan="8" class="empty">Belum ada perangkat</td></tr>';
+    // WebFig/GUI: OLT memakai port web tersimpan; MikroTik selalu port 80/443 bawaan
+    window.bukaWebfig = (p) => {
+      const proto = p.use_https ? 'https' : 'http';
+      const port = p.tipe === 'olt' && p.port && ![80, 443].includes(Number(p.port)) ? ':' + p.port : '';
+      window.open(`${proto}://${p.alamat}${port}`, '_blank');
+    };
   } catch (e) { toast(e.message, true); }
 }
 function formPerangkat(p) {
@@ -731,6 +1241,348 @@ async function simpanTemplate() {
     await API.put('/api/setting', { template });
     toast('Template tersimpan');
   } catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ MASTER TOPOLOGI (ODP)
+let TOPO_ROWS = [];
+async function loadTopologi() {
+  try {
+    const d = await API.get('/api/master/topologi');
+    TOPO_ROWS = d.data || [];
+    document.getElementById('tbTopologi').innerHTML = TOPO_ROWS.map((t, i) => `
+      <tr><td><b>${esc(t.nama)}</b></td>
+        <td>${t.titik_koordinat
+          ? `<a href="https://google.com/maps/?q=${encodeURIComponent(t.titik_koordinat)}" target="_blank" rel="noopener">${esc(t.titik_koordinat)}</a>`
+          : '<span class="hint">-</span>'}</td>
+        <td class="t-num">${t.jumlah_port}</td>
+        <td class="t-num">${t.jumlah_terpakai}</td>
+        <td class="t-num">${t.sisa_port}</td>
+        <td class="t-actions">
+          <button class="btn sm secondary" onclick="formTopologi(${i})">Ubah</button>
+          <button class="btn sm danger" onclick="hapusTopologi(${t.id})">Hapus</button>
+        </td></tr>`).join('') || '<tr><td colspan="6" class="empty">Belum ada topologi ODP</td></tr>';
+  } catch (e) { toast(e.message, true); }
+}
+function formTopologi(i) {
+  const t = typeof i === 'number' ? TOPO_ROWS[i] : null;
+  document.getElementById('mTopoTitle').textContent = t ? 'Ubah Topologi ODP' : 'Tambah Topologi ODP';
+  document.getElementById('tpId').value = t ? t.id : '';
+  document.getElementById('tpNama').value = t ? t.nama : '';
+  document.getElementById('tpKoor').value = t ? (t.titik_koordinat || '') : '';
+  document.getElementById('tpPort').value = t ? Number(t.jumlah_port) : 16;
+  modalOpen('mTopologi');
+}
+async function simpanTopologi() {
+  const id = document.getElementById('tpId').value;
+  const body = {
+    nama: document.getElementById('tpNama').value,
+    titik_koordinat: document.getElementById('tpKoor').value || null,
+    jumlah_port: document.getElementById('tpPort').value || 16
+  };
+  try {
+    if (id) await API.put(`/api/master/topologi/${id}`, body);
+    else await API.post('/api/master/topologi', body);
+    modalClose('mTopologi'); toast('Tersimpan'); loadTopologi(); muatOpsi();
+  } catch (e) { toast(e.message, true); }
+}
+async function hapusTopologi(id) {
+  if (!confirm('Hapus topologi ODP ini?')) return;
+  try { await API.del(`/api/master/topologi/${id}`); toast('Dihapus'); loadTopologi(); muatOpsi(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ MASTER DESA
+let DESA_ROWS = [];
+async function loadDesa() {
+  try {
+    const d = await API.get('/api/master/desa');
+    DESA_ROWS = d.data || [];
+    document.getElementById('tbDesa').innerHTML = DESA_ROWS.map((x, i) => `
+      <tr><td><b>${esc(x.nama)}</b></td>
+        <td class="t-num">${Number(x.jumlah_pelanggan || 0)}</td>
+        <td class="t-actions">
+          <button class="btn sm secondary" onclick="formDesa(${i})">Ubah</button>
+          <button class="btn sm danger" onclick="hapusDesa(${x.id})">Hapus</button>
+        </td></tr>`).join('') || '<tr><td colspan="3" class="empty">Belum ada desa</td></tr>';
+  } catch (e) { toast(e.message, true); }
+}
+function formDesa(i) {
+  const x = typeof i === 'number' ? DESA_ROWS[i] : null;
+  document.getElementById('mDesaTitle').textContent = x ? 'Ubah Desa' : 'Tambah Desa';
+  document.getElementById('dsId').value = x ? x.id : '';
+  document.getElementById('dsNama').value = x ? x.nama : '';
+  modalOpen('mDesa');
+}
+async function simpanDesa() {
+  const id = document.getElementById('dsId').value;
+  const body = { nama: document.getElementById('dsNama').value };
+  try {
+    if (id) await API.put(`/api/master/desa/${id}`, body);
+    else await API.post('/api/master/desa', body);
+    modalClose('mDesa'); toast('Tersimpan'); loadDesa(); muatOpsi();
+  } catch (e) { toast(e.message, true); }
+}
+async function hapusDesa(id) {
+  if (!confirm('Hapus desa ini?')) return;
+  try { await API.del(`/api/master/desa/${id}`); toast('Dihapus'); loadDesa(); muatOpsi(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ NOC — PING TEST
+// Paket ICMP dikirim oleh router MikroTik terpilih lewat API RouterOS
+// (/ping), sehingga hasil mencerminkan rute internet jaringan pelanggan.
+const NOC_TARGET = [
+  { key: 'youtube', label: 'youtube.com' },
+  { key: 'facebook', label: 'facebook.com' },
+  { key: 'google-dns', label: '8.8.8.8 (Google DNS)' },
+  { key: 'cloudflare', label: '1.1.1.1 (Cloudflare)' },
+  { key: 'tiktok', label: 'tiktok.com' },
+  { key: 'mobilelegends', label: 'mobilelegends.com' }
+];
+let NOC_STATE = {};
+async function loadNoc() {
+  try {
+    Object.values(NOC_STATE).forEach(s => clearInterval(s.timer));
+    NOC_STATE = {};
+    const d = await API.get('/api/noc/router');
+    const sel = document.getElementById('nocRouter');
+    sel.innerHTML = (d.data || []).map(r =>
+      `<option value="${r.id}">${esc(r.nama)} (${esc(r.alamat)})</option>`).join('')
+      || '<option value="">— belum ada router —</option>';
+    const grid = document.getElementById('nocGrid');
+    grid.innerHTML = NOC_TARGET.map(t => `
+      <div class="console-pane">
+        <div class="console-head"><span><span class="dot" id="nocDot-${t.key}"></span><b>${esc(t.label)}</b></span>
+          <button class="btn sm ghost" id="nocBtn-${t.key}" onclick="nocToggle('${t.key}')">Jeda</button></div>
+        <div class="console-body" id="nocLog-${t.key}"></div>
+        <div class="console-stats" id="nocStat-${t.key}">kirim 0 | terima 0 | loss 0% | min - / avg - / max - ms</div>
+      </div>`).join('');
+    NOC_TARGET.forEach((t, i) => {
+      NOC_STATE[t.key] = { jalan: true, kirim: 0, terima: 0, min: null, max: null, total: 0,
+        timer: null };
+      nocBaris(t.key, `PING ${t.label} via router terpilih — polling tiap ~2 detik`, 'warn');
+      NOC_STATE[t.key].timer = setInterval(() => nocTick(t.key), 2000 + i * 200);
+    });
+    sel.onchange = nocBersih;
+  } catch (e) { toast(e.message, true); }
+}
+function nocBaris(key, teks, cls) {
+  const log = document.getElementById('nocLog-' + key);
+  if (!log) return;
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = '[' + new Date().toTimeString().slice(0, 8) + '] ' + teks;
+  log.appendChild(d);
+  while (log.childNodes.length > 80) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+function nocStat(key) {
+  const s = NOC_STATE[key];
+  const loss = s.kirim ? Math.round((s.kirim - s.terima) * 100 / s.kirim) : 0;
+  const avg = s.terima ? (s.total / s.terima).toFixed(1) : '-';
+  const el = document.getElementById('nocStat-' + key);
+  if (el) el.textContent = `kirim ${s.kirim} | terima ${s.terima} | loss ${loss}%` +
+    ` | min ${s.min === null ? '-' : s.min.toFixed(1)} / avg ${avg} / max ${s.max === null ? '-' : s.max.toFixed(1)} ms`;
+}
+async function nocTick(key) {
+  const vNoc = document.querySelector('[data-view="noc"]');
+  if (!vNoc || vNoc.style.display === 'none') return;   // halaman ditinggalkan → jangan boros
+  const s = NOC_STATE[key];
+  const rid = document.getElementById('nocRouter').value;
+  const dot = document.getElementById('nocDot-' + key);
+  if (!s.jalan || !rid) { if (dot) dot.className = 'dot off'; return; }
+  try {
+    const r = await fetch(`/api/noc/ping?target=${key}&router=${rid}`);
+    const d = await r.json();
+    s.kirim++;
+    if (dot) dot.className = 'dot ' + (d.ok ? 'on' : 'off');
+    if (d.ok) {
+      s.terima++;
+      if (d.ms != null) {
+        s.total += d.ms;
+        if (s.min === null || d.ms < s.min) s.min = d.ms;
+        if (s.max === null || d.ms > s.max) s.max = d.ms;
+      }
+      nocBaris(key, `64 bytes dari ${d.ip || ''}: ${d.raw || 'time=' + d.ms + 'ms'}`);
+    } else {
+      nocBaris(key, d.raw || 'Request timeout for icmp_seq ' + s.kirim,
+        /timeout/i.test(d.raw || '') ? 'warn' : 'err');
+    }
+    nocStat(key);
+  } catch (_) {
+    if (dot) dot.className = 'dot off';
+    nocBaris(key, 'gagal memanggil endpoint ping', 'err');
+  }
+}
+function nocToggle(key) {
+  const s = NOC_STATE[key];
+  s.jalan = !s.jalan;
+  document.getElementById('nocBtn-' + key).textContent = s.jalan ? 'Jeda' : 'Lanjut';
+}
+function nocSemua(nyalakan) {
+  NOC_TARGET.forEach(t => {
+    NOC_STATE[t.key].jalan = nyalakan;
+    const b = document.getElementById('nocBtn-' + t.key);
+    if (b) b.textContent = nyalakan ? 'Jeda' : 'Lanjut';
+  });
+}
+function nocBersih() {
+  NOC_TARGET.forEach(t => {
+    NOC_STATE[t.key] = { ...NOC_STATE[t.key], kirim: 0, terima: 0, min: null, max: null, total: 0 };
+    const log = document.getElementById('nocLog-' + t.key);
+    if (log) log.innerHTML = '';
+    nocStat(t.key);
+  });
+}
+
+// ============================================================ KEUANGAN (KAS)
+async function loadKeuangan() {
+  try {
+    const dari = document.getElementById('kDari').value;
+    const sampai = document.getElementById('kSampai').value;
+    const q = `?dari=${encodeURIComponent(dari)}&sampai=${encodeURIComponent(sampai)}`;
+    const [d, lap] = await Promise.all([
+      API.get('/api/keuangan/kas' + q), API.get('/api/keuangan/laporan' + q)
+    ]);
+    document.getElementById('kMasuk').textContent = rupiah(lap.total_masuk);
+    document.getElementById('kKeluar').textContent = rupiah(lap.total_keluar);
+    document.getElementById('kSaldo').textContent = rupiah(lap.saldo);
+    document.getElementById('tbKas').innerHTML = (d.data || []).map(k => `
+      <tr><td>${String(k.created_at).slice(0, 16)}</td>
+        <td><span class="badge ${k.tipe === 'masuk' ? 'ok' : 'bad'}">${esc(k.tipe)}</span></td>
+        <td>${esc(k.kategori)}</td>
+        <td class="t-num">${rupiah(k.jumlah)}</td>
+        <td>${esc(k.keterangan || '-')}</td>
+        <td>${esc(k.nama_user || '-')}</td>
+        <td class="t-actions">${k.kategori === 'pembayaran'
+          ? '<span class="hint">otomatis</span>'
+          : `<button class="btn sm danger" onclick="hapusKas(${k.id})">Hapus</button>`}</td></tr>`).join('')
+      || '<tr><td colspan="7" class="empty">Belum ada transaksi kas</td></tr>';
+  } catch (e) { toast(e.message, true); }
+}
+function formKas(tipe) {
+  document.getElementById('kkTipe').value = tipe || 'keluar';
+  document.getElementById('kkKategori').value = 'lainnya';
+  document.getElementById('kkJumlah').value = '';
+  document.getElementById('kkKet').value = '';
+  modalOpen('mKas');
+}
+async function simpanKas() {
+  try {
+    await API.post('/api/keuangan/kas', {
+      tipe: document.getElementById('kkTipe').value,
+      kategori: document.getElementById('kkKategori').value,
+      jumlah: document.getElementById('kkJumlah').value,
+      keterangan: document.getElementById('kkKet').value || null
+    });
+    modalClose('mKas'); toast('Tersimpan'); loadKeuangan();
+  } catch (e) { toast(e.message, true); }
+}
+async function hapusKas(id) {
+  if (!confirm('Hapus entri kas ini?')) return;
+  try { await API.del(`/api/keuangan/kas/${id}`); toast('Dihapus'); loadKeuangan(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ TIKET GANGGUAN
+let TIKET_ROWS = [];
+async function loadTiket() {
+  try {
+    const st = document.getElementById('tkStatus').value;
+    const d = await API.get('/api/tiket' + (st ? `?status=${st}` : ''));
+    TIKET_ROWS = d.data || [];
+    const badge = (s) => ({ baru: 'bad', diproses: 'warn', selesai: 'ok', ditutup: 'mute' }[s] || 'mute');
+    const pri = (p) => ({ tinggi: 'bad', sedang: 'warn', rendah: 'mute' }[p] || 'mute');
+    document.getElementById('tbTiket').innerHTML = TIKET_ROWS.map(t => `
+      <tr><td>${t.id}</td>
+        <td><b>${esc(t.nama_pelanggan)}</b><div class="hint">${esc((t.pesan || '').slice(0, 60))}</div></td>
+        <td>${esc(t.judul)}</td>
+        <td><span class="badge ${pri(t.prioritas)}">${esc(t.prioritas)}</span></td>
+        <td><span class="badge ${badge(t.status)}">${esc(t.status)}</span></td>
+        <td>${String(t.created_at).slice(0, 16)}</td>
+        <td class="t-actions">
+          <button class="btn sm" onclick="formTiket(${t.id})">Proses</button>
+        </td></tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada tiket</td></tr>';
+  } catch (e) { toast(e.message, true); }
+}
+async function formTiketBaru() {
+  if (!PELANGGAN_CACHE.length) await muatPelangganCache();
+  document.getElementById('tkId').value = '';
+  document.getElementById('tkPel').innerHTML = PELANGGAN_CACHE.map(p =>
+    `<option value="${p.id}">${esc(p.nama)} (${esc(p.kode || p.id)})</option>`).join('')
+    || '<option value="">— belum ada pelanggan —</option>';
+  document.getElementById('tkJudul').value = '';
+  document.getElementById('tkPesan').value = '';
+  document.getElementById('tkPri').value = 'sedang';
+  document.getElementById('tkStatusSel').style.display = 'none';
+  document.getElementById('tkJawab').style.display = 'none';
+  modalOpen('mTiket');
+}
+async function formTiket(id) {
+  const t = TIKET_ROWS.find(x => Number(x.id) === Number(id));
+  if (!t) return;
+  document.getElementById('tkId').value = t.id;
+  document.getElementById('tkPel').innerHTML = `<option value="${t.id_pelanggan}">${esc(t.nama_pelanggan)}</option>`;
+  document.getElementById('tkJudul').value = t.judul;
+  document.getElementById('tkPesan').value = t.pesan || '';
+  document.getElementById('tkPri').value = t.prioritas;
+  document.getElementById('tkStatusSel').style.display = '';
+  document.getElementById('tkStatusSel').value = t.status;
+  document.getElementById('tkJawab').style.display = '';
+  document.getElementById('tkJawabIsi').value = t.jawaban || '';
+  modalOpen('mTiket');
+}
+async function simpanTiket() {
+  const id = document.getElementById('tkId').value;
+  try {
+    if (id) {
+      await API.put(`/api/tiket/${id}`, {
+        status: document.getElementById('tkStatusSel').value,
+        jawaban: document.getElementById('tkJawabIsi').value || null
+      });
+      toast('Tiket diperbarui');
+    } else {
+      await API.post('/api/tiket', {
+        id_pelanggan: document.getElementById('tkPel').value,
+        judul: document.getElementById('tkJudul').value,
+        pesan: document.getElementById('tkPesan').value,
+        prioritas: document.getElementById('tkPri').value
+      });
+      toast('Tiket dibuat');
+    }
+    modalClose('mTiket'); loadTiket();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ REMOTE ONU
+// Auto-generate/update rule dst-nat MikroTik → web ONU pelanggan
+// (port_remote di Setting MikroTik), dengan kunci 180 detik antar teknisi.
+async function remoteOnu(id) {
+  toast('Menyiapkan remote ONU…');
+  try {
+    const r = await API.post(`/api/pelanggan/${id}/remote-onu`, {});
+    document.getElementById('roInfo').innerHTML = `
+      <div class="form-grid">
+        <div><div class="hint">Nama</div><b>${esc(r.nama)}</b></div>
+        <div><div class="hint">Alamat</div><b>${esc(r.alamat)}</b></div>
+        <div><div class="hint">IP pelanggan</div><b>${esc(r.ip_pelanggan)}</b></div>
+        <div><div class="hint">Router · port remote</div><b>${esc(r.router)} · ${r.port_remote}</b></div>
+        <div><div class="hint">NAT rule</div><b>${r.nat === 'update' ? 'to-addresses diupdate' : 'rule baru dibuat'}</b></div>
+        <div><div class="hint">IP dari</div><b>${esc(r.via)}</b></div>
+      </div>`;
+    const a = document.getElementById('roBuka');
+    a.href = r.link; a.textContent = `🌐 Buka ${r.link}`;
+    modalOpen('mRemoteOnu');
+  } catch (e) { toast(e.message, true); }
+}
+
+// cache pelanggan sederhana untuk dropdown tiket
+let PELANGGAN_CACHE = [];
+async function muatPelangganCache() {
+  try {
+    const d = await API.get('/api/pelanggan?limit=200');
+    PELANGGAN_CACHE = d.data || [];
+  } catch (_) { PELANGGAN_CACHE = []; }
 }
 
 // ============================================================ INIT

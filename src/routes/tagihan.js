@@ -89,6 +89,39 @@ router.get('/tagihan', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// --------------------------------------------- data invoice cetak
+// (didahulukan supaya tidak tertangkap /tagihan/:id)
+router.get('/tagihan/invoice-data', async (req, res, next) => {
+  try {
+    const nomor = v.str(req.query.nomor, { min: 3, max: 25 });
+    const ts = tenantSql(req, 't.id_data_server');
+    const u = req.user;
+    const params = [nomor, ...ts.params];
+    let scope = '';
+    if (u.role === 'pelanggan') { scope = ' AND t.id_pelanggan = ?'; params.push(u.id_ref); }
+    else if (u.role === 'agen') { scope = ' AND p.id_agen = ?'; params.push(u.id_ref); }
+    const t = await db.one(
+      `SELECT t.*, p.nama AS nama_pelanggan, p.kode AS kode_pelanggan,
+              p.alamat AS alamat_pelanggan, p.nomor_whatsapp AS wa_pelanggan,
+              p.username_pppoe, pk.nama_paket, pk.harga
+       FROM tagihan t
+       JOIN pelanggan p ON p.id = t.id_pelanggan
+       LEFT JOIN paket pk ON pk.id = p.id_paket
+       WHERE t.nomor_invoice = ?${ts.sql}${scope}`, params);
+    if (!t) return res.status(404).json({ error: 'Tagihan tidak ada' });
+    const srv = await db.one(
+      `SELECT nama_server, nama_pemilik, alamat, logo, nomor_whatsapp, email
+       FROM data_server WHERE id = ?`, [t.id_data_server]);
+    const bayar = await db.q(
+      `SELECT jumlah, metode, status, keterangan, created_at
+       FROM pembayaran WHERE id_tagihan = ? AND status = 'diterima' ORDER BY id`, [t.id]);
+    const rek = await db.q(
+      `SELECT bank, no_rek, atas_nama FROM rekening
+       WHERE id_data_server = ? AND status = 'aktif' ORDER BY id`, [t.id_data_server]);
+    res.json({ tagihan: t, data_server: srv, pembayaran: bayar, rekening: rek });
+  } catch (e) { next(e); }
+});
+
 router.get('/tagihan/:id', async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });
@@ -117,6 +150,57 @@ router.post('/tagihan/buat', requirePJ(), requireMenu('tagihan', 'tambah'), asyn
 router.post('/tagihan/kirim-wa', requirePJ(), requireMenu('tagihan', 'kirim'), async (req, res, next) => {
   try { res.json(await billing.kirimTagihanWajib(tenantAktif(req), 100)); }
   catch (e) { next(e); }
+});
+
+/** Buat tagihan satuan — keterangan internet diketik manual, jumlah bebas. */
+router.post('/tagihan/buat-satuan', requirePJ(), requireMenu('tagihan', 'tambah'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const idPelanggan = v.num(req.body.id_pelanggan, { int: true, min: 1 });
+    const periode = v.str(req.body.periode, { min: 7, max: 7 });
+    if (!/^\d{4}-\d{2}$/.test(periode || '')) return res.status(400).json({ error: 'Periode harus YYYY-MM' });
+    const r = await billing.buatTagihanSatuan({
+      idDataServer: ds,
+      idPelanggan,
+      periode,
+      keterangan: v.str(req.body.keterangan, { max: 255, def: null }),
+      jumlah: req.body.jumlah === '' || req.body.jumlah == null ? null : v.num(req.body.jumlah, { min: 0, max: 1e9 }),
+      diskon: v.num(req.body.diskon, { min: 0, max: 1e9, def: 0 }),
+      jatuhTempo: v.tgl(req.body.jatuh_tempo, null)
+    });
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'buat_tagihan_satuan', `pelanggan #${idPelanggan} ${periode}`, (req.ip || '').replace('::ffff:', '')]);
+    res.json(r);
+  } catch (e) { next(e); }
+});
+
+/** Ubah keterangan/uraian tagihan sebelum dikirim. */
+router.put('/tagihan/:id/keterangan', requirePJ(), requireMenu('tagihan', 'ubah'), async (req, res, next) => {
+  try {
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const t = await cariTagihan(req, id);
+    if (!t) return res.status(404).json({ error: 'Tagihan tidak ada' });
+    if (t.status === 'lunas') return res.status(400).json({ error: 'Tagihan sudah lunas' });
+    const keterangan = v.str(req.body.keterangan, { min: 3, max: 255 });
+    await db.run('UPDATE tagihan SET keterangan = ? WHERE id = ?', [keterangan, id]);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, t.id_data_server, 'ubah_keterangan_tagihan', `#${id}`, (req.ip || '').replace('::ffff:', '')]);
+    res.json({ ok: true, keterangan });
+  } catch (e) { next(e); }
+});
+
+/** Kirim ulang kwitansi lunas (gambar PNG) ke WhatsApp pelanggan. */
+router.post('/tagihan/:id/kwitansi', requirePJ(), requireMenu('tagihan', 'kirim'), async (req, res, next) => {
+  try {
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const t = await cariTagihan(req, id);
+    if (!t) return res.status(404).json({ error: 'Tagihan tidak ada' });
+    if (t.status !== 'lunas') return res.status(400).json({ error: 'Kwitansi hanya untuk tagihan lunas' });
+    const r = await billing.kirimKwitansi(id);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, t.id_data_server, 'kirim_kwitansi', `tagihan #${id}`, (req.ip || '').replace('::ffff:', '')]);
+    res.json(r);
+  } catch (e) { next(e); }
 });
 
 router.post('/tagihan/:id/batal', requirePJ(), requireMenu('tagihan', 'batal'), async (req, res, next) => {

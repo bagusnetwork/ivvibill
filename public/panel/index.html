@@ -13,6 +13,20 @@
   .tenant-pick select { background:transparent; color:inherit; border:1px solid rgba(255,255,255,.2);
     border-radius:8px; padding:5px 8px; font:inherit; max-width:190px; }
   .tenant-pick option { color:#111; }
+  /* Fase 7: tab status pelanggan + paginasi */
+  .tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+  .tab { background:transparent; border:1px solid rgba(255,255,255,.16); color:inherit;
+    border-radius:999px; padding:6px 14px; font:inherit; font-size:13px; cursor:pointer; }
+  .tab:hover { border-color:rgba(255,255,255,.4); }
+  .tab.on { background:#2f6fed; border-color:#2f6fed; color:#fff; }
+  .pager { display:flex; align-items:center; gap:10px; padding:10px 14px;
+    border-top:1px solid rgba(255,255,255,.1); font-size:13px; }
+  .pager .hint { margin:0; }
+  .file-btn input[type=file] { display:none; }
+  #dashChart { max-height:280px; }
+  .peringatan { border:1px solid #d9a441; background:rgba(217,164,65,.12);
+    border-radius:10px; padding:10px 14px; margin-bottom:12px; font-size:14px; }
+  .peringatan.bad { border-color:#e5484d; background:rgba(229,72,77,.12); }
 </style>
 <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
 </head>
@@ -26,6 +40,7 @@
       <a data-page="dashboard" data-menu="dashboard"><span class="ic">📊</span> Dashboard</a>
       <a data-page="pelanggan" data-menu="pelanggan"><span class="ic">👥</span> Pelanggan</a>
       <a data-page="tagihan" data-menu="tagihan"><span class="ic">🧾</span> Tagihan</a>
+      <a data-page="invoice" data-menu="invoice"><span class="ic">📄</span> Invoice Penjualan</a>
       <a data-page="pembayaran" data-menu="pembayaran"><span class="ic">💳</span> Pembayaran</a>
     </nav>
     <div class="nav-group">Hotspot</div>
@@ -38,7 +53,15 @@
     <nav class="nav">
       <a data-page="interface" data-menu="interface"><span class="ic">🌐</span> Interface Router</a>
       <a data-page="olt" data-menu="olt"><span class="ic">📡</span> Redaman OLT</a>
+      <a data-page="noc" data-menu="noc"><span class="ic">📡</span> NOC Ping Test</a>
       <a data-page="issue" data-menu="issue"><span class="ic">⚠️</span> Issue PPPoE</a>
+      <a data-page="tiket" data-menu="tiket"><span class="ic">🎫</span> Tiket Gangguan</a>
+    </nav>
+    <div class="nav-group">Master &amp; Keuangan</div>
+    <nav class="nav">
+      <a data-page="topologi" data-menu="topologi"><span class="ic">🧩</span> Topologi (ODP)</a>
+      <a data-page="desa" data-menu="desa"><span class="ic">🏘️</span> Desa</a>
+      <a data-page="keuangan" data-menu="keuangan"><span class="ic">💰</span> Keuangan (Kas)</a>
     </nav>
     <div class="nav-group">Sistem</div>
     <nav class="nav">
@@ -67,7 +90,12 @@
     <div class="content">
       <!-- ================= DASHBOARD ================= -->
       <div data-view="dashboard" data-onload="loadDashboard">
+        <div id="dashPeringatan"></div>
         <div class="cards" id="dashCards"><div class="card"><div class="label">Memuat…</div><div class="value">…</div></div></div>
+        <div class="panel"><div class="panel-head"><h2>Keuangan 12 bulan</h2>
+          <select id="dashTahun" onchange="muatGrafik()"></select></div>
+          <div class="panel-body"><canvas id="dashChart" height="90"></canvas>
+            <p class="hint" id="dashChartHint"></p></div></div>
         <div class="grid2">
           <div class="panel"><div class="panel-head"><h2>Status OLT</h2></div>
             <div class="panel-body"><table><thead><tr><th>OLT</th><th>Brand</th><th>Cek terakhir</th><th>Status</th></tr></thead>
@@ -84,23 +112,57 @@
 
       <!-- ================= PELANGGAN ================= -->
       <div data-view="pelanggan" data-onload="loadPelanggan" style="display:none">
+        <div class="tabs" id="plgTabs">
+          <button class="tab on" data-status="" onclick="plgTab(this)">Semua <span id="jnSemua">0</span></button>
+          <button class="tab" data-status="aktif" onclick="plgTab(this)">Aktif <span id="jnAktif">0</span></button>
+          <button class="tab" data-status="baru" onclick="plgTab(this)">Register <span id="jnBaru">0</span></button>
+          <button class="tab" data-status="isolir" onclick="plgTab(this)">Isolir <span id="jnIsolir">0</span></button>
+          <button class="tab" data-status="nonaktif" onclick="plgTab(this)">Tidak Aktif <span id="jnNonaktif">0</span></button>
+          <button class="tab" data-unmanage="1" onclick="plgUnmanage()">Unmanage <span id="jnUnmanage">?</span></button>
+        </div>
         <div class="toolbar">
-          <input id="pq" placeholder="Cari nama / kode / username…" oninput="loadPelanggan()">
-          <select id="pstatus" onchange="loadPelanggan()">
-            <option value="">Semua status</option><option>aktif</option><option>baru</option>
-            <option>isolir</option><option>nonaktif</option></select>
+          <input id="pq" placeholder="Cari nama / kode / username…" oninput="plgCari()">
           <select id="ptipe" onchange="loadPelanggan()">
             <option value="">Semua tipe</option><option value="pppoe">PPPoE</option>
             <option value="hotspot">Hotspot</option></select>
           <div class="spacer"></div>
+          <a class="btn secondary" href="/api/pelanggan/template" download>Template Excel</a>
+          <a class="btn secondary" id="lnEkspor" href="/api/pelanggan/export" download>Export</a>
+          <button class="btn secondary" onclick="formImporPelanggan()">Import</button>
           <button class="btn" onclick="formPelanggan()">+ Tambah Pelanggan</button>
         </div>
+        <div class="toolbar" id="plgBulk" style="display:none">
+          <span class="hint" id="plgBulkJml">0 dipilih</span>
+          <select id="plgBulkStatus">
+            <option value="aktif">aktif</option><option value="baru">baru</option>
+            <option value="isolir">isolir</option><option value="nonaktif">nonaktif</option></select>
+          <button class="btn sm" onclick="plgBulkTerapkan()">Terapkan ke terpilih</button>
+          <button class="btn sm secondary" onclick="plgBulkBersihkan()">Batal pilih</button>
+        </div>
         <div class="panel"><div class="panel-body" style="padding:0">
-          <table><thead><tr><th>Kode</th><th>Nama</th><th>Tipe</th><th>Paket</th>
-            <th>Username</th><th>WA</th><th>Status</th><th>Koneksi</th><th class="t-actions">Aksi</th></tr></thead>
-          <tbody id="tbPelanggan"><tr><td colspan="9" class="empty">Memuat…</td></tr></tbody></table>
+          <table><thead><tr><th style="width:34px"><input type="checkbox" id="plgAll" onchange="plgPilihAll(this)"></th>
+            <th>Kode</th><th>Nama</th><th>Tipe / Paket</th><th>Topologi / Desa</th>
+            <th>Username</th><th>IP lokal / MAC</th><th>WhatsApp</th><th>Redaman</th><th>Status</th>
+            <th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbPelanggan"><tr><td colspan="11" class="empty">Memuat…</td></tr></tbody></table>
+          <div class="pager">
+            <button class="btn sm secondary" onclick="plgHal(-1)">← Sebelumnya</button>
+            <span class="hint" id="plgHalInfo"></span>
+            <button class="btn sm secondary" onclick="plgHal(1)">Berikutnya →</button>
+          </div>
         </div></div>
         <p class="hint" id="pelangganTotal"></p>
+
+        <div class="panel" id="plgUnmanageBox" style="display:none">
+          <div class="panel-head"><h2>PPPoE aktif tanpa tagihan</h2>
+            <button class="btn sm secondary" onclick="muatUnmanage()">Muat ulang</button></div>
+          <div class="panel-body" style="padding:0">
+            <table><thead><tr><th>Router</th><th>Username</th><th>IP</th><th>Uptime</th></tr></thead>
+            <tbody id="tbUnmanage"><tr><td colspan="4" class="empty">Belum dimuat</td></tr></tbody></table>
+          </div>
+          <div class="panel-body"><p class="hint" id="unmanageHint">
+            Sesi PPPoE di router yang usernya tidak ada di daftar pelanggan — perlu didata atau dimatikan manual.</p></div>
+        </div>
       </div>
 
       <!-- ================= TAGIHAN ================= -->
@@ -114,6 +176,7 @@
             <option value="batal">batal</option></select>
           <div class="spacer"></div>
           <button class="btn secondary" onclick="kirimTagihanWA()">📨 Kirim via WA</button>
+          <button class="btn secondary" onclick="formTagihanSatuan()">+ Tagihan Satuan</button>
           <button class="btn" onclick="buatTagihan()">+ Buat Tagihan Bulanan</button>
         </div>
         <div class="cards">
@@ -125,6 +188,31 @@
             <th class="t-num">Total</th><th>Jatuh tempo</th><th>Status</th><th class="t-actions">Aksi</th></tr></thead>
           <tbody id="tbTagihan"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
+      </div>
+
+      <!-- ================= INVOICE PENJUALAN BARANG/JASA ================= -->
+      <div data-view="invoice" data-onload="loadInvoice" style="display:none">
+        <div class="toolbar">
+          <input id="ivq" placeholder="Cari nomor / nama / uraian…" oninput="loadInvoice()">
+          <select id="ivstatus" onchange="loadInvoice()">
+            <option value="">Semua status</option><option value="buat">buat</option>
+            <option value="terkirim">terkirim</option><option value="lunas">lunas</option>
+            <option value="batal">batal</option></select>
+          <div class="spacer"></div>
+          <button class="btn" onclick="formInvoice()">+ Invoice Penjualan</button>
+        </div>
+        <div class="cards">
+          <div class="card blue"><div class="label">Invoice</div><div class="value" id="ivJml">0</div></div>
+          <div class="card green"><div class="label">Nilai lunas</div><div class="value" id="ivLunas">Rp 0</div></div>
+          <div class="card red"><div class="label">Nilai belum lunas</div><div class="value" id="ivBelum">Rp 0</div></div>
+        </div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Nomor</th><th>Tanggal</th><th>Kepada</th><th>Butir</th>
+            <th class="t-num">Total</th><th>Status</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbInvoice"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <p class="hint">Invoice penjualan (barang/jasa) terpisah dari tagihan langganan internet:
+          uraian barang diketik manual, tidak memotong stok, dan tidak ikut siklus tagihan bulanan.</p>
       </div>
 
       <!-- ================= PEMBAYARAN ================= -->
@@ -229,6 +317,100 @@
           <table><thead><tr><th>Pelanggan</th><th>Username</th><th>Tipe</th>
             <th>Pesan</th><th>Waktu</th><th class="t-actions">Aksi</th></tr></thead>
           <tbody id="tbIssue"><tr><td colspan="6" class="empty">Tidak ada issue</td></tr></tbody></table></div></div>
+      </div>
+
+      <!-- ================= TIKET GANGGUAN ================= -->
+      <div data-view="tiket" data-onload="loadTiket" style="display:none">
+        <div class="toolbar">
+          <select id="tkStatus" onchange="loadTiket()">
+            <option value="">Semua status</option><option>baru</option><option>diproses</option>
+            <option>selesai</option><option>ditutup</option></select>
+          <div class="spacer"></div>
+          <button class="btn" onclick="formTiketBaru()">+ Tiket Baru</button>
+        </div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>#</th><th>Pelanggan</th><th>Judul</th>
+            <th>Prioritas</th><th>Status</th><th>Waktu</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbTiket"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <p class="hint">Saat tiket baru dibuat, notifikasi WhatsApp otomatis dikirim ke pelanggan
+           (template <b>tiket</b>). Proses: baru → diproses → selesai → ditutup.</p>
+      </div>
+
+      <!-- ================= NOC PING TEST ================= -->
+      <div data-view="noc" data-onload="loadNoc" style="display:none">
+        <style>
+          .console-pane { background:#0d1117; border-radius:8px; overflow:hidden; margin-bottom:12px; }
+          .console-head { background:#161b22; color:#c9d1d9; padding:6px 10px; font-size:13px; display:flex; justify-content:space-between; align-items:center; }
+          .console-body { height:170px; overflow-y:auto; padding:8px 10px; font-family:Consolas,Menlo,monospace; font-size:12px; line-height:1.5; color:#3fb950; white-space:nowrap; }
+          .console-body .err { color:#f85149; } .console-body .warn { color:#d29922; }
+          .console-stats { background:#161b22; color:#8b949e; padding:4px 10px; font-size:11px; font-family:monospace; }
+          .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:#8b949e; }
+          .dot.on { background:#3fb950; } .dot.off { background:#f85149; }
+          #nocGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:12px; }
+        </style>
+        <div class="toolbar">
+          <label class="hint" style="align-self:center">Ping dari router:</label>
+          <select id="nocRouter"></select>
+          <div class="spacer"></div>
+          <button class="btn secondary" onclick="nocSemua(true)">▶ Jalankan Semua</button>
+          <button class="btn secondary" onclick="nocSemua(false)">⏸ Jeda Semua</button>
+          <button class="btn secondary" onclick="nocBersih()">Bersihkan</button>
+        </div>
+        <div id="nocGrid"></div>
+        <p class="hint">Paket ICMP dikirim <b>oleh router MikroTik terpilih lewat koneksi API</b>
+          (perintah <code>/ping</code> RouterOS), sehingga hasil mencerminkan rute internet sebenarnya
+          dari sisi jaringan pelanggan — bukan dari server hosting.</p>
+      </div>
+
+      <!-- ================= TOPOLOGI (ODP) ================= -->
+      <div data-view="topologi" data-onload="loadTopologi" style="display:none">
+        <div class="toolbar"><div class="spacer"></div>
+          <button class="btn" onclick="formTopologi()">+ Tambah Topologi ODP</button></div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Nama ODP</th><th>Titik Koordinat</th>
+            <th class="t-num">Jumlah Port</th><th class="t-num">Terpakai</th><th class="t-num">Sisa</th>
+            <th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbTopologi"><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <p class="hint">Topologi ODP dipilih pada data pelanggan. Titik koordinat berupa
+           "lat, long" titik ODP — klik untuk membuka Google Maps.</p>
+      </div>
+
+      <!-- ================= DESA ================= -->
+      <div data-view="desa" data-onload="loadDesa" style="display:none">
+        <div class="toolbar"><div class="spacer"></div>
+          <button class="btn" onclick="formDesa()">+ Tambah Desa</button></div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Nama Desa</th><th class="t-num">Jumlah Pelanggan</th>
+            <th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbDesa"><tr><td colspan="3" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+      </div>
+
+      <!-- ================= KEUANGAN (KAS) ================= -->
+      <div data-view="keuangan" data-onload="loadKeuangan" style="display:none">
+        <div class="toolbar">
+          <label class="hint" style="align-self:center">Dari</label>
+          <input type="date" id="kDari" onchange="loadKeuangan()">
+          <label class="hint" style="align-self:center">Sampai</label>
+          <input type="date" id="kSampai" onchange="loadKeuangan()">
+          <div class="spacer"></div>
+          <button class="btn secondary" onclick="formKas('masuk')">+ Pemasukan</button>
+          <button class="btn" onclick="formKas('keluar')">+ Pengeluaran</button>
+        </div>
+        <div class="cards">
+          <div class="card green"><div class="label">Total masuk</div><div class="value" id="kMasuk">Rp 0</div></div>
+          <div class="card red"><div class="label">Total keluar</div><div class="value" id="kKeluar">Rp 0</div></div>
+          <div class="card blue"><div class="label">Saldo</div><div class="value" id="kSaldo">Rp 0</div></div>
+        </div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Waktu</th><th>Tipe</th><th>Kategori</th>
+            <th class="t-num">Jumlah</th><th>Keterangan</th><th>Oleh</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbKas"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <p class="hint">Pemasukan dari tagihan lunas tercatat <b>otomatis</b> (kategori pembayaran) —
+           entri otomatis tidak bisa dihapus manual.</p>
       </div>
 
       <!-- ================= PERANGKAT ================= -->
@@ -375,9 +557,104 @@
         <option>baru</option><option>aktif</option><option>isolir</option><option>nonaktif</option></select></div>
     </div>
     <div class="form-row"><label>Alamat</label><input id="fAlamat"></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Topologi ODP</label><select id="fTopo"></select></div>
+      <div class="form-row"><label>Port ODP</label><input id="fPortOdp" placeholder="mis. 3"></div>
+      <div class="form-row"><label>Desa</label><select id="fDesa"></select></div>
+      <div class="form-row"><label>Latitude</label><input id="fLat" placeholder="-7.2575"></div>
+      <div class="form-row"><label>Longitude</label><input id="fLong" placeholder="112.7521"></div>
+    </div>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mPelanggan')">Batal</button>
     <button class="btn" onclick="simpanPelanggan()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mTopologi"><div class="modal">
+  <div class="modal-head"><h2 id="mTopoTitle">Tambah Topologi ODP</h2>
+    <button class="btn sm ghost" onclick="modalClose('mTopologi')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="tpId">
+    <div class="form-row"><label>Nama ODP / Topologi *</label><input id="tpNama" placeholder="mis. ODP Perumnas 1"></div>
+    <div class="form-row"><label>Titik Koordinat (lat, long)</label><input id="tpKoor" placeholder="-7.2575, 112.7521"></div>
+    <div class="form-row"><label>Jumlah Port</label><input id="tpPort" type="number" min="1" max="1024" value="16"></div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mTopologi')">Batal</button>
+    <button class="btn" onclick="simpanTopologi()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mDesa"><div class="modal">
+  <div class="modal-head"><h2 id="mDesaTitle">Tambah Desa</h2>
+    <button class="btn sm ghost" onclick="modalClose('mDesa')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="dsId">
+    <div class="form-row"><label>Nama Desa *</label><input id="dsNama" placeholder="mis. Wonokerto"></div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mDesa')">Batal</button>
+    <button class="btn" onclick="simpanDesa()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mKas"><div class="modal">
+  <div class="modal-head"><h2>Tambah Kas</h2>
+    <button class="btn sm ghost" onclick="modalClose('mKas')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-row"><label>Tipe</label><select id="kkTipe">
+      <option value="keluar">Pengeluaran</option><option value="masuk">Pemasukan</option></select></div>
+    <div class="form-row"><label>Kategori</label><select id="kkKategori">
+      <option>lainnya</option><option>topup</option><option>gaji</option><option>perbaikan</option>
+      <option>listrik</option><option>internet</option><option>sewa</option></select></div>
+    <div class="form-row"><label>Jumlah (Rp) *</label><input id="kkJumlah" type="number" min="1"></div>
+    <div class="form-row"><label>Keterangan</label><input id="kkKet" placeholder="mis. Bayar listrik ODP 1"></div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mKas')">Batal</button>
+    <button class="btn" onclick="simpanKas()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mTiket"><div class="modal">
+  <div class="modal-head"><h2 id="tkTitle">Tiket Gangguan</h2>
+    <button class="btn sm ghost" onclick="modalClose('mTiket')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="tkId">
+    <div class="form-row"><label>Pelanggan</label><select id="tkPel"></select></div>
+    <div class="form-row"><label>Judul *</label><input id="tkJudul" placeholder="mis. Koneksi putus-putus"></div>
+    <div class="form-row"><label>Keterangan</label><textarea id="tkPesan"></textarea></div>
+    <div class="form-row"><label>Prioritas</label><select id="tkPri">
+      <option>rendah</option><option selected>sedang</option><option>tinggi</option></select></div>
+    <div class="form-row" id="tkStatusSel" style="display:none"><label>Status</label><select>
+      <option>baru</option><option>diproses</option><option>selesai</option><option>ditutup</option></select></div>
+    <div class="form-row" id="tkJawab" style="display:none"><label>Jawaban / tindakan</label><textarea id="tkJawabIsi"></textarea></div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mTiket')">Batal</button>
+    <button class="btn" onclick="simpanTiket()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mRemoteOnu"><div class="modal">
+  <div class="modal-head"><h2>Remote ONU — Web Browser</h2>
+    <button class="btn sm ghost" onclick="modalClose('mRemoteOnu')">✕</button></div>
+  <div class="modal-body">
+    <p id="roInfo" class="hint" style="margin-bottom:12px"></p>
+    <p class="hint">Rule dst-nat MikroTik otomatis diarahkan ke IP pelanggan (to-ports 80).
+      Router / modem pelanggan hanya bisa dibuka bila fitur remote-nya aktif di perangkat.</p>
+  </div>
+  <div class="modal-foot">
+    <button class="btn secondary" onclick="modalClose('mRemoteOnu')">Tutup</button>
+    <a class="btn" id="roBuka" target="_blank" rel="noopener" style="display:none">🌐 Buka</a>
+  </div>
+</div></div>
+
+<div class="modal-bg" id="mImporPelanggan"><div class="modal">
+  <div class="modal-head"><h2>Import Data Pelanggan</h2>
+    <button class="btn sm ghost" onclick="modalClose('mImporPelanggan')">✕</button></div>
+  <div class="modal-body">
+    <p class="hint" style="margin-bottom:12px">Unduh <a href="/api/pelanggan/template" download>template Excel</a>,
+      isi sheet <b>Pelanggan</b>, lalu unggah di sini. CSV UTF-8 juga diterima.
+      Data hanya <b>ditambahkan</b> — baris yang sudah ada tidak diubah, dan pesan WhatsApp
+      tidak dikirim saat import. Baris bermasalah dilaporkan per baris, tidak menggagalkan seluruh file.</p>
+    <div class="form-row"><label>File Excel / CSV</label>
+      <input type="file" id="impFile" accept=".xlsx,.xls,.csv,text/csv"></div>
+    <div id="impHasil" class="hint" style="white-space:pre-wrap"></div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mImporPelanggan')">Tutup</button>
+    <button class="btn" onclick="jalankanImport()">Import</button></div>
 </div></div>
 
 <div class="modal-bg" id="mPaket"><div class="modal">
@@ -507,6 +784,7 @@
     <button class="btn" onclick="simpanOlt()">Simpan</button></div>
 </div></div>
 
+<script src="/assets/vendor/chart.umd.min.js"></script>
 
 <div class="modal-bg" id="mTenant"><div class="modal">
   <div class="modal-head"><h2 id="mTenantTitle">Tambah Data Server</h2>
@@ -556,6 +834,84 @@
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mGroup')">Batal</button>
     <button class="btn" onclick="simpanGroup()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mTagSatuan"><div class="modal">
+  <div class="modal-head"><h2>Tagihan Satuan (uraian diketik manual)</h2>
+    <button class="btn sm ghost" onclick="modalClose('mTagSatuan')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-grid">
+      <div class="form-row"><label>Pelanggan *</label><select id="tsPel"></select></div>
+      <div class="form-row"><label>Periode *</label><input id="tsPeriode" type="month"></div>
+      <div class="form-row"><label>Keterangan / uraian internet</label>
+        <input id="tsKet" placeholder="mis. Langganan 10 Mbps blok C + sewa ONU"></div>
+      <div class="form-row"><label>Jumlah (Rp)</label><input id="tsJumlah" type="number" min="0" step="1000"
+        placeholder="kosongkan = harga paket"></div>
+      <div class="form-row"><label>Diskon (Rp)</label><input id="tsDiskon" type="number" min="0" step="1000" value="0"></div>
+      <div class="form-row"><label>Jatuh tempo</label><input id="tsJt" type="date"></div>
+    </div>
+    <p class="hint">Keterangan kosong = memakai nama paket + periode seperti tagihan bulanan.
+      Kode unik dan PPN tenant tetap ditambahkan otomatis.</p>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mTagSatuan')">Batal</button>
+    <button class="btn" onclick="simpanTagihanSatuan()">Buat Tagihan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mTagKet"><div class="modal">
+  <div class="modal-head"><h2>Ubah keterangan tagihan</h2>
+    <button class="btn sm ghost" onclick="modalClose('mTagKet')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="tkTagId">
+    <div class="form-row"><label>Keterangan</label><textarea id="tkTagKet" rows="3"></textarea></div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mTagKet')">Batal</button>
+    <button class="btn" onclick="simpanKeteranganTagihan()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mInvoice"><div class="modal">
+  <div class="modal-head"><h2 id="mInvTitle">Invoice Penjualan Barang / Jasa</h2>
+    <button class="btn sm ghost" onclick="modalClose('mInvoice')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="ivId">
+    <div class="form-grid">
+      <div class="form-row"><label>Tanggal *</label><input id="ivTanggal" type="date"></div>
+      <div class="form-row"><label>Jatuh tempo</label><input id="ivJt" type="date"></div>
+      <div class="form-row"><label>Pelanggan terkait</label><select id="ivPel"></select></div>
+      <div class="form-row"><label>Nama ditagihkan</label><input id="ivNama" placeholder="nama pembeli / PT"></div>
+      <div class="form-row"><label>Alamat</label><input id="ivAlamat"></div>
+      <div class="form-row"><label>Nomor WhatsApp</label><input id="ivWa" placeholder="08…"></div>
+    </div>
+    <div class="form-row"><label>Catatan</label><input id="ivCatatan" placeholder="mis. pengiriman via ekspedisi"></div>
+    <div id="ivButirWrap" style="display:none">
+      <div class="form-row" style="display:flex;align-items:center;gap:10px">
+        <b>Butir invoice</b><span class="hint" id="ivTotalLabel">total Rp 0</span>
+        <button class="btn sm" onclick="formInvItem()">+ Tambah butir</button>
+      </div>
+      <table><thead><tr><th>Tanggal</th><th>Uraian barang / jasa</th>
+        <th class="t-num">Qty</th><th class="t-num">Harga</th><th class="t-num">Jumlah</th><th></th></tr></thead>
+        <tbody id="tbInvItem"><tr><td colspan="6" class="empty">Belum ada butir</td></tr></tbody></table>
+    </div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mInvoice')">Tutup</button>
+    <button class="btn" onclick="simpanInvoice()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mInvoiceItem"><div class="modal">
+  <div class="modal-head"><h2 id="mInvItemTitle">Tambah Butir</h2>
+    <button class="btn sm ghost" onclick="modalClose('mInvoiceItem')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="iviId">
+    <div class="form-grid">
+      <div class="form-row"><label>Tanggal *</label><input id="iviTanggal" type="date"></div>
+      <div class="form-row"><label>Qty *</label><input id="iviQty" type="number" min="0.01" step="0.01" value="1"></div>
+    </div>
+    <div class="form-row"><label>Uraian barang / jasa *</label>
+      <input id="iviUraian" placeholder="mis. ONU ZTE F663 V9"></div>
+    <div class="form-row"><label>Harga satuan (Rp) *</label>
+      <input id="iviHarga" type="number" min="0" step="1000"></div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mInvoiceItem')">Batal</button>
+    <button class="btn" onclick="simpanInvItem()">Simpan</button></div>
 </div></div>
 
 <script src="/assets/app.js"></script>

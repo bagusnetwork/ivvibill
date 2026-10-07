@@ -33,13 +33,15 @@ async function ambilTemplate(jenis, idDataServer = 1) {
   return t ? t.konten : '';
 }
 
-/** Enqueue pesan — dipanggil oleh billing/cron/modul lain. */
-async function enqueue({ tujuan, jenis, pesan, idRef = null, idDataServer = 1 }) {
+/** Enqueue pesan — dipanggil oleh billing/cron/modul lain.
+ *  `media` = URL gambar/PDF yang sudah bisa dijangkau gateway; kalau diisi,
+ *  `pesan` dipakai sebagai caption (WHAPI sendMediaFromUrl). */
+async function enqueue({ tujuan, jenis, pesan, media = null, idRef = null, idDataServer = 1 }) {
   const no = normalizePhone(tujuan);
   if (!no) return null;
   return db.insert(
-    'INSERT INTO wa_queue (id_data_server, tujuan, jenis, pesan, id_ref) VALUES (?,?,?,?,?)',
-    [idDataServer, no, jenis, pesan, idRef]
+    'INSERT INTO wa_queue (id_data_server, tujuan, jenis, pesan, media, id_ref) VALUES (?,?,?,?,?,?)',
+    [idDataServer, no, jenis, pesan, media, idRef]
   );
 }
 
@@ -94,10 +96,13 @@ async function kirimSatu(item, server) {
   const url = basisUrl(server);
   // apiKey disimpan terenkripsi AES (lihat PUT /gateway di routes/tagihan.js)
   const key = crypto.decrypt(server.wa_gateway_key) || '';
-  const res = await http.post(`${url}/sendMessage`, new URLSearchParams({
-    apiKey: key, phone: item.tujuan, message: item.pesan
-  }).toString(), {
-    timeout: 12000,
+  const media = item.media ? String(item.media) : '';
+  const metode = media ? 'sendMediaFromUrl' : 'sendMessage';
+  const body = media
+    ? { apiKey: key, phone: item.tujuan, url: media, as_document: 0, caption: item.pesan }
+    : { apiKey: key, phone: item.tujuan, message: item.pesan };
+  const res = await http.post(`${url}/${metode}`, new URLSearchParams(body).toString(), {
+    timeout: 20000,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
   });
   const ok = res.status >= 200 && res.status < 300;

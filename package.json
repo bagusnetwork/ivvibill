@@ -8,6 +8,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "migrate": "node scripts/migrate.js",
+    "migrate-v12": "node scripts/migrate-v12.js",
     "init-secret": "node scripts/init-secret.js",
     "cron": "node scripts/cron.js",
     "seed-admin": "node scripts/seed-admin.js"
@@ -17,6 +18,7 @@
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "chart.js": "^4.5.1",
     "cookie-parser": "^1.4.6",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
@@ -24,6 +26,7 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.4.0",
-    "mysql2": "^3.11.0"
+    "mysql2": "^3.11.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }

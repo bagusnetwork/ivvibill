@@ -30,16 +30,37 @@ router.get('/dashboard', async (req, res, next) => {
         `SELECT
           (SELECT COUNT(*) FROM pelanggan WHERE status='aktif'${T}) AS pelanggan_aktif,
           (SELECT COUNT(*) FROM pelanggan WHERE status='isolir'${T}) AS pelanggan_isolir,
+          (SELECT COUNT(*) FROM pelanggan WHERE status='baru'${T}) AS pelanggan_baru,
+          (SELECT COUNT(*) FROM pelanggan WHERE status='nonaktif'${T}) AS pelanggan_nonaktif,
+          (SELECT COUNT(*) FROM pelanggan WHERE tanggal_masuk >= DATE_FORMAT(NOW(), '%Y-%m-01')${T}) AS pasang_baru_bulan,
+          (SELECT COUNT(*) FROM pelanggan WHERE tanggal_masuk >= DATE_FORMAT(NOW(), '%Y-01-01')${T}) AS pasang_baru_tahun,
           (SELECT COUNT(*) FROM tagihan WHERE status='lunas' AND paid_at >= DATE_FORMAT(NOW(), '%Y-%m-01')${T}) AS lunas_bulan_ini,
           (SELECT IFNULL(SUM(total),0) FROM tagihan WHERE status='lunas' AND paid_at >= DATE_FORMAT(NOW(), '%Y-%m-01')${T}) AS pemasukan,
+          (SELECT IFNULL(SUM(total),0) FROM tagihan WHERE status='lunas' AND paid_at >= DATE_FORMAT(NOW(), '%Y-01-01')${T}) AS pemasukan_tahun,
+          (SELECT IFNULL(SUM(total),0) FROM tagihan WHERE status='lunas'
+             AND paid_at >= DATE_SUB(DATE_FORMAT(NOW(), '%Y-%m-01'), INTERVAL 1 MONTH)
+             AND paid_at < DATE_FORMAT(NOW(), '%Y-%m-01')${T}) AS pemasukan_bulan_lalu,
           (SELECT IFNULL(SUM(total),0) FROM tagihan WHERE status!='lunas'${T}) AS belum_lunas,
           (SELECT COUNT(*) FROM tagihan WHERE status='jatuh_tempo'${T}) AS jatuh_tempo,
           (SELECT COUNT(*) FROM issue_pelanggan i JOIN pelanggan p ON p.id=i.id_pelanggan WHERE i.status='open'${TP}) AS issue_open,
           (SELECT COUNT(*) FROM tiket tk JOIN pelanggan p ON p.id=tk.id_pelanggan WHERE tk.status IN ('baru','diproses')${TP}) AS tiket_open,
+          (SELECT COUNT(*) FROM pekerjaan WHERE status='antrian'${T}) AS order_antrian,
+          (SELECT COUNT(*) FROM pekerjaan WHERE status='dikerjakan'${T}) AS order_dikerjakan,
+          (SELECT COUNT(*) FROM pekerjaan WHERE status='selesai' AND tanggal >= DATE_FORMAT(NOW(), '%Y-%m-01')${T}) AS order_selesai_bulan,
           (SELECT COUNT(*) FROM voucher WHERE status='stok'${T}) AS voucher_stok,
+          (SELECT COUNT(*) FROM voucher WHERE status IN ('terjual','terpakai') AND sold_at >= DATE_FORMAT(NOW(), '%Y-%m-01')${T}) AS voucher_terjual_bulan,
           (SELECT COUNT(*) FROM pelanggan WHERE tipe='pppoe' AND status='aktif'${T}) AS pppoe_aktif,
           (SELECT COUNT(*) FROM pelanggan WHERE tipe='hotspot' AND status='aktif'${T}) AS hotspot_aktif`);
+      // pelanggan berbayar yang tidak terlihat di router: perlu JOIN, jadi dipisah
+      const [off] = await db.q(
+        `SELECT COUNT(*) AS pppoe_offline FROM pelanggan p
+         LEFT JOIN pppoe_status ps ON ps.id_pelanggan = p.id
+         WHERE p.tipe = 'pppoe' AND p.status = 'aktif' AND IFNULL(ps.online, 0) = 0${TP}`);
+      jml.pppoe_offline = Number(off.pppoe_offline);
       dasbor.ringkas = jml;
+      dasbor.tenant = await db.one(
+        'SELECT id, nama_server, nama_pemilik, expaired_date, status FROM data_server WHERE id = ?',
+        [tenantAktif(req)]);
       dasbor.olt = await db.q(
         `SELECT d.nama, d.brand, s.last_check_at, s.last_check_msg, s.status FROM setting_olt s
          JOIN master_perangkat d ON d.id=s.id_perangkat WHERE 1=1${TD} ORDER BY d.nama`);
@@ -64,6 +85,42 @@ router.get('/dashboard', async (req, res, next) => {
         `SELECT COUNT(*) AS jml FROM pelanggan WHERE id_agen = ? AND status='aktif'`, [req.user.id_ref]);
     }
     res.json(dasbor);
+  } catch (e) { next(e); }
+});
+
+/**
+ * Deret 12 bulan untuk grafik dasbor: pemasukan (lunas per paid_at), piutang
+ * (belum lunas per periode) dan pasang baru per bulan. Tahun bisa dipilih.
+ */
+router.get('/dashboard/keuangan', async (req, res, next) => {
+  try {
+    const T = tenantFrag(req);
+    const tahun = v.num(req.query.tahun, { min: 2000, max: 2999, def: new Date().getFullYear(), int: true });
+    const [lunas, piutang, pasang, daftar] = await Promise.all([
+      db.q(`SELECT DATE_FORMAT(paid_at, '%m') AS bln, IFNULL(SUM(total),0) AS jumlah, COUNT(*) AS n
+            FROM tagihan WHERE status = 'lunas' AND YEAR(paid_at) = ?${T} GROUP BY bln`, [tahun]),
+      db.q(`SELECT SUBSTRING(periode, 6, 2) AS bln, IFNULL(SUM(total),0) AS jumlah, COUNT(*) AS n
+            FROM tagihan WHERE status NOT IN ('lunas','batal') AND periode LIKE ?${T} GROUP BY bln`,
+        [`${tahun}-%`]),
+      db.q(`SELECT DATE_FORMAT(tanggal_masuk, '%m') AS bln, COUNT(*) AS n
+            FROM pelanggan WHERE YEAR(tanggal_masuk) = ?${T} GROUP BY bln`, [tahun]),
+      db.q(`SELECT DISTINCT YEAR(paid_at) AS y FROM tagihan WHERE status = 'lunas' AND paid_at IS NOT NULL${T}
+            ORDER BY y DESC`, []),
+    ]);
+    const bulan = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
+    const ambil = (rows, b, key) => {
+      const r = rows.find(x => String(x.bln).padStart(2, '0') === b);
+      return Number(r ? r[key] : 0);
+    };
+    res.json({
+      tahun,
+      pemasukan: bulan.map(b => ambil(lunas, b, 'jumlah')),
+      tagihan_lunas: bulan.map(b => ambil(lunas, b, 'n')),
+      piutang: bulan.map(b => ambil(piutang, b, 'jumlah')),
+      tagihan_macet: bulan.map(b => ambil(piutang, b, 'n')),
+      pasang_baru: bulan.map(b => ambil(pasang, b, 'n')),
+      tahun_tersedia: [tahun, ...daftar.map(d => Number(d.y)).filter(y => y !== tahun)],
+    });
   } catch (e) { next(e); }
 });
 

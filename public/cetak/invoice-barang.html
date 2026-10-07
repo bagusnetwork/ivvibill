@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cetak Invoice Penjualan — ivvibill</title>
+<style>
+  :root { --ink: #1f2430; --muted: #667085; --line: #d9dde5; --accent: #1668e3; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px; background: #eef1f5; color: var(--ink);
+    font-family: 'Segoe UI', system-ui, -apple-system, Arial, sans-serif; font-size: 14px; }
+  .sheet { max-width: 760px; margin: 0 auto; background: #fff; border: 1px solid var(--line);
+    border-radius: 10px; padding: 28px 32px; }
+  .head { display: flex; justify-content: space-between; gap: 16px; border-bottom: 2px solid var(--ink); padding-bottom: 14px; }
+  .brand { display: flex; gap: 12px; align-items: center; }
+  .brand img { max-height: 52px; max-width: 120px; }
+  .mark { width: 44px; height: 44px; border-radius: 10px; background: var(--accent); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; }
+  h1 { font-size: 22px; margin: 0; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; line-height: 1.5; }
+  .inv-title { text-align: right; }
+  .inv-title .no { font-size: 18px; font-weight: 700; letter-spacing: .5px; }
+  .inv-title .st { margin-top: 6px; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: #e5f6ea; color: #14713d; }
+  .badge.warn { background: #fff4e0; color: #93540a; }
+  .badge.bad { background: #fdecec; color: #b42318; }
+  .badge.mute { background: #eef1f5; color: #475467; }
+  .bill { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; margin: 18px 0; }
+  .bill .k { color: var(--muted); font-size: 12px; }
+  .bill .v { font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #f5f7fa; font-size: 12.5px; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  td.tgl, th.tgl { white-space: nowrap; width: 96px; }
+  tr.tot td { font-weight: 700; background: #f5f7fa; }
+  .terbilang { margin-top: 10px; font-style: italic; color: var(--muted); }
+  .rek { margin-top: 20px; }
+  .rek h3 { font-size: 14px; margin: 0 0 6px; }
+  .catatan { margin-top: 16px; font-size: 13px; }
+  .foot { margin-top: 26px; display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; }
+  .ttd { text-align: center; min-width: 180px; }
+  .ttd .line { margin-top: 44px; border-top: 1px dashed var(--ink); padding-top: 6px; font-size: 12.5px; }
+  .note { font-size: 12px; color: var(--muted); line-height: 1.6; }
+  .toolbar { max-width: 760px; margin: 0 auto 14px; display: flex; gap: 8px; justify-content: flex-end; }
+  .btn { border: 0; border-radius: 8px; padding: 9px 16px; font-size: 13.5px; font-weight: 600;
+    cursor: pointer; background: var(--accent); color: #fff; text-decoration: none; display: inline-block; }
+  .btn.ghost { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+  .err { max-width: 760px; margin: 40px auto; background: #fff; border: 1px solid var(--line);
+    border-radius: 10px; padding: 24px; text-align: center; }
+  @media print {
+    body { background: #fff; padding: 0; }
+    .toolbar { display: none; }
+    .sheet { border: 0; border-radius: 0; padding: 0; max-width: 100%; }
+    @page { size: A4; margin: 16mm; }
+  }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <a class="btn ghost" id="btnWa" style="display:none" target="_blank" rel="noopener">&#128172; WhatsApp</a>
+  <a class="btn ghost" href="#" onclick="history.back();return false">&larr; Kembali</a>
+  <button class="btn" onclick="window.print()">&#128424;&#65039; Cetak / PDF</button>
+</div>
+<div id="isi"><div class="err">Memuat invoice…</div></div>
+
+<script src="/cetak/invoice-barang.js"></script>
+</body>
+</html>
