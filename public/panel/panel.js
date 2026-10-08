@@ -347,6 +347,7 @@ function formPelanggan(p) {
   document.getElementById('fLat').value = p ? (p.latitude || '') : '';
   document.getElementById('fLong').value = p ? (p.longitude || '') : '';
   modalOpen('mPelanggan');
+  setTimeout(() => { petaPilih('fPeta', cfgPetaPelanggan()); petaPilihSinkron('fPeta'); }, 60);
 }
 
 async function simpanPelanggan() {
@@ -1273,6 +1274,7 @@ function formTopologi(i) {
   document.getElementById('tpKoor').value = t ? (t.titik_koordinat || '') : '';
   document.getElementById('tpPort').value = t ? Number(t.jumlah_port) : 16;
   modalOpen('mTopologi');
+  setTimeout(() => { petaPilih('tpPeta', cfgPetaTopologi()); petaPilihSinkron('tpPeta'); }, 60);
 }
 async function simpanTopologi() {
   const id = document.getElementById('tpId').value;
@@ -1948,4 +1950,111 @@ function petaDetik() {
     return;
   }
   loadPeta();
+}
+// ============================================================ PEMILIH KOORDINAT
+// Peta kecil di dalam form (modal) untuk memilih titik lokasi dengan klik,
+// tanpa mengetik angka. Sekali dibuat per modal, disimpan di PETA_PILIH —
+// Leaflet menolak container yang sudah pernah diinisialisasi.
+const PETA_PILIH = {};
+const PUSAT_BAWAAN = { lat: -7.062083, lng: 106.79739 };
+
+/** "-7.2575, 112.7521" → {lat, lng}; null bila tidak sah. */
+function koordinatDari(teks) {
+  if (!teks) return null;
+  const b = String(teks).split(',').map(s => s.trim());
+  if (b.length !== 2) return null;
+  const lat = Number(b[0]), lng = Number(b[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng };
+}
+
+const angkaKoord = (n, d) => (Number.isFinite(Number(n)) ? Number(n).toFixed(d) : '');
+
+/** Pasang peta pemilih pada wadah; `cfg` = { kolom, baca, tulis, pusat }. */
+function petaPilih(idPeta, cfg) {
+  const box = document.getElementById(idPeta);
+  if (!box || typeof L === 'undefined') return null;
+  let st = PETA_PILIH[idPeta];
+  if (!st) {
+    const map = L.map(idPeta, { zoomControl: true })
+      .setView([PUSAT_BAWAAN.lat, PUSAT_BAWAAN.lng], 11);
+    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' });
+    const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom: 19, attribution: 'Tiles &copy; Esri' });
+    sat.addTo(map);
+    L.control.layers({ 'Satelit': sat, 'Peta': osm }, {}, { position: 'topright' }).addTo(map);
+    st = PETA_PILIH[idPeta] = { map, titik: null, cfg };
+    map.on('click', (e) => {
+      if (!st.cfg || !st.cfg.tulis) return;
+      st.cfg.tulis(e.latlng.lat, e.latlng.lng);
+      petaPilihSinkron(idPeta);
+    });
+    (cfg.kolom || []).forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', () => petaPilihSinkron(idPeta));
+    });
+  }
+  st.cfg = cfg;
+  // modal barusan dibuka — Leaflet perlu dihitung ulang setelah layout selesai
+  setTimeout(() => { try { st.map.invalidateSize(); } catch (_) {} }, 80);
+  return st;
+}
+
+/** Sinkronkan pin & tampilan peta dengan isi form (baca → tulis bukan sebaliknya). */
+function petaPilihSinkron(idPeta) {
+  const st = PETA_PILIH[idPeta];
+  if (!st || !st.cfg) return;
+  const k = st.cfg.baca ? st.cfg.baca() : null;
+  if (st.titik) { st.map.removeLayer(st.titik); st.titik = null; }
+  if (k) {
+    st.titik = L.marker([k.lat, k.lng], { draggable: true }).addTo(st.map);
+    st.titik.on('dragend', () => {
+      const p = st.titik.getLatLng();
+      if (st.cfg.tulis) st.cfg.tulis(p.lat, p.lng);
+      petaPilihSinkron(idPeta);
+    });
+    if (!st.map.getBounds().contains(L.latLng(k.lat, k.lng))) {
+      st.map.setView([k.lat, k.lng], Math.max(st.map.getZoom(), 15));
+    }
+  } else {
+    const c = st.cfg.pusat ? st.cfg.pusat() : null;
+    if (c) st.map.setView([c.lat, c.lng], 13);
+  }
+}
+
+/** Form pelanggan: dua kolom terpisah (fLat / fLong). */
+function cfgPetaPelanggan() {
+  const el = (id) => document.getElementById(id);
+  return {
+    kolom: ['fLat', 'fLong', 'fTopo'],
+    baca: () => {
+      const a = el('fLat').value, b = el('fLong').value;
+      if (a === '' || b === '') return null;
+      const lat = Number(a), lng = Number(b);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return Math.abs(lat) > 90 || Math.abs(lng) > 180 ? null : { lat, lng };
+    },
+    tulis: (lat, lng) => {
+      el('fLat').value = angkaKoord(lat, 6);
+      el('fLong').value = angkaKoord(lng, 6);
+    },
+    pusat: () => {
+      const id = el('fTopo').value;
+      const t = TOPO_LIST.find(x => String(x.id) === String(id)) || TOPO_LIST[0];
+      return (t && koordinatDari(t.titik_koordinat)) || PUSAT_BAWAAN;
+    }
+  };
+}
+
+/** Form topologi ODP: satu kolom "lat, long" (tpKoor). */
+function cfgPetaTopologi() {
+  const el = (id) => document.getElementById(id);
+  return {
+    kolom: ['tpKoor'],
+    baca: () => koordinatDari(el('tpKoor').value),
+    tulis: (lat, lng) => { el('tpKoor').value = `${angkaKoord(lat, 6)}, ${angkaKoord(lng, 6)}`; },
+    pusat: () => koordinatDari(el('tpKoor').value) || PUSAT_BAWAAN
+  };
 }

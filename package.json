@@ -1,6 +1,6 @@
 {
   "name": "ivvibill",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "ivvibill — Billing PPPoE & Hotspot, agent, payment gateway, monitoring router & OLT",
   "main": "server.js",
   "private": true,

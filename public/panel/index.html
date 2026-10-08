@@ -42,6 +42,9 @@
     font-size:13px; color:var(--muted, #9aa7bd); }
   .peta-legend b.dot { display:inline-block; width:11px; height:11px;
     border-radius:50%; margin-right:5px; vertical-align:-1px; }
+  /* ---- pemilih koordinat di dalam form (Leaflet) ---- */
+  .peta-pick { height:240px; width:100%; border:1px solid var(--line);
+    border-radius:10px; overflow:hidden; background:#e8eef5; }
 </style>
 <link rel="stylesheet" href="/assets/vendor/leaflet/leaflet.css">
 <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
@@ -603,6 +606,12 @@
       <div class="form-row"><label>Desa</label><select id="fDesa"></select></div>
       <div class="form-row"><label>Latitude</label><input id="fLat" placeholder="-7.2575"></div>
       <div class="form-row"><label>Longitude</label><input id="fLong" placeholder="112.7521"></div>
+      <div class="form-row" style="grid-column:1/-1;margin-bottom:0">
+        <label>Titik lokasi di peta</label>
+        <div id="fPeta" class="peta-pick"></div>
+        <p class="hint">Klik peta untuk menaruh titik (seret pin bila perlu) — kolom
+          Latitude/Longitude terisi otomatis, atau ketik angkanya langsung.</p>
+      </div>
     </div>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mPelanggan')">Batal</button>
@@ -616,6 +625,9 @@
     <input type="hidden" id="tpId">
     <div class="form-row"><label>Nama ODP / Topologi *</label><input id="tpNama" placeholder="mis. ODP Perumnas 1"></div>
     <div class="form-row"><label>Titik Koordinat (lat, long)</label><input id="tpKoor" placeholder="-7.2575, 112.7521"></div>
+    <div class="form-row"><label>Titik di peta</label>
+      <div id="tpPeta" class="peta-pick"></div>
+      <p class="hint">Klik peta untuk mengisi kolom Titik Koordinat di atas.</p></div>
     <div class="form-row"><label>Jumlah Port</label><input id="tpPort" type="number" min="1" max="1024" value="16"></div>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mTopologi')">Batal</button>

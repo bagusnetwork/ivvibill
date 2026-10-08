@@ -4,6 +4,69 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-08 — v1.4.1 — pemilih koordinat klik-di-peta pada form Pelanggan & Topologi
+
+**Masalah**
+
+Koordinat pelanggan (`latitude`/`longitude`) dan titik ODP (`titik_koordinat`)
+hanya bisa diisi dengan **mengetik angka**. Padahal sejak v1.4.0 peta sebaran
+hanya menampilkan pelanggan yang koordinatnya terisi — artinya operator harus
+mencari titik di Google Maps, menyalin angka, lalu menempelkannya ke form.
+Pekerjaan itu rawan salah ketik (urutan lat/long terbalik, koma jadi titik), dan
+bila meleset pelanggan tampil di kota lain. Form berisi kolom koordinat memang
+terasa "kaku" — persis keluhan yang memicu audit.
+
+**Diubah**
+
+- `public/panel/index.html` — dua wadah peta baru: `#fPeta` di modal Pelanggan
+  (setelah kolom Latitude/Longitude) dan `#tpPeta` di modal Topologi ODP
+  (setelah kolom Titik Koordinat), plus kelas `.peta-pick` (tinggi 240px).
+- `public/panel/panel.js` — blok **PEMILIH KOORDINAT**:
+  * `petaPilih(id, cfg)` membangun Leaflet (layer Satelit/Peta) sekali per modal
+    dan menyimpannya di `PETA_PILIH` — Leaflet menolak container yang sudah
+    terpakai, jadi modal yang dibuka berulang tidak membuat peta dobel;
+    `invalidateSize()` dijadwalkan 80 ms setelah modal dibuka.
+  * `petaPilihSinkron(id)` — sumber kebenaran tetap isi form: bila ada nilai →
+    taruh pin (bisa diseret, `dragend` menulis balik ke kolom), bila kosong →
+    pusatkan ke titik ODP terpilih (fallback: ODP pertama, lalu pusat bawaan).
+    Peta hanya berpindah bila titik keluar dari tampilan, jadi tidak "melompat"
+    saat pengguna menggeser peta.
+  * `cfgPetaPelanggan()` (kolom terpisah `fLat`/`fLong`) dan `cfgPetaTopologi()`
+    (satu kolom `tpKoor` berformat "lat, long"); keduanya memvalidasi rentang
+    ±90/±180 lewat `koordinatDari()`.
+  * Perubahan kolom lewat ketikan (`event change` pada `fLat`, `fLong`,
+    `fTopo`, `tpKoor`) ikut memindahkan pin — dua arah saling sinkron.
+- `formPelanggan()`/`formTopologi()` memanggil pemilih **setelah** `modalOpen()`
+  (wadah harus sudah terlihat agar Leaflet menghitung ukurannya benar).
+- `src/config.js` + `package.json` — versi **1.4.1**.
+
+**Cara dipasang ke produksi**
+
+Berkas statis panel: Express menyajikan `public/` dari disk tiap permintaan,
+jadi perubahan langsung terbaca tanpa restart. Restart hanya perlu bila versi di
+`src/config.js` ikut dinaikkan: `sudo systemctl restart ivvibill`.
+
+**Verifikasi (staging: DB clone, port 3011, Firefox headless + geckodriver)**
+
+- **Uji pemilih koordinat 25/25 lulus (exit 0)**: modal Pelanggan terbuka dengan
+  peta (ubin termuat, 0 pelanggaran CSP, tinggi 240px) → klik tengah peta →
+  `fLat`/`fLong` terisi otomatis (−7.061950 / 106.797409) + 1 pin → simpan →
+  pelanggan ada di daftar dan **koordinat tersimpan persis seperti titik klik**
+  (bukan nilai default) → buka lagi form Ubah → kolom & pin terbawa → ketik
+  `fLat = -7.100000` + event `change` → **pin ikut berpindah** (posisi elemen
+  berbeda sebelum/sesudah) → form Topologi: peta termuat, klik → `tpKoor`
+  berformat "lat, long" → simpan → baris ODP baru muncul → konsol tanpa error
+  JavaScript dan tanpa pelanggaran CSP.
+- Audit UI semua 23 menu panel dijalankan ulang setelah perubahan:
+  **24/24 lulus, exit 0** — tidak ada view yang rusak atau macet.
+
+**Catatan**
+
+Peta form memakai layer yang sama dengan halaman Peta Sebaran, jadi tetap
+butuh akses internet ke ubin OSM/Esri (diizinkan CSP). `PETA_PILIH` memakai
+`const` tingkat-skrip sehingga tidak terlihat dari skrip luar (WebDriver) —
+uji memverifikasi lewat DOM (posisi elemen pin), bukan membaca variabel internal.
+
 ## 2026-10-08 — v1.4.0 — Peta sebaran (Leaflet) + audit 132 rute: field wajib tak lagi 500
 
 **Masalah**
