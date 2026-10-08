@@ -27,7 +27,23 @@
   .peringatan { border:1px solid #d9a441; background:rgba(217,164,65,.12);
     border-radius:10px; padding:10px 14px; margin-bottom:12px; font-size:14px; }
   .peringatan.bad { border-color:#e5484d; background:rgba(229,72,77,.12); }
+  /* ---- peta sebaran (Leaflet) ---- */
+  #petaMap { height:68vh; width:100%; min-height:380px; background:#e8eef5; }
+  .peta-pin { width:24px; height:24px; border-radius:50% 50% 50% 0;
+    transform:rotate(-45deg); border:2px solid #fff;
+    box-shadow:0 1px 4px rgba(0,0,0,.55); display:flex;
+    align-items:center; justify-content:center; }
+  .peta-pin i { transform:rotate(45deg); font-style:normal; color:#fff;
+    font-size:11px; font-weight:700; line-height:1; }
+  .peta-odp { width:26px; height:22px; border-radius:4px; border:2px solid #fff;
+    box-shadow:0 1px 4px rgba(0,0,0,.55); display:flex; align-items:center;
+    justify-content:center; color:#fff; font-size:9px; font-weight:700; line-height:1; }
+  .peta-legend { display:flex; gap:14px; flex-wrap:wrap; align-items:center;
+    font-size:13px; color:var(--muted, #9aa7bd); }
+  .peta-legend b.dot { display:inline-block; width:11px; height:11px;
+    border-radius:50%; margin-right:5px; vertical-align:-1px; }
 </style>
+<link rel="stylesheet" href="/assets/vendor/leaflet/leaflet.css">
 <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
 </head>
 <body data-app="/panel">
@@ -59,6 +75,7 @@
     </nav>
     <div class="nav-group">Master &amp; Keuangan</div>
     <nav class="nav">
+      <a data-page="peta" data-menu="peta"><span class="ic">🗺️</span> Peta Sebaran</a>
       <a data-page="topologi" data-menu="topologi"><span class="ic">🧩</span> Topologi (ODP)</a>
       <a data-page="desa" data-menu="desa"><span class="ic">🏘️</span> Desa</a>
       <a data-page="keuangan" data-menu="keuangan"><span class="ic">💰</span> Keuangan (Kas)</a>
@@ -361,6 +378,29 @@
         <p class="hint">Paket ICMP dikirim <b>oleh router MikroTik terpilih lewat koneksi API</b>
           (perintah <code>/ping</code> RouterOS), sehingga hasil mencerminkan rute internet sebenarnya
           dari sisi jaringan pelanggan — bukan dari server hosting.</p>
+      </div>
+
+      <!-- ================= PETA SEBARAN ================= -->
+      <div data-view="peta" data-onload="loadPeta" style="display:none">
+        <div class="toolbar">
+          <span class="hint" id="petaRingkas">Memuat…</span>
+          <div class="spacer"></div>
+          <button class="btn secondary" onclick="loadPeta(true)">⟳ Muat ulang</button>
+          <a class="btn secondary" href="/api/peta/export?fmt=kml" download>Unduh KML</a>
+          <a class="btn secondary" href="/api/peta/export?fmt=kmz" download>Unduh KMZ</a>
+        </div>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <div id="petaMap"></div>
+        </div></div>
+        <div class="panel" style="margin-top:12px"><div class="panel-body">
+          <div class="peta-legend">
+            <span><b class="dot" style="background:#2f6fed"></b>ODP</span>
+            <span><b class="dot" style="background:#2e9e44"></b>Pelanggan online</span>
+            <span><b class="dot" style="background:#e5484d"></b>Offline / isolir</span>
+            <span><b class="dot" style="background:#8b95a7"></b>Tidak aktif</span>
+          </div>
+          <p class="hint mt" id="petaHint"></p>
+        </div></div>
       </div>
 
       <!-- ================= TOPOLOGI (ODP) ================= -->
@@ -914,6 +954,7 @@
     <button class="btn" onclick="simpanInvItem()">Simpan</button></div>
 </div></div>
 
+<script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js"></script>
 <script src="panel.js"></script>
 </body>

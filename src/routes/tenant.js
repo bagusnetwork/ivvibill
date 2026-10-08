@@ -20,9 +20,13 @@ const router = express.Router();
 router.use(requireAuth);
 
 /** Menu panel yang bisa dibatasi per grup akses. */
+// Menu v1.2.0+ (topologi, desa, noc, keuangan, tiket) dan Peta sebaran ikut
+// terdaftar: tanpa entri di daftar ini grup akses tidak bisa memberi izinnya,
+// sehingga menu baru selalu tersembunyi bagi pengguna bergroup.
 const MENU = [
   'dashboard', 'pelanggan', 'tagihan', 'invoice', 'pembayaran', 'paket', 'voucher', 'agen',
   'interface', 'olt', 'issue', 'perangkat', 'pengguna', 'wa', 'setting',
+  'topologi', 'desa', 'noc', 'keuangan', 'tiket', 'peta',
   'data_server', 'group_akses'
 ];
 
@@ -123,6 +127,8 @@ router.delete('/data-server/:id', requireRole('superadmin'), async (req, res, ne
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });
     if (id === 1) return res.status(400).json({ error: 'Tenant 1 adalah pemilik platform' });
+    const ada = await db.one('SELECT id FROM data_server WHERE id = ?', [id]);
+    if (!ada) return res.status(404).json({ error: 'Data server tidak ada' });
     const [pakai] = await db.q(
       `SELECT
         (SELECT COUNT(*) FROM pelanggan WHERE id_data_server=?) AS pelanggan,

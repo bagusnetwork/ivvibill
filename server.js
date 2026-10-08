@@ -44,7 +44,10 @@ app.use(helmet({
       // baris ini seluruh tombol di halaman admin tidak berjalan.
       scriptSrcAttr: ["'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:', 'blob:'],
+      // Peta sebaran (Leaflet) memuat ubin dari OpenStreetMap & Esri — tanpa
+      // ini gambar peta diblokir CSP dan halaman Peta tampil kosong.
+      imgSrc: ["'self'", 'data:', 'blob:',
+        'https://tile.openstreetmap.org', 'https://*.arcgisonline.com'],
       connectSrc: ["'self'"],
       fontSrc: ["'self'", 'data:'],
       objectSrc: ["'none'"],
@@ -95,6 +98,7 @@ app.use('/api', require('./src/routes/monitoring'));
 app.use('/api', require('./src/routes/master'));         // topologi ODP + desa
 app.use('/api', require('./src/routes/noc'));            // NOC ping test
 app.use('/api', require('./src/routes/keuangan'));       // kas & laporan keuangan
+app.use('/api', require('./src/routes/peta'));           // peta sebaran ODP + pelanggan
 app.use('/api', require('./src/routes/lain'));
 
 // ---------- upload (bukti pembayaran) ---------------------------
@@ -146,7 +150,11 @@ app.use((req, res) => {
 });
 app.use((err, req, res, next) => {   // eslint-disable-line no-unused-vars
   const msg = err.message || 'Kesalahan server';
-  const code = /tidak valid|wajib|minimal|maksimal|Harus|sudah|tidak cukup|tidak ditemukan|ditolak|gagal/i.test(msg) ? 400 : 500;
+  // err.status dipakai pemanggil yang tahu status sebenarnya (404/403);
+  // tanpa itu, pesan validasi diterjemahkan ke 400 dan sisanya 500.
+  const kuat = Number(err.status) || null;
+  const pola = /tidak valid|wajib|minimal|maksimal|Harus|sudah|tidak cukup|tidak ditemukan|ditolak|gagal|tidak ada|belum diatur|belum disimpan|tidak aktif|terlalu panjang|kosong|dikenali|bukan milik/i;
+  const code = kuat || (pola.test(msg) ? 400 : 500);
   if (code === 500) console.error('[ivvibill error]', err);
   if (res.headersSent) return;
   res.status(code).json({ error: msg });

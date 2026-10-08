@@ -141,9 +141,13 @@ function filterDaftar(req) {
 /**
  * Validasi relasi lokasi pelanggan (topologi ODP, desa, port, koordinat).
  * `def` = baris lama (PUT) supaya kolom yang tidak dikirim tidak berubah.
+ * `dsBaris` = tenant milik baris yang sedang diubah (PUT): pemeriksaan relasi
+ * harus memakai tenant baris, bukan picker aktif — kalau tidak, superadmin /
+ * user multi-tenant yang mengedit pelanggan tenant lain selalu ditolak
+ * "Topologi tidak ada di data server ini" meski relasinya valid.
  */
-async function validasiLokasi(req, body, def) {
-  const ds = tenantAktif(req);
+async function validasiLokasi(req, body, def, dsBaris) {
+  const ds = dsBaris || tenantAktif(req);
   const idTopo = v.num(body.id_master_topologi,
     { int: true, min: 1, def: def ? def.id_master_topologi : null });
   const idDesa = v.num(body.id_master_desa,
@@ -612,7 +616,7 @@ router.put('/pelanggan/:id', requireRole('superadmin', 'master', 'teknisi', 'age
     const status = v.enumOf(req.body.status, ['baru', 'aktif', 'isolir', 'nonaktif'], p.status);
     const catatan = v.str(req.body.catatan, { max: 5000, def: p.catatan });
     let lok;
-    try { lok = await validasiLokasi(req, req.body, p); }
+    try { lok = await validasiLokasi(req, req.body, p, ds); }
     catch (e) { return res.status(400).json({ error: e.message }); }
 
     // teknisi tidak boleh ubah status ke nonaktif/hapus kredensial sembarangan

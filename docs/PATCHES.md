@@ -4,6 +4,113 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-08 — v1.4.0 — Peta sebaran (Leaflet) + audit 132 rute: field wajib tak lagi 500
+
+**Masalah**
+
+1. **Peta tidak ada.** Aplikasi lama gratisinaja punya halaman *Maps Topologi*
+   (`pages/maps_marker_topologi.php` + `load/maps_marker.php|maps_export.php`):
+   Leaflet dengan marker ODP & pelanggan, layer satelit/OSM, refresh 30 detik,
+   ekspor KML/KMZ. Di ivvibill kolom koordinat hanya menghasilkan tautan
+   `📍 koordinat` ke Google Maps — tidak ada satu pun halaman peta, padahal
+   latitude/longitude pelanggan dan titik ODP sudah tersimpan di database.
+2. **Field wajib yang tidak dikirim berujung HTTP 500.** `v.str`/`v.num`/`v.enumOf`
+   berdefault `def = null`, jadi nilai yang hilang **diam-diam menjadi NULL** dan
+   jatuh ke constraint database. Audit terhadap 132 rute menemukan 11 titik yang
+   membalas `500 Column 'nama' cannot be null` (POST pelanggan, paket, agen,
+   topologi, desa, perangkat, rekening, kas, data-server, group-akses) dan
+   `500 Agen tidak ada` — semestinya 400/404.
+3. **Grant grup akses tidak lengkap.** `MENU` di `tenant.js` tidak memuat
+   `topologi`, `desa`, `noc`, `keuangan`, `tiket` (menu v1.2.0) — kunci itu
+   dibuang `bersihkanAkses()`, sehingga grup yang memilih menu tersebut tidak
+   pernah menerima izinnya dan pengguna bergroup tidak pernah melihat menu baru.
+4. **PUT pelanggan lintas tenant ditolak salah.** `validasiLokasi()` memeriksa
+   relasi ODP/desa dengan *tenant aktif* (picker), bukan tenant milik baris,
+   sehingga superadmin/user multi-tenant mengubah pelanggan tenant lain selalu
+   kena `400 "Topologi tidak ada di data server ini"`.
+5. `DELETE /api/data-server/:id` untuk id yang tidak ada membalas `200 {ok:true}`.
+
+**Diubah**
+
+- `src/routes/peta.js` **baru** — `GET /api/peta` mengembalikan `odp` (termasuk
+  hasil parsing `titik_koordinat` "lat, long" + jumlah port terpakai),
+  `pelanggan` (koordinat, status koneksi `pppoe_status`, paket, ODP), `pusat`,
+  `tanpa_koordinat`, dan `jumlah`. `GET /api/peta/export?fmt=kml|kmz` menyusun
+  dokumen KML (gaya sama dengan gratisinaja: style `#odp`/`#on`/`#off`) dan KMZ
+  = ZIP metode STORE + CRC32 buatan sendiri — **tanpa dependensi baru**.
+  Keduanya dijaga `requireAuth` + `requireRole(superadmin|master|teknisi)`.
+- **Scoping peta mengikuti tenant AKTIF** (`req.ds`), bukan "semua tenant" untuk
+  pemilik platform: marker lintas-ISP bercampur tidak terbaca dan lokasi
+  pelanggan adalah data sensitif satu ISP.
+- `server.js` — mount `/api/peta`; CSP `imgSrc` menambah
+  `https://tile.openstreetmap.org` + `https://*.arcgisonline.com` (tanpa ini ubin
+  peta diblokir dan halaman tampil kosong); handler error kini menghormati
+  `err.status` dan pola ke-400 diperluas (`tidak ada`, `belum diatur`,
+  `tidak aktif`, `terlalu panjang`, `kosong`, `dikenali`, `bukan milik`).
+- `public/assets/vendor/leaflet/` **baru** — leaflet.js + leaflet.css + gambar
+  marker/layer versi 1.9.4 sebagai **vendor lokal** (lolos `script-src 'self'`,
+  mengikuti cara chart.umd.min.js dipasang).
+- Panel — menu **Peta Sebaran** (grup *Master & Keuangan*), view Leaflet dengan
+  layer Satelit/Peta, marker ODP (kotak biru) + pin pelanggan berwarna status
+  (hijau online, merah offline/isolir, abu register/nonaktif), popup berisi
+  paket/alamat/tautan Google Maps, ringkasan hitungan, legenda, tombol
+  **Muat ulang / Unduh KML / Unduh KMZ**; refresh otomatis 30 detik yang
+  **berhenti sendiri** begitu halaman ditinggalkan; `JUDUL` + `LABEL_MENU` ikut
+  ditambah.
+- `src/util/validate.js` — konvensi **wajib isi**: opsi `def` yang tidak dikirim
+  berarti kolom wajib (`400 "Nilai wajib diisi"`); kolom opsional tetap menulis
+  `def: null`/`def: <nilai>` secara eksplisit. `str`/`num`/`enumOf`.
+- `src/routes/tenant.js` — `MENU` bertambah `topologi, desa, noc, keuangan,
+  tiket, peta`; `DELETE /data-server/:id` memeriksa keberadaan baris dulu (404).
+- `src/routes/pelanggan.js` — `validasiLokasi(req, body, def, dsBaris)` memakai
+  tenant baris saat PUT.
+- `src/config.js` + `package.json` — versi **1.4.0**.
+
+**Cara dipasang ke produksi**
+
+Tidak ada dependensi baru — **jangan** `npm install`/`npm ci`. Cukup salin
+berkas berubah lalu `sudo systemctl restart ivvibill` (atau
+`sudo bash mt/install_fase2.sh` bila memakai rantai installer).
+
+**Verifikasi (staging: DB clone `ivvibill_staging`, port 3011, scheduler mati)**
+
+- **Audit API otomatis 132 rute** (sebelum perbaikan: 12 temuan — 11 POST 500 +
+  DELETE 200; **sesudah: 0 temuan, 180 pemeriksaan OK**): semua rute GET wajib
+  401 tanpa sesi (0 bocor), tidak ada 500, tidak ada rute literal tertangkap
+  rute `:id`, DELETE id palsu → 404.
+- **Uji peta 23/23** — termasuk isolasi tenant: tenant 1 melihat ODP/pelanggan
+  miliknya saja, pindah ke tenant 2 hanya melihat miliknya, kembali ke tenant 1
+  tidak bocor, KML ikut terfilter, tanpa sesi → 401, KMZ tervalidasi CRC oleh
+  `zipfile` Python.
+- **Uji browser (Firefox headless + geckodriver) 23/23**: layar login → masuk →
+  reload → menu Peta → Leaflet terpasang, **ubin peta termuat tanpa satu pun
+  pelanggaran CSP**, marker tampil, klik membuka popup, tombol unduh ada, dan
+  **tidak ada polling `/api/peta` setelah halaman ditinggalkan**; konsol tanpa
+  error JavaScript.
+- **Audit UI semua 23 menu panel** — LULUS 24/24: tidak ada view yang macet di
+  "Memuat…", tidak ada error JS/toast gagal/CSP di menu mana pun.
+- Regresi: uji peta dijalankan ulang **setelah** perubahan `validate.js` (23/23)
+  sehingga validasi baru tidak memutus jalur tulis yang valid (buat ODP, ubah
+  koordinat pelanggan, buat tenant, pindah tenant).
+- Database produksi dicek ulang: 33 tabel, **collation seragam
+  `utf8mb4_unicode_ci` (0 selisih)**, kolom `tagihan.img_invoice`, `wa_queue.media`,
+  `pelanggan.latitude/longitude`, `setting_mikrotik.port_remote`, tabel
+  `invoice/invoice_item/kas/master_topologi/master_desa` semuanya ada, dan
+  `tagihan.kode_unik` bertipe `smallint`.
+
+**Catatan**
+
+- Ubin peta diambil langsung dari OpenStreetMap/Esri, jadi browser pemakai
+  harus bisa mengakses internet; marker hanya muncul bila kolom koordinat
+  terisi (pelanggan tanpa koordinat dihitung dan ditampilkan di baris hint).
+- Peta selalu mengikuti picker data server; untuk pengguna biasa picker sudah
+  dibatasi tenant-nya oleh JWT.
+- `validate.js` kini menolak field wajib yang hilang sebelum menyentuh database.
+  Klien lupa mengirim kolom wajib akan menerima `400 "Nilai wajib diisi"`
+  alih-alih `500` — pesan itu muncul di toast panel.
+
+---
+
 ## 2026-10-07 — v1.3.1 — seragamkan collation database (perbaikan menu Pelanggan gagal)
 
 **Masalah**

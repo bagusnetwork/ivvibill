@@ -1,10 +1,20 @@
 'use strict';
 // ============================================================
 // Validasi input ringkas — semua input API wajib lewat sini.
+//
+// KONVENSI WAJIB ISI: opsi `def` yang TIDAK dikirim berarti kolom itu wajib.
+// Sebelumnya `def` berdefault null, sehingga field yang tidak dikirim diam-diam
+// menjadi NULL dan jatuh ke constraint database → HTTP 500 "Column 'x' cannot
+// be null". Kini field wajib yang hilang langsung ditolak 400 "Nilai wajib
+// diisi". Kolom opsional tetap menulis `def: null` (atau nilai lain) secara
+// eksplisit — seperti yang sudah dilakukan sebagian besar pemanggilan.
 // ============================================================
 
-function str(v, { min = 0, max = 10000, def = null, trim = true } = {}) {
-  if (v === undefined || v === null || v === '') return def;
+function str(v, { min = 0, max = 10000, def = undefined, trim = true } = {}) {
+  if (v === undefined || v === null || v === '') {
+    if (def === undefined) throw new Error('Nilai wajib diisi');
+    return def;
+  }
   let s = String(v);
   if (trim) s = s.trim();
   if (s.length < min) throw new Error(`Minimal ${min} karakter`);
@@ -12,8 +22,11 @@ function str(v, { min = 0, max = 10000, def = null, trim = true } = {}) {
   return s;
 }
 
-function num(v, { min = null, max = null, def = null, int = false } = {}) {
-  if (v === undefined || v === null || v === '') return def;
+function num(v, { min = null, max = null, def = undefined, int = false } = {}) {
+  if (v === undefined || v === null || v === '') {
+    if (def === undefined) throw new Error('Nilai wajib diisi');
+    return def;
+  }
   const n = Number(v);
   if (!Number.isFinite(n)) throw new Error('Harus berupa angka');
   if (int && !Number.isInteger(n)) throw new Error('Harus bilangan bulat');
@@ -22,8 +35,11 @@ function num(v, { min = null, max = null, def = null, int = false } = {}) {
   return n;
 }
 
-function enumOf(v, allowed, def = null) {
-  if (v === undefined || v === null || v === '') return def;
+function enumOf(v, allowed, def = undefined) {
+  if (v === undefined || v === null || v === '') {
+    if (def === undefined) throw new Error('Nilai wajib diisi');
+    return def;
+  }
   const s = String(v);
   if (!allowed.includes(s)) throw new Error(`Nilai tidak valid: ${s}`);
   return s;

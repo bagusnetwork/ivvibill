@@ -10,7 +10,8 @@ const JUDUL = {
   wa: 'WhatsApp Gateway', setting: 'Pengaturan',
   tenant: 'Data Server (ISP)', group: 'Group Akses',
   topologi: 'Master Topologi (ODP)', desa: 'Master Desa',
-  noc: 'NOC — Ping Test Internet', keuangan: 'Keuangan (Kas)', tiket: 'Tiket Gangguan'
+  noc: 'NOC — Ping Test Internet', keuangan: 'Keuangan (Kas)', tiket: 'Tiket Gangguan',
+  peta: 'Peta Sebaran'
 };
 
 const LABEL_MENU = {
@@ -20,7 +21,8 @@ const LABEL_MENU = {
   interface: 'Interface', olt: 'Redaman OLT', issue: 'Issue', perangkat: 'Perangkat',
   pengguna: 'Pengguna', wa: 'WhatsApp', setting: 'Pengaturan',
   data_server: 'Data Server', group_akses: 'Group Akses',
-  topologi: 'Topologi', desa: 'Desa', noc: 'NOC', keuangan: 'Keuangan', tiket: 'Tiket'
+  topologi: 'Topologi', desa: 'Desa', noc: 'NOC', keuangan: 'Keuangan', tiket: 'Tiket',
+  peta: 'Peta Sebaran'
 };
 
 /** Hanya pemilik platform (superadmin) yang boleh memindah grup/pengguna antar tenant. */
@@ -1842,4 +1844,108 @@ async function hapusGroup(id) {
     await API.del(`/api/group-akses/${id}`);
     toast('Group dihapus'); loadGroup();
   } catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ PETA SEBARAN
+// Padanan halaman Maps Topologi (gratisinaja): Leaflet + marker ODP/pelanggan,
+// refresh tiap 30 detik, berhenti otomatis begitu halaman ditinggalkan.
+let PETA_MAP = null, PETA_TIMER = null, PETA_MARKERS = [], PETA_FIT = false;
+
+function petaInit() {
+  if (PETA_MAP || typeof L === 'undefined') return;
+  PETA_MAP = L.map('petaMap', { zoomControl: true }).setView([-7.062083, 106.79739], 11);
+  const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 19, attribution: 'Tiles &copy; Esri' });
+  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' });
+  sat.addTo(PETA_MAP);
+  L.control.layers({ 'Satelit': sat, 'Peta': osm }, {}, { position: 'topright' }).addTo(PETA_MAP);
+}
+
+/** Warna pin pelanggan — sama dengan legenda di bawah peta. */
+function petaWarna(p) {
+  if (p.status === 'nonaktif' || p.status === 'baru') return '#8b95a7';
+  if (p.status === 'isolir') return '#e5484d';
+  return p.online ? '#2e9e44' : '#e5484d';
+}
+
+function petaStatus(p) {
+  if (p.status === 'isolir') return 'Isolir';
+  if (p.status === 'aktif') return p.online ? 'Online' : 'Offline';
+  if (p.status === 'baru') return 'Register';
+  return 'Tidak aktif';
+}
+
+function petaGambar(d) {
+  PETA_MARKERS.forEach(m => PETA_MAP.removeLayer(m));
+  PETA_MARKERS = [];
+
+  d.odp.filter(o => o.lat !== null).forEach(o => {
+    const m = L.marker([o.lat, o.lng], {
+      title: o.nama,
+      icon: L.divIcon({ className: '', html: '<div class="peta-odp" style="background:#2f6fed">ODP</div>',
+        iconSize: [26, 22], iconAnchor: [13, 11] })
+    }).bindPopup(
+      `<b>${esc(o.nama)}</b><br>Port terpakai: ${o.jumlah_terpakai}/${o.jumlah_port}` +
+      (o.titik_koordinat ? `<br><span class="hint">${esc(o.titik_koordinat)}</span>` : ''));
+    m.addTo(PETA_MAP); PETA_MARKERS.push(m);
+  });
+
+  d.pelanggan.filter(p => p.lat !== null).forEach(p => {
+    const huruf = esc((p.nama || '?').trim().charAt(0).toUpperCase());
+    const m = L.marker([p.lat, p.lng], {
+      title: p.nama,
+      icon: L.divIcon({ className: '',
+        html: `<div class="peta-pin" style="background:${petaWarna(p)}"><i>${huruf}</i></div>`,
+        iconSize: [24, 24], iconAnchor: [12, 24] })
+    }).bindPopup(
+      `<b>${esc(p.nama)}</b> <span class="hint">(${esc(p.kode || '-')})</span><br>` +
+      `Paket: ${esc(p.nama_paket || '-')}<br>` +
+      `Status: ${petaStatus(p)}<br>` +
+      `Alamat: ${esc(p.alamat || '-')}` +
+      (p.nama_topologi ? `<br>ODP: ${esc(p.nama_topologi)}` : '') +
+      `<br><a href="https://google.com/maps/?q=${p.lat},${p.lng}" target="_blank" rel="noopener">Buka di Google Maps</a>`);
+    m.addTo(PETA_MAP); PETA_MARKERS.push(m);
+  });
+
+  if (!PETA_FIT && PETA_MARKERS.length) {
+    PETA_MAP.fitBounds(L.latLngBounds(PETA_MARKERS.map(m => m.getLatLng())).pad(0.2));
+    PETA_FIT = true;
+  }
+
+  const j = d.jumlah || {};
+  document.getElementById('petaRingkas').textContent = PETA_MARKERS.length
+    ? `Titik tampil: ${PETA_MARKERS.length} · ODP ${j.odp_berkoordinat || 0}/${j.odp || 0} · ` +
+      `Pelanggan ${j.pelanggan_berkoordinat || 0}/${j.pelanggan || 0}`
+    : 'Belum ada titik koordinat';
+  document.getElementById('petaHint').textContent = d.tanpa_koordinat > 0
+    ? `${d.tanpa_koordinat} pelanggan belum punya latitude/longitude sehingga belum tampil di peta — ` +
+      'isi lewat form Ubah Pelanggan (kolom Latitude/Longitude), atau petakan ke ODP berkoordinat. ' +
+      'Peta dimuat ulang otomatis tiap 30 detik.'
+    : 'Seluruh pelanggan sudah punya koordinat. Peta dimuat ulang otomatis tiap 30 detik.';
+}
+
+async function loadPeta() {
+  if (typeof L === 'undefined') {
+    document.getElementById('petaRingkas').textContent = 'Pustaka peta (Leaflet) gagal dimuat';
+    return;
+  }
+  petaInit();
+  try {
+    petaGambar(await API.get('/api/peta'));
+  } catch (e) {
+    document.getElementById('petaRingkas').textContent = 'Gagal memuat peta';
+    toast(e.message, true);
+  }
+  if (!PETA_TIMER) PETA_TIMER = setInterval(petaDetik, 30000);
+}
+
+/** Tiap 30 detik: berhenti sendiri bila halaman peta sudah ditinggalkan. */
+function petaDetik() {
+  const v = document.querySelector('[data-view="peta"]');
+  if (!v || v.style.display === 'none') {
+    clearInterval(PETA_TIMER); PETA_TIMER = null;
+    return;
+  }
+  loadPeta();
 }
