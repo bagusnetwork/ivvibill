@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+
+# Sandi signing TIDAK ditulis di berkas ini. Diambil dari IVVI_KEYSTORE_PASS
+# atau berkas lokal android/.keystore-pass (di-gitignore).
+if [ -z "${IVVI_KEYSTORE_PASS:-}" ]; then
+  if [ -f android/.keystore-pass ]; then
+    IVVI_KEYSTORE_PASS=$(sed -n 1p android/.keystore-pass)
+  else
+    echo "!! set IVVI_KEYSTORE_PASS atau isi android/.keystore-pass"; exit 1
+  fi
+fi
 # ============================================================
 # ivvibill — build 4 APK (WebView wrapper) tanpa Gradle.
 # Prasyarat: JDK 17, ANDROID_HOME berisi platform-tools +

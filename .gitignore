@@ -21,3 +21,4 @@ storage/cron.log
 
 # kunci signing APK (rahasia, jangan di-commit)
 android/*.keystore
+android/.keystore-pass
