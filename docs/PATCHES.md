@@ -4,6 +4,50 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-08 — v1.4.2 — uji export/import + unggahan >2MB tak lagi HTTP 500
+
+**Masalah**
+
+Export/template/import pelanggan (fitur sejak v1.1.3 yang belum pernah diuji
+sesi audit ini) diuji penuh untuk pertama kali. Satu bug ditemukan: unggahan
+file >2MB (batas multer) jatuh ke **HTTP 500 "File too large"** — pesan itu
+tidak dikenali pemeta 400 di error handler, sehingga penolakan unggahan oleh
+pengguna dilaporkan sebagai kesalahan server.
+
+**Diubah**
+
+- `server.js` — error handler menerjemahkan kode batas multer lebih dulu:
+  `LIMIT_FILE_SIZE` → **413** "Ukuran file melebihi batas yang diizinkan",
+  kode `LIMIT_*` lain (ekstensi/lapangan tak terduga) → **400**, sebelum pola
+  pesan validasi yang memetakan sisanya ke 400/500.
+- `src/config.js` + `package.json` — versi **1.4.2**.
+
+**Cara dipasang ke produksi**
+
+Tanpa perubahan aset: `sudo systemctl restart ivvibill` — perubahan hanya di
+kode server yang dimuat saat proses start.
+
+**Verifikasi (staging: DB clone `ivvibill_staging`, port 3011)**
+
+- **Uji API export/import 71/71 lulus (exit 0)**: tanpa sesi semua endpoint
+  401; template xlsx (lembar Pelanggan+Petunjuk, header 15 kolom, 2 baris
+  contoh) dan template CSV (BOM `efbbbf`, baris `#`); export xlsx/csv header
+  identik template, jumlah baris = total, filter `?q=` ikut mengendalikan;
+  import menolak 400: tanpa file, `.exe`, header `nama` hilang, >1000 baris,
+  file hanya komentar — dan **>2MB kini 413**; round-trip xlsx 3 baris
+  (1 sukses, 2 gagal per baris dengan nomor & pesan jelas), duplikat username
+  ditolak, CSV ber-komentar masuk, re-import file export tidak crash.
+- **Isolasi tenant**: baris import mengikuti tenant aktif di DB
+  (ds=2 → `id_data_server=2`), teknisi ber-tenant satu hanya melihat &
+  mengimpor tenantnya sendiri, pindah tenant ditolak 403; superadmin tetap
+  pemilik platform yang melihat semua tenant (desain `scope.js`).
+- **Uji UI panel 13/13 lulus (exit 0)**: login form → link Template & Export
+  benar (terbawa filter `q`/`status`/`tipe`) → dialog Import unggah CSV 2 baris
+  → hasil "1 dari 2 … 1 gagal: Baris 3 — X: Minimal 2 karakter" → baris muncul
+  di daftar.
+- Audit API regresi **0 temuan / 180 OK**; tiap unggahan tercatat di
+  `audit_log` sebagai `import_pelanggan`.
+
 ## 2026-10-08 — v1.4.1 — pemilih koordinat klik-di-peta pada form Pelanggan & Topologi
 
 **Masalah**

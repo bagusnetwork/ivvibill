@@ -149,10 +149,16 @@ app.use((req, res) => {
   res.status(404).type('html').send(TEMPLATE_404);
 });
 app.use((err, req, res, next) => {   // eslint-disable-line no-unused-vars
-  const msg = err.message || 'Kesalahan server';
+  // Kegagalan batas multer (LIMIT_FILE_SIZE dsb) adalah penolakan unggahan oleh
+  // pengguna, bukan kesalahan server — tanpa penerjemahan ini unggahan >2MB
+  // jatuh ke HTTP 500 "File too large".
+  const multerKode = err && typeof err.code === 'string' && /^LIMIT_/.test(err.code) ? err.code : null;
+  const msg = (multerKode === 'LIMIT_FILE_SIZE' && 'Ukuran file melebihi batas yang diizinkan')
+    || err.message || 'Kesalahan server';
   // err.status dipakai pemanggil yang tahu status sebenarnya (404/403);
   // tanpa itu, pesan validasi diterjemahkan ke 400 dan sisanya 500.
-  const kuat = Number(err.status) || null;
+  const kuat = Number(err.status) ||
+    (multerKode ? (multerKode === 'LIMIT_FILE_SIZE' ? 413 : 400) : null);
   const pola = /tidak valid|wajib|minimal|maksimal|Harus|sudah|tidak cukup|tidak ditemukan|ditolak|gagal|tidak ada|belum diatur|belum disimpan|tidak aktif|terlalu panjang|kosong|dikenali|bukan milik/i;
   const code = kuat || (pola.test(msg) ? 400 : 500);
   if (code === 500) console.error('[ivvibill error]', err);
