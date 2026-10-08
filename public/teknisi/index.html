@@ -14,6 +14,7 @@
     <div class="nav-group">Pekerjaan</div>
     <nav class="nav">
       <a data-page="dashboard" data-menu="dashboard"><span class="ic">📊</span> Ringkasan</a>
+      <a data-page="absen"><span class="ic">🕘</span> Absensi</a>
       <a data-page="pekerjaan"><span class="ic">🧰</span> Order Pekerjaan</a>
       <a data-page="tiket"><span class="ic">🎫</span> Tiket Gangguan</a>
     </nav>
@@ -41,6 +42,31 @@
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Pelanggan</th><th>Tipe</th><th>Pesan</th><th class="t-actions"></th></tr></thead>
           <tbody id="dashIssue"><tr><td colspan="4" class="empty">Kosong</td></tr></tbody></table></div></div>
+      </div>
+
+      <div data-view="absen" data-onload="loadAbsen" style="display:none">
+        <div class="panel"><div class="panel-head"><h2>Absensi hari ini</h2>
+          <span class="hint" id="absTanggal"></span></div>
+          <div class="panel-body">
+            <div class="hint" id="absStatus" style="margin-bottom:10px">Memuat…</div>
+            <div class="form-row"><label>Catatan (opsional)</label>
+              <input id="absCatatan" placeholder="mis. patroli sektor utara"></div>
+            <div class="toolbar">
+              <button class="btn" id="btnMasuk" onclick="absen('masuk')">Absen Masuk</button>
+              <button class="btn secondary" id="btnPulang" onclick="absen('pulang')">Absen Pulang</button>
+              <div class="spacer"></div>
+              <span class="hint" id="absLokasi">GPS: mencari sinyal…</span>
+              <button class="btn sm ghost" onclick="absenLokasi()">⟳</button>
+            </div>
+            <p class="hint">Titik koordinat ponsel diambil saat tombol ditekan dan hanya <b>dicatat</b>
+              untuk dipantau teknisi senior di panel — tidak ada absen yang ditolak karena lokasinya jauh.
+              Bila izin lokasi ditolak atau sinyal GPS tidak ada, absen tetap tersimpan tanpa koordinat.</p>
+          </div></div>
+        <div class="panel"><div class="panel-head"><h2>Riwayat 31 hari terakhir</h2></div>
+          <div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Tanggal</th><th>Masuk</th><th>Pulang</th><th>Durasi</th>
+            <th>Jarak</th><th>Catatan</th></tr></thead>
+          <tbody id="tbAbsenSaya"><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table></div></div>
       </div>
 
       <div data-view="pekerjaan" data-onload="loadKerja" style="display:none">

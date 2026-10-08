@@ -11,7 +11,7 @@ const JUDUL = {
   tenant: 'Data Server (ISP)', group: 'Group Akses',
   topologi: 'Master Topologi (ODP)', desa: 'Master Desa',
   noc: 'NOC — Ping Test Internet', keuangan: 'Keuangan (Kas)', tiket: 'Tiket Gangguan',
-  peta: 'Peta Sebaran'
+  peta: 'Peta Sebaran', absen: 'Absensi Teknisi'
 };
 
 const LABEL_MENU = {
@@ -22,7 +22,7 @@ const LABEL_MENU = {
   pengguna: 'Pengguna', wa: 'WhatsApp', setting: 'Pengaturan',
   data_server: 'Data Server', group_akses: 'Group Akses',
   topologi: 'Topologi', desa: 'Desa', noc: 'NOC', keuangan: 'Keuangan', tiket: 'Tiket',
-  peta: 'Peta Sebaran'
+  peta: 'Peta Sebaran', absen: 'Absensi Teknisi'
 };
 
 /** Hanya pemilik platform (superadmin) yang boleh memindah grup/pengguna antar tenant. */
@@ -1028,18 +1028,27 @@ async function testPerangkat(id) {
 // ============================================================ PENGGUNA
 async function loadPengguna() {
   try {
-    const d = await API.get('/api/pengguna');
+    const [d] = await Promise.all([API.get('/api/pengguna'), muatNamaRef()]);
+    const namaRef = (u) => {
+      if (!u.id_ref) return '-';
+      const o = REF_NAMA[u.role] && REF_NAMA[u.role][u.id_ref];
+      return o ? `${u.id_ref} · ${o}` : u.id_ref;
+    };
     document.getElementById('tbPengguna').innerHTML = (d.data || []).map(u => `
       <tr><td><b>${esc(u.username)}</b></td><td>${esc(u.nama)}</td>
         <td><span class="badge ${u.role === 'superadmin' ? 'bad' : u.role === 'teknisi' ? 'info' : 'warn'}">${esc(u.role)}</span></td>
-        <td>${esc(u.id_ref ?? '-')}</td>
+        <td>${esc(namaRef(u))}</td>
         <td>${esc(u.id_data_server || 'semua')}</td>
         <td>${esc(u.nama_grup || 'semua menu')}</td>
         <td>${u.last_login ? esc(String(u.last_login).slice(0, 16)) : '-'}</td>
+        <td>${Number(u.gagal_login || 0) > 0 ? `<span class="badge bad">${esc(u.gagal_login)}</span>` : '-'}</td>
         <td><span class="badge ${u.status === 'aktif' ? 'ok' : 'bad'}">${esc(u.status)}</span></td>
-        <td class="t-actions"><button class="btn sm secondary" onclick="formPengguna(${esc(JSON.stringify(u))})">Ubah</button></td>
-      </tr>`).join('') || '<tr><td colspan="9" class="empty">Kosong</td></tr>';
+        <td class="t-actions">
+          <button class="btn sm secondary" onclick="formPengguna(${esc(JSON.stringify(u))})">Ubah</button>
+          ${u.status !== 'aktif' ? `<button class="btn sm" onclick="bukaBlokirPengguna(${u.id})">Buka blokir</button>` : ''}
+        </td></tr>`).join('') || '<tr><td colspan="10" class="empty">Kosong</td></tr>';
     await isiOpsiGrup();
+    loadLoginGagal();
 
     const a = await API.get('/api/audit');
     document.getElementById('tbAudit').innerHTML = (a.data || []).slice(0, 30).map(x => `
@@ -1048,6 +1057,143 @@ async function loadPengguna() {
       || '<tr><td colspan="4" class="empty">Kosong</td></tr>';
   } catch (e) { toast(e.message, true); }
 }
+
+/** Percobaan login gagal terakhir — penyebab "login ditolak" yang dilaporkan role. */
+async function loadLoginGagal() {
+  const tb = document.getElementById('tbLoginGagal');
+  if (!tb) return;
+  try {
+    const d = await API.get('/api/pengguna/login-gagal');
+    const label = {
+      sandi_salah: 'password salah', akun_blokir: 'akun terblokir',
+      belum_tenant: 'akun belum ditautkan ke data server',
+      belum_ref: 'akun belum ditautkan ke agen/pelanggan',
+      username_tidak_ada: 'username tidak dikenal',
+      master_tanpa_sandi: 'data server belum punya password',
+      server_nonaktif: 'data server tidak aktif', langganan_habis: 'masa langganan habis'
+    };
+    tb.innerHTML = (d.data || []).map(x => `
+      <tr><td>${esc(String(x.created_at).slice(0, 16))}</td><td><b>${esc(x.username)}</b></td>
+        <td>${esc(x.ip || '-')}</td>
+        <td><span class="badge ${x.alasan === 'sandi_salah' ? 'warn' : 'bad'}">${esc(label[x.alasan] || x.alasan || 'ditolak')}</span></td>
+      </tr>`).join('') || '<tr><td colspan="4" class="empty">Tidak ada penolakan tercatat</td></tr>';
+  } catch (e) { tb.innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`; }
+}
+
+/** Nama agen/pelanggan untuk kolom Ref — sekali saja, cukup 200 baris terakhir. */
+let REF_NAMA = {};
+async function muatNamaRef() {
+  if (REF_NAMA.agen) return;
+  try {
+    const [ag, pg] = await Promise.all([
+      API.get('/api/agen').catch(() => ({ data: [] })),
+      API.get('/api/pelanggan?limit=200').catch(() => ({ data: [] }))
+    ]);
+    REF_NAMA = {
+      agen: Object.fromEntries((ag.data || []).map(a => [a.id, a.nama])),
+      pelanggan: Object.fromEntries((pg.data || []).map(p => [p.id, p.nama]))
+    };
+  } catch (_) {}
+}
+
+async function bukaBlokirPengguna(id) {
+  try {
+    await API.put(`/api/pengguna/${id}`, { status: 'aktif' });
+    toast('Blokir dibuka — pencobaan login dihitung ulang dari nol');
+    loadPengguna(); loadLoginGagal();
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Role yang datanya diambil dari baris lain (agen -> tabel agen, pelanggan -> tabel pelanggan). */
+function roleButuhRef(role) { return role === 'agen' || role === 'pelanggan'; }
+
+/** Sumber pilihan agen/pelanggan — selalu dari data server yang sedang aktif. */
+let REF_OPSI = [], REF_TERPILIH = '', REF_STATUS = '', REF_TIMER = null;
+
+async function muatOpsiRef() {
+  const role = document.getElementById('uRole').value;
+  if (!roleButuhRef(role)) { REF_OPSI = []; REF_STATUS = ''; gambarOpsiRef(); return; }
+  const kata = (document.getElementById('uRefCari').value || '').trim();
+  // Sesi platform tidak difilter server (melihat semua tenant), jadi Ref yang
+  // ditawarkan harus disaring di sini memakai data server yang diketik di form;
+  // kalau tidak, pengguna bisa memilih agen milik ISP lain dan simpan selalu 400.
+  const dsForm = daftarTenantDariForm();
+  try {
+    if (role === 'agen') {
+      const d = await API.get('/api/agen');
+      REF_OPSI = (d.data || []).map(a => ({ id: a.id, nama: a.nama, ds: a.id_data_server }));
+    } else {
+      const d = await API.get(`/api/pelanggan?q=${encodeURIComponent(kata)}&limit=200`);
+      REF_OPSI = (d.data || []).map(p => ({
+        id: p.id, nama: `${p.nama} (${p.kode || p.username_pppoe || 'tanpa kode'})`, ds: p.id_data_server
+      }));
+    }
+    if (dsForm) REF_OPSI = REF_OPSI.filter(o => o.ds == null || dsForm.includes(Number(o.ds)));
+    REF_STATUS = `Daftar ${REF_OPSI.length} ${role} pada data server `
+      + (dsForm ? dsForm.join(', ') : 'form (belum diisi)') + '.';
+  } catch (e) { REF_STATUS = 'Daftar gagal dimuat: ' + e.message; }
+  gambarOpsiRef();
+}
+
+function gambarOpsiRef() {
+  const kotak = document.getElementById('uRefPick');
+  const role = document.getElementById('uRole').value;
+  const kata = (document.getElementById('uRefCari').value || '').trim().toLowerCase();
+  // daftar agen kecil sehingga disaring di sini; pelanggan sudah disaring server lewat q=
+  const ikut = role === 'agen'
+    ? REF_OPSI.filter(o => !kata || String(o.nama).toLowerCase().includes(kata))
+    : REF_OPSI;
+  const hilang = REF_TERPILIH && !ikut.some(o => String(o.id) === REF_TERPILIH);
+  kotak.innerHTML = '<option value="">— pilih —</option>'
+    + (hilang ? `<option value="${esc(REF_TERPILIH)}">Ref tersimpan #${esc(REF_TERPILIH)} (di luar daftar ini)</option>` : '')
+    + ikut.map(o => `<option value="${o.id}">${esc(o.nama)}</option>`).join('');
+  kotak.value = REF_TERPILIH || '';
+  isiRefTerpilih();
+}
+
+function ambilOpsiRef() {
+  REF_TERPILIH = document.getElementById('uRefPick').value;
+  isiRefTerpilih();
+}
+
+/** Nilai terpilih -> #uRef (angka yang dikirim ke server) + peringatan beda tenant. */
+function isiRefTerpilih() {
+  const kotak = document.getElementById('uRefPick');
+  document.getElementById('uRef').value = REF_TERPILIH || '';
+  const o = REF_OPSI.find(x => String(x.id) === REF_TERPILIH);
+  const info = document.getElementById('uRefInfo');
+  if (!REF_TERPILIH) { info.textContent = REF_STATUS || 'Belum dipilih.'; return; }
+  const dsForm = daftarTenantDariForm();
+  const bentrok = dsForm && (!o || (o.ds != null && !dsForm.includes(Number(o.ds))));
+  info.innerHTML = `${REF_STATUS ? REF_STATUS + ' ' : ''}Dipilih <b>${esc(o ? o.nama : '#' + REF_TERPILIH)}</b>`
+    + (o ? ` (data server ${esc(o.ds ?? '-')})` : ' — ref lama yang tidak ditemukan di daftar ini')
+    + (bentrok ? ' — <span class="badge bad">beda data server dengan form ini, simpan akan ditolak</span>' : '');
+}
+
+function cariOpsiRef() {
+  clearTimeout(REF_TIMER);
+  if (document.getElementById('uRole').value === 'agen') { gambarOpsiRef(); return; }
+  REF_TIMER = setTimeout(muatOpsiRef, 350);
+}
+
+/** Data server diubah: badge Ref langsung diperbarui, daftar Ref dimuat ulang. */
+function gantiTenantPengguna() {
+  isiRefTerpilih();
+  if (!roleButuhRef(document.getElementById('uRole').value)) return;
+  clearTimeout(REF_TIMER);
+  REF_TIMER = setTimeout(muatOpsiRef, 400);
+}
+
+function gantiRolePengguna() {
+  const role = document.getElementById('uRole').value;
+  document.getElementById('uRefRow').style.display = roleButuhRef(role) ? '' : 'none';
+  document.getElementById('uRefLabel').textContent = role === 'agen' ? 'Agen pemilik akun ini' : 'Pelanggan akun ini';
+  document.getElementById('uRefCari').value = '';
+  REF_TERPILIH = '';
+  document.getElementById('uRef').value = '';
+  muatOpsiRef();
+}
+
 function formPengguna(u) {
   document.getElementById('uId').value = u ? u.id : '';
   document.getElementById('uUsername').value = u ? u.username : '';
@@ -1061,21 +1207,51 @@ function formPengguna(u) {
   document.getElementById('uDsRow').style.display = bebas ? '' : 'none';
   document.getElementById('uGrupRow').style.display = bebas ? '' : 'none';
   if (bebas) {
-    document.getElementById('uDs').value = u && u.id_data_server ? String(u.id_data_server) : '';
+    document.getElementById('uDs').value = u && u.id_data_server ? String(u.id_data_server)
+      : String(sesi().ds || '');
+    document.getElementById('uDsHint').textContent = u && u.id_data_server
+      ? '' : 'Terisi data server yang sedang aktif. Kosong hanya boleh untuk role superadmin.';
     saringOpsiGrup();
     document.getElementById('uGrup').value = u && u.id_group_akses ? String(u.id_group_akses) : '';
   }
+  document.getElementById('uPassLabel').textContent = u ? 'Password baru (kosongkan bila tidak diubah)' : 'Password *';
+  document.getElementById('uPassHint').textContent = u ? '' : 'Wajib — akun tanpa password tidak bisa masuk.';
+  if (u && Number(u.gagal_login || 0) > 0) {
+    document.getElementById('uPassHint').textContent =
+      `${u.gagal_login} kali percobaan login terakhir salah. Status: ${u.status}.`
+      + (u.status !== 'aktif' ? ' Akun terblokir — pilih Status "aktif" untuk membukanya.' : '');
+  }
+  document.getElementById('uRefCari').value = '';
+  document.getElementById('uRefRow').style.display = roleButuhRef(document.getElementById('uRole').value) ? '' : 'none';
+  document.getElementById('uRefLabel').textContent = document.getElementById('uRole').value === 'agen'
+    ? 'Agen pemilik akun ini' : 'Pelanggan akun ini';
+  REF_TERPILIH = u && u.id_ref ? String(u.id_ref) : '';
+  muatOpsiRef();
   modalOpen('mPengguna');
 }
+
 async function simpanPengguna() {
   const id = document.getElementById('uId').value;
   const pass = document.getElementById('uPass').value;
+  const role = document.getElementById('uRole').value;
+  const ref = document.getElementById('uRef').value;
+  const ds = document.getElementById('uDs').value;
+  if (!id && !pass) return toast('Password wajib diisi saat membuat akun', true);
+  if (roleButuhRef(role) && !ref) {
+    return toast(`Pilih ${role === 'agen' ? 'agen' : 'pelanggan'} pemilik akun ini`, true);
+  }
+  if (!id && role !== 'superadmin' && bolehTenantLain() && !String(ds).trim()) {
+    return toast(`Akun ${role} harus punya data server`, true);
+  }
   try {
     if (id) {
       const body = { nama: document.getElementById('uNama').value, status: document.getElementById('uStatus').value };
       if (pass) body.password = pass;
+      // ref kosong = tidak disentuh; ref bisa dikosongkan lewat SQL saja, karena
+      // akun agen/warga tanpa ref adalah akun yang aplikasi-nya rusak.
+      if (roleButuhRef(role) && ref) body.id_ref = ref;
       if (bolehTenantLain()) {
-        body.id_data_server = document.getElementById('uDs').value || 'all';
+        body.id_data_server = ds || 'all';
         body.id_group_akses = document.getElementById('uGrup').value || null;
       }
       await API.put(`/api/pengguna/${id}`, body);
@@ -1083,17 +1259,80 @@ async function simpanPengguna() {
       const body = {
         username: document.getElementById('uUsername').value,
         nama: document.getElementById('uNama').value,
-        role: document.getElementById('uRole').value,
-        id_ref: document.getElementById('uRef').value || null,
+        role,
+        id_ref: roleButuhRef(role) ? ref : null,
         password: pass
       };
       if (bolehTenantLain()) {
-        body.id_data_server = document.getElementById('uDs').value || 'all';
+        body.id_data_server = ds || 'all';
         body.id_group_akses = document.getElementById('uGrup').value || null;
       }
       await API.post('/api/pengguna', body);
     }
-    modalClose('mPengguna'); toast('Tersimpan'); loadPengguna();
+    modalClose('mPengguna'); toast('Tersimpan'); loadPengguna(); loadLoginGagal();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ ABSENSI TEKNISI
+let ABS_TEKNISI = null, ABS_PERNAH = false;
+
+/** Titik GPS -> angka + tautan peta. Koordinat kosong tetap tampil, tidak ditolak. */
+function titikHtml(lat, long) {
+  if (lat == null || long == null) return '<span class="hint">tanpa GPS</span>';
+  const a = Number(lat).toFixed(5), b = Number(long).toFixed(5);
+  return `<a class="hint" target="_blank" rel="noopener" `
+    + `href="https://www.openstreetmap.org/?mlat=${a}&mlon=${b}#map=17/${a}/${b}">${a},${b}</a>`;
+}
+
+function jamHtml(s) { return s ? esc(String(s).slice(11, 16)) : '<span class="hint">-</span>'; }
+
+function absenAwal() {
+  const d = (offset) => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
+  document.getElementById('absDari').value = d(-30);
+  document.getElementById('absSampai').value = d(0);
+  loadAbsensi();
+}
+
+function absenPilihTeknisi(id) {
+  ABS_TEKNISI = id;
+  document.getElementById('absFilterTeknisi').textContent = id ? `Disaring: teknisi #${id}` : '';
+  loadAbsensi();
+}
+
+async function loadAbsensi() {
+  const dari = document.getElementById('absDari').value;
+  const sampai = document.getElementById('absSampai').value;
+  if (!dari && !sampai && !ABS_PERNAH) return absenAwal();
+  try {
+    // superadmin platform melihat semua ISP sekaligus — beri label dataservernnya
+    const platform = bolehTenantLain();
+    if (platform) await muatLabelTenant();
+    const labelTenant = (id) => platform
+      ? ` <span class="hint">· ${esc(LABEL_TENANT[id] || ('tenant ' + id))}</span>` : '';
+    const q = `?dari=${encodeURIComponent(dari)}&sampai=${encodeURIComponent(sampai)}`
+      + (ABS_TEKNISI ? `&id_teknisi=${ABS_TEKNISI}` : '');
+    const d = await API.get('/api/absen' + q);
+    ABS_PERNAH = true;
+    const baris = d.data || [], rekap = d.rekap || [];
+    document.getElementById('tbAbsenRekap').innerHTML = rekap.map(r => `
+      <tr><td><b>${esc(r.nama)}</b>${labelTenant(r.id_data_server)}</td><td class="t-num">${r.hari}</td>
+        <td class="t-num">${r.lengkap}</td>
+        <td class="t-num">${r.tanpa_koordinat ? `<span class="badge warn">${r.tanpa_koordinat}</span>` : 0}</td>
+        <td class="t-num">${r.jarak_meter >= 1000 ? (r.jarak_meter / 1000).toFixed(2) + ' km' : r.jarak_meter + ' m'}</td>
+        <td class="t-actions"><button class="btn sm secondary" onclick="absenPilihTeknisi(${r.id_teknisi})">Lihat</button></td>
+      </tr>`).join('') || '<tr><td colspan="6" class="empty">Belum ada absensi pada rentang ini</td></tr>';
+    document.getElementById('tbAbsen').innerHTML = baris.map(a => `
+      <tr><td>${esc(String(a.tanggal).slice(0, 10))}</td><td>${esc(a.nama_teknisi)}${labelTenant(a.id_data_server)}</td>
+        <td>${jamHtml(a.jam_masuk)}</td><td>${titikHtml(a.lat_masuk, a.long_masuk)}</td>
+        <td>${jamHtml(a.jam_pulang)}</td><td>${titikHtml(a.lat_pulang, a.long_pulang)}</td>
+        <td class="t-num">${a.durasi_menit != null ? Math.floor(a.durasi_menit / 60) + 'j ' + (a.durasi_menit % 60) + 'm' : '-'}</td>
+        <td class="t-num">${a.jarak_meter != null ? esc(a.jarak_meter) + ' m' : '-'}</td>
+        <td class="hint">${esc(a.catatan || '')}</td></tr>`).join('')
+      || '<tr><td colspan="9" class="empty">Belum ada catatan pada rentang ini</td></tr>';
+    if (ABS_TEKNISI) {
+      document.getElementById('absFilterTeknisi').textContent =
+        `Disaring: ${(baris[0] || {}).nama_teknisi || 'teknisi #' + ABS_TEKNISI}`;
+    }
   } catch (e) { toast(e.message, true); }
 }
 

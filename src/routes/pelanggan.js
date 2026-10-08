@@ -229,25 +229,43 @@ router.get('/pelanggan/unmanage', requireRole('superadmin', 'master', 'teknisi')
 });
 
 // ------------------------------------------- export / template / import
-const KOLOM_EXPORT = ['kode', 'nama', 'tipe', 'paket', 'agen', 'username_pppoe',
+// 'kode' SENGAJA tidak ada di daftar ini. Kolom itu digenerate import
+// (prefix + waktu + urutan) dan tidak pernah dibaca dari berkas, jadi
+// menampilkannya di template hanya membingungkan pengguna.
+const KOLOM_EXPORT = ['nama', 'tipe', 'paket', 'agen', 'username_pppoe',
   'password_pppoe', 'nomor_whatsapp', 'email', 'alamat', 'ip_address', 'mac_address',
   'status', 'tanggal_masuk', 'hari_tagihan'];
+
+/** Judul kolom memakai Bahasa Indonesia; import tetap mengenali nama lama. */
+const LABEL_ID = {
+  nama: 'Nama', tipe: 'Tipe', paket: 'Paket', agen: 'Agen',
+  username_pppoe: 'Username PPPoE', password_pppoe: 'Password PPPoE',
+  nomor_whatsapp: 'Nomor WhatsApp', email: 'Email', alamat: 'Alamat',
+  ip_address: 'IP Address', mac_address: 'MAC Address', status: 'Status',
+  tanggal_masuk: 'Tanggal Masuk', hari_tagihan: 'Hari Tagihan', kode: 'Kode'
+};
+const judul = (k) => LABEL_ID[k] || k;
 
 /** Baris petunjuk — dipakai sebagai lembar kedua di xlsx dan baris '#' di CSV. */
 const PETUNJUK = [
   'Template import data pelanggan — ivvibill',
-  'Kolom wajib hanya nama; baris kosong diabaikan.',
-  'paket & agen diisi nama persis seperti di aplikasi (kosongkan bila tidak ada).',
-  'tipe: pppoe|hotspot · status: baru|aktif|isolir|nonaktif',
-  'tanggal_masuk: YYYY-MM-DD · hari_tagihan: 1-28',
-  'Data hanya ditambahkan — baris yang sudah ada tidak pernah diubah,',
-  'dan pesan WhatsApp tidak dikirim saat import.',
-  'Sheet "Pelanggan" yang dibaca; sheet ini hanya panduan.'
+  'Yang dibaca hanya sheet "Pelanggan" (atau berkas CSV ini). Sheet "Petunjuk" tidak dibaca.',
+  'Kolom wajib hanya NAMA. Kolom lain boleh dikosongkan dan akan diisi otomatis.',
+  'Tipe: pppoe atau hotspot (kosong = pppoe)',
+  'Status: baru, aktif, isolir, nonaktif (kosong = baru)',
+  'Paket dan Agen diisi NAMANYA persis seperti di aplikasi, bukan nomor ID. Kosongkan bila tidak ada.',
+  'Username dan Password PPPoE boleh dikosongkan; bila diisi username dan sudah dipakai pelanggan lain, baris itu ditolak.',
+  'Nomor WhatsApp tanpa tanda +, contoh 081234567890',
+  'Tanggal Masuk: YYYY-MM-DD, contoh 2026-10-08 (kosong = hari ini)',
+  'Hari Tagihan: angka 1 sampai 28 (kosong = 1)',
+  'Kode pelanggan dibuat otomatis oleh sistem, jadi tidak perlu dan tidak bisa diisi dari berkas.',
+  'Import hanya MENAMBAH pelanggan baru. Baris yang sudah ada tidak diubah dan WhatsApp tidak dikirim saat import.',
+  'Baris kosong dan baris yang diawali # diabaikan. Maksimal 1000 baris sekali import.'
 ];
 
 const CONTOH = [
-  ['', 'Budi Santoso', 'pppoe', '10M Rumahan', '', 'budi01', 'rahasia123', '081234567890', '', 'Jl. Merdeka No. 1', '', '', 'baru', '2026-10-06', '1'],
-  ['', 'Siti Aminah', 'hotspot', 'Tiket 3 Jam', '', '', '', '089876543210', '', 'Perum Griya Asri C2', '', '', 'aktif', '2026-10-06', '5']
+  ['Budi Santoso', 'pppoe', '10M Rumahan', '', 'budi01', 'rahasia123', '081234567890', '', 'Jl. Merdeka No. 1', '', '', 'baru', '2026-10-08', '1'],
+  ['Siti Aminah', 'hotspot', 'Tiket 3 Jam', '', '', '', '089876543210', '', 'Perum Griya Asri C2', '', '', 'aktif', '2026-10-08', '5']
 ];
 
 /** Nilai sel → teks (Date jadi tanggal ISO, null jadi string kosong). */
@@ -261,7 +279,7 @@ function sel(val) {
 async function barisEkspor(req) {
   const f = filterDaftar(req);
   const rows = await db.q(
-    `SELECT p.kode, p.nama, p.tipe, pk.nama_paket AS paket, ag.nama AS agen,
+    `SELECT p.nama, p.tipe, pk.nama_paket AS paket, ag.nama AS agen,
        p.username_pppoe, p.password_pppoe, p.nomor_whatsapp, p.email, p.alamat,
        p.ip_address, p.mac_address, p.status, p.tanggal_masuk, p.hari_tagihan
      FROM pelanggan p
@@ -270,7 +288,7 @@ async function barisEkspor(req) {
      WHERE ${f.where}
      ORDER BY p.id DESC LIMIT 5000`, f.params
   );
-  return [KOLOM_EXPORT, ...rows.map(r => KOLOM_EXPORT.map(k => sel(r[k])))];
+  return [KOLOM_EXPORT.map(judul), ...rows.map(r => KOLOM_EXPORT.map(k => sel(r[k])))];
 }
 
 /** ?format=csv untuk yang terbiasa CSV; selain itu xlsx. */
@@ -293,7 +311,7 @@ router.get('/pelanggan/export', async (req, res, next) => {
 
 /** Template import: header + dua baris contoh, plus lembar Petunjuk. */
 router.get('/pelanggan/template', (req, res) => {
-  const isi = [KOLOM_EXPORT, ...CONTOH];
+  const isi = [KOLOM_EXPORT.map(judul), ...CONTOH];
   if (req.query.format === 'csv') {
     const teks = [...PETUNJUK.map(t => `# ${t}`), isi.map(r => r.map(csv.selCsv).join(',')).join('\r\n')];
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -326,7 +344,7 @@ const HEADER_IMPOR = {
   status: 'status',
   tanggalmasuk: 'tanggal_masuk', tglmasuk: 'tanggal_masuk', tgl: 'tanggal_masuk',
   haritagihan: 'hari_tagihan',
-  kode: 'kode'                            // ditulis export, sengaja tidak diimpor
+  kode: 'kode'                            // berkas lama masih punya kolom ini; sengaja diabaikan
 };
 
 /**
@@ -387,7 +405,8 @@ router.post('/pelanggan/import', requireRole('superadmin', 'master', 'teknisi'),
       if (tujuan && kolom[tujuan] === undefined) kolom[tujuan] = i;
     });
     if (kolom.nama === undefined) {
-      return res.status(400).json({ error: 'Header "nama" tidak ditemukan — gunakan template yang disediakan' });
+      return res.status(400).json({
+        error: 'Baris judul "Nama" tidak ditemukan — unduh template lalu isi sheet "Pelanggan" tanpa mengubah judulnya' });
     }
     const amb = (selBaris, k) =>
       kolom[k] === undefined || selBaris[kolom[k]] === undefined ? '' : String(selBaris[kolom[k]]).trim();

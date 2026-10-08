@@ -27,6 +27,10 @@ const MENU = [
   'dashboard', 'pelanggan', 'tagihan', 'invoice', 'pembayaran', 'paket', 'voucher', 'agen',
   'interface', 'olt', 'issue', 'perangkat', 'pengguna', 'wa', 'setting',
   'topologi', 'desa', 'noc', 'keuangan', 'tiket', 'peta',
+  // v1.5: absensi. Entri ini hanya gating tab "Absensi Teknisi" di panel; teknisi
+  // mencatat kehadirannya sendiri lewat /teknisi/ tanpa bergantung grant grup,
+  // sama seperti Order Pekerjaan.
+  'absen',
   'data_server', 'group_akses'
 ];
 

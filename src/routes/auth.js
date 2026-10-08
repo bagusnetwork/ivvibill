@@ -47,6 +47,13 @@ async function daftarServerUser(user) {
   );
 }
 
+/** Catat percobaan login + alasannya (untuk diagnosis admin, bukan untuk pemohon). */
+function catatLogin(username, ip, alasan) {
+  return db.insert(
+    'INSERT INTO login_attempt (username, ip, success, alasan) VALUES (?,?,?,?)',
+    [username, ip, alasan === 'sukses' ? 1 : 0, alasan]);
+}
+
 router.post('/login', loginLimiter, async (req, res, next) => {
   try {
     const username = v.username(req.body.username);
@@ -58,8 +65,10 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     const user = await db.one('SELECT * FROM app_user WHERE username = ?', [username]);
     if (user) {
       const ok = await bcrypt.compare(pass, user.password_hash);
-      await db.insert('INSERT INTO login_attempt (username, ip, success) VALUES (?,?,?)',
-        [username, ip, ok ? 1 : 0]);
+      // `alasan` hanya dilihat admin (GET /api/pengguna/login-gagal); respons ke
+      // pemohon tetap umum supaya tidak memandu penebak sandi/akun.
+      await catatLogin(username, ip,
+        !ok ? 'sandi_salah' : user.status !== 'aktif' ? 'akun_blokir' : 'sukses');
       if (user.status !== 'aktif') return res.status(403).json({ error: 'Akun diblokir' });
       if (!ok) {
         const gagal = (user.gagal_login || 0) + 1;
@@ -73,7 +82,15 @@ router.post('/login', loginLimiter, async (req, res, next) => {
       const identitas = await muatAppUser(user.id);
       if (!identitas) return res.status(403).json({ error: 'Akun tidak aktif' });
       if (!identitas.ids && identitas.role !== 'superadmin') {
-        return res.status(403).json({ error: 'Akun belum ditautkan ke data server' });
+        // akun role tanpa tenant = tidak punya rumah aplikasi mana pun; ini sering
+        // terjadi karena kolom Data Server dulu boleh dibiarkan kosong di form.
+        await catatLogin(username, ip, 'belum_tenant');
+        return res.status(403).json({ error: 'Akun belum ditautkan ke data server, hubungi admin' });
+      }
+      if (!identitas.id_ref && (identitas.role === 'agen' || identitas.role === 'pelanggan')) {
+        await catatLogin(username, ip, 'belum_ref');
+        return res.status(403).json({
+          error: `Akun ${identitas.role} belum ditautkan ke data ${identitas.role === 'agen' ? 'agen' : 'pelanggan'}, hubungi admin` });
       }
       const ds = pilihTenant(identitas.ids, dsDiminta);
       await db.insert(
@@ -93,14 +110,21 @@ router.post('/login', loginLimiter, async (req, res, next) => {
 
     // bukan app_user → coba akun master ISP (kolom username/password_hash di data_server)
     const srv = await db.one('SELECT * FROM data_server WHERE username = ?', [username]);
-    await db.insert('INSERT INTO login_attempt (username, ip, success) VALUES (?,?,?)',
-      [username, ip, 0]);
-    if (!srv || !srv.password_hash) return res.status(401).json({ error: 'Username atau password salah' });
-    if (srv.status !== 'Aktif') return res.status(403).json({ error: 'Data server tidak aktif' });
-    if (!(await bcrypt.compare(pass, srv.password_hash))) {
+    // sandi diperiksa sebelum status/expire: akun master yang hidup tapi
+    // nonaktif tidak lagi membisikkan kondisinya ke penebak sandi.
+    const habis = srv && srv.expaired_date &&
+      new Date(srv.expaired_date) < new Date(Date.now() - 86400000);
+    const alasan = !srv ? 'username_tidak_ada'
+      : !srv.password_hash ? 'master_tanpa_sandi'
+      : !(await bcrypt.compare(pass, srv.password_hash)) ? 'sandi_salah'
+      : srv.status !== 'Aktif' ? 'server_nonaktif'
+      : habis ? 'langganan_habis' : 'sukses';
+    await catatLogin(username, ip, alasan);
+    if (alasan === 'username_tidak_ada' || alasan === 'master_tanpa_sandi' || alasan === 'sandi_salah') {
       return res.status(401).json({ error: 'Username atau password salah' });
     }
-    if (srv.expaired_date && new Date(srv.expaired_date) < new Date(Date.now() - 86400000)) {
+    if (alasan === 'server_nonaktif') return res.status(403).json({ error: 'Data server tidak aktif' });
+    if (alasan === 'langganan_habis') {
       return res.status(403).json({ error: 'Masa langganan data server ini sudah berakhir' });
     }
     const identitas = await muatMaster(srv.id);

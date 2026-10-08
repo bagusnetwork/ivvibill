@@ -75,6 +75,7 @@
       <a data-page="noc" data-menu="noc"><span class="ic">📡</span> NOC Ping Test</a>
       <a data-page="issue" data-menu="issue"><span class="ic">⚠️</span> Issue PPPoE</a>
       <a data-page="tiket" data-menu="tiket"><span class="ic">🎫</span> Tiket Gangguan</a>
+      <a data-page="absen" data-menu="absen"><span class="ic">🕘</span> Absensi Teknisi</a>
     </nav>
     <div class="nav-group">Master &amp; Keuangan</div>
     <nav class="nav">
@@ -357,6 +358,36 @@
            (template <b>tiket</b>). Proses: baru → diproses → selesai → ditutup.</p>
       </div>
 
+      <!-- ================= ABSENSI TEKNISI ================= -->
+      <div data-view="absen" data-onload="loadAbsensi" style="display:none">
+        <div class="toolbar">
+          <label class="hint" style="align-self:center">Dari</label>
+          <input type="date" id="absDari" onchange="loadAbsensi()">
+          <label class="hint" style="align-self:center">Sampai</label>
+          <input type="date" id="absSampai" onchange="loadAbsensi()">
+          <button class="btn secondary" onclick="absenAwal()">31 hari terakhir</button>
+          <div class="spacer"></div>
+          <span class="hint" id="absFilterTeknisi"></span>
+          <button class="btn sm ghost" onclick="absenPilihTeknisi(null)">Semua teknisi</button>
+        </div>
+        <div class="panel"><div class="panel-head"><h2>Rekap per teknisi</h2></div>
+          <div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Teknisi</th><th>Hari absen</th><th>Masuk &amp; pulang lengkap</th>
+            <th>Tanpa koordinat</th><th>Total jarak</th><th class="t-actions">Lihat</th></tr></thead>
+          <tbody id="tbAbsenRekap"><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <div class="panel"><div class="panel-head"><h2>Catatan harian</h2></div>
+          <div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Tanggal</th><th>Teknisi</th><th>Masuk</th><th>Titik masuk</th>
+            <th>Pulang</th><th>Titik pulang</th><th>Durasi</th><th>Jarak</th><th>Catatan</th></tr></thead>
+          <tbody id="tbAbsen"><tr><td colspan="9" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <p class="hint">Teknisi menekan <b>Absen Masuk</b> / <b>Absen Pulang</b> di aplikasi
+          Karyawan &amp; Teknisi (<code>/teknisi/</code>); koordinat diambil dari GPS ponsel saat itu juga.
+          Jarak adalah jarak lurus titik masuk ke titik pulang (bukan jarak rute), dan hanya terisi bila
+          keduanya punya koordinat. Absen tanpa sinyal GPS tetap tercatat — yang penting jamnya.</p>
+      </div>
+
       <!-- ================= NOC PING TEST ================= -->
       <div data-view="noc" data-onload="loadNoc" style="display:none">
         <style>
@@ -474,11 +505,21 @@
         <div class="toolbar"><div class="spacer"></div>
           <button class="btn" onclick="formPengguna()">+ Tambah Pengguna</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
-          <table><thead><tr><th>Username</th><th>Nama</th><th>Role</th><th>Ref ID</th>
+          <table><thead><tr><th>Username</th><th>Nama</th><th>Role</th><th>Ref</th>
             <th>Data server</th><th>Group akses</th>
-            <th>Login terakhir</th><th>Status</th><th class="t-actions">Aksi</th></tr></thead>
-          <tbody id="tbPengguna"><tr><td colspan="9" class="empty">Memuat…</td></tr></tbody></table>
+            <th>Login terakhir</th><th>Gagal</th><th>Status</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbPengguna"><tr><td colspan="10" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
+        <div class="panel"><div class="panel-head"><h2>Percobaan login gagal</h2>
+          <button class="btn sm secondary" onclick="loadLoginGagal()">⟳</button></div>
+          <div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Waktu</th><th>Username</th><th>IP</th><th>Alasan ditolak</th></tr></thead>
+          <tbody id="tbLoginGagal"><tr><td colspan="4" class="empty">Memuat…</td></tr></tbody></table></div></div>
+        <p class="hint">Alasan ditolak tercatat di server: <code>sandi_salah</code> (password keliru),
+          <code>akun_blokir</code> (akun diblokir, biasanya setelah 5 kali salah — pakai tombol
+          <b>Buka blokir</b>), <code>belum_tenant</code> / <code>belum_ref</code> (akun role belum ditautkan
+          ke data server atau ke baris agen/pelanggan), <code>username_tidak_ada</code>,
+          <code>server_nonaktif</code>, <code>langganan_habis</code>.</p>
         <div class="panel"><div class="panel-head"><h2>Audit log</h2></div>
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Waktu</th><th>User</th><th>Aksi</th><th>Detail</th></tr></thead>
@@ -698,8 +739,13 @@
     <button class="btn sm ghost" onclick="modalClose('mImporPelanggan')">✕</button></div>
   <div class="modal-body">
     <p class="hint" style="margin-bottom:12px">Unduh <a href="/api/pelanggan/template" download>template Excel</a>,
-      isi sheet <b>Pelanggan</b>, lalu unggah di sini. CSV UTF-8 juga diterima.
-      Data hanya <b>ditambahkan</b> — baris yang sudah ada tidak diubah, dan pesan WhatsApp
+      isi sheet <b>Pelanggan</b>, lalu unggah di sini. CSV UTF-8 juga diterima.</p>
+    <p class="hint" style="margin-bottom:12px">Judul kolom sudah berbahasa Indonesia:
+      <b>Nama</b> (satu-satunya yang wajib), Tipe, Paket, Agen, Username PPPoE, Password PPPoE,
+      Nomor WhatsApp, Email, Alamat, IP Address, MAC Address, Status, Tanggal Masuk, Hari Tagihan.
+      Paket dan Agen diisi <b>namanya</b>, bukan nomor ID. Kode pelanggan dibuat otomatis oleh sistem,
+      jadi kolom kode tidak ada di template dan tidak dibaca saat import.</p>
+    <p class="hint">Data hanya <b>ditambahkan</b> — baris yang sudah ada tidak diubah, dan pesan WhatsApp
       tidak dikirim saat import. Baris bermasalah dilaporkan per baris, tidak menggagalkan seluruh file.</p>
     <div class="form-row"><label>File Excel / CSV</label>
       <input type="file" id="impFile" accept=".xlsx,.xls,.csv,text/csv"></div>
@@ -789,18 +835,28 @@
     <div class="form-grid">
       <div class="form-row"><label>Username</label><input id="uUsername"></div>
       <div class="form-row"><label>Nama *</label><input id="uNama"></div>
-      <div class="form-row"><label>Role</label><select id="uRole">
+      <div class="form-row"><label>Role</label><select id="uRole" onchange="gantiRolePengguna()">
         <option value="superadmin">superadmin</option><option value="teknisi">teknisi</option>
         <option value="agen">agen</option><option value="pelanggan">pelanggan</option></select></div>
-      <div class="form-row"><label>Ref ID (agen/pelanggan)</label><input id="uRef" type="number"></div>
-      <div class="form-row"><label>Password</label><input id="uPass" type="password"></div>
+      <div class="form-row" id="uDsRow"><label>Data server</label>
+        <input id="uDs" placeholder="id dipisah koma, mis. 1,2" oninput="saringOpsiGrup(); gantiTenantPengguna()">
+        <div class="hint" id="uDsHint"></div></div>
+      <div class="form-row" id="uRefRow"><label id="uRefLabel">Ref agen / pelanggan</label>
+        <input id="uRefCari" placeholder="ketik nama untuk mencari…" oninput="cariOpsiRef()">
+        <select id="uRefPick" size="6" onchange="ambilOpsiRef()"></select>
+        <input type="hidden" id="uRef">
+        <div class="hint" id="uRefInfo"></div></div>
+      <div class="form-row"><label id="uPassLabel">Password</label><input id="uPass" type="password">
+        <div class="hint" id="uPassHint"></div></div>
       <div class="form-row"><label>Status</label><select id="uStatus">
         <option>aktif</option><option>blokir</option></select></div>
-      <div class="form-row" id="uDsRow"><label>Data server (id dipisah koma, kosong = semua)</label>
-        <input id="uDs" placeholder="1,2" oninput="saringOpsiGrup()"></div>
       <div class="form-row" id="uGrupRow"><label>Group akses</label>
         <select id="uGrup"><option value="">— semua menu —</option></select></div>
     </div>
+    <p class="hint" id="uPetunjuk">Akun <b>agen</b> dan <b>pelanggan</b> harus ditautkan ke satu baris
+      agen/pelanggan lewat pilihan di atas — tanpa tautan itu aplikasinya login tapi datanya kosong.
+      Akun <b>teknisi</b> wajib punya data server. Password selalu wajib saat membuat akun baru;
+      kosongkan saja saat mengubah akun yang sudah ada.</p>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mPengguna')">Batal</button>
     <button class="btn" onclick="simpanPengguna()">Simpan</button></div>

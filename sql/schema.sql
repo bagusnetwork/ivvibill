@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS login_attempt (
   username  VARCHAR(50) NOT NULL,
   ip        VARCHAR(45) NOT NULL,
   success   TINYINT NOT NULL DEFAULT 0,
+  -- kolom ini baru ada sejak v1.5.0 (ALTER lewat scripts/migrate-v15.js),
+  -- karena itu DEFAULT NULL: baris lama tetap NULL.
+  alasan    VARCHAR(30) DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_attempt_user (username, created_at)
@@ -483,6 +486,34 @@ CREATE TABLE IF NOT EXISTS pekerjaan (
   KEY idx_kerja_status (status, tanggal),
   KEY idx_kerja_teknisi (id_teknisi),
   KEY idx_kerja_server (id_data_server)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- 10b. Absensi teknisi lapangan (satu baris per orang per hari)
+--      koordinat disimpan apa adanya — tidak ada penolakan berdasarkan
+--      jarak, hanya rekaman untuk dipantau di panel per data server.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS absen_teknisi (
+  id            INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL DEFAULT 1,
+  id_teknisi    INT NOT NULL,                 -- app_user.id (sama seperti pekerjaan.id_teknisi)
+  nama_teknisi  VARCHAR(100) NOT NULL,        -- dipatok saat absen: nama user bisa berubah nanti
+  tanggal       DATE NOT NULL,
+  jam_masuk     DATETIME DEFAULT NULL,
+  jam_pulang    DATETIME DEFAULT NULL,
+  lat_masuk     DECIMAL(10,7) DEFAULT NULL,
+  long_masuk    DECIMAL(10,7) DEFAULT NULL,
+  lat_pulang    DECIMAL(10,7) DEFAULT NULL,
+  long_pulang   DECIMAL(10,7) DEFAULT NULL,
+  akurasi_masuk INT DEFAULT NULL,             -- meter, dari device (geolocation API)
+  akurasi_pulang INT DEFAULT NULL,
+  jarak_meter   INT DEFAULT NULL,             -- lintasan masuk -> pulang (Haversine)
+  catatan       VARCHAR(255) DEFAULT NULL,
+  created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_absen_hari (id_teknisi, tanggal),
+  KEY idx_absen_tanggal (id_data_server, tanggal)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------

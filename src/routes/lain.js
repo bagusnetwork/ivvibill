@@ -283,6 +283,30 @@ router.get('/pengguna', requirePJ(), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/** Percobaan login gagal terakhir. Alasannya dicatat server (lihat routes/auth.js)
+ *  supaya admin tahu kenapa akun role ditolak, tanpa membocorkan info ke pemohon. */
+router.get('/pengguna/login-gagal', requirePJ(), async (req, res, next) => {
+  try {
+    const punya = req.tenantSemua ? null : (req.user.ids || []).map(Number);
+    let where = 'WHERE a.success = 0';
+    const params = [];
+    if (punya) {
+      if (!punya.length) where += ' AND 1 = 0';
+      else {
+        const ph = punya.map(() => '?').join(',');
+        where += ` AND (EXISTS (SELECT 1 FROM app_user u WHERE u.username = a.username
+                     AND (${punya.map(() => 'FIND_IN_SET(?, u.id_data_server)').join(' OR ')}))
+                   OR EXISTS (SELECT 1 FROM data_server d WHERE d.username = a.username AND d.id IN (${ph})))`;
+        params.push(...punya, ...punya);
+      }
+    }
+    const rows = await db.q(
+      `SELECT a.username, a.ip, a.alasan, a.created_at FROM login_attempt a ${where}
+       ORDER BY a.id DESC LIMIT 25`, params);
+    res.json({ data: rows });
+  } catch (e) { next(e); }
+});
+
 /** Tenant tempat user baru ditaruh — superadmin boleh memilih, master hanya tenantnya. */
 async function tentukanTenantUser(req) {
   if (!req.tenantSemua) return { ids: [tenantAktif(req)] };
@@ -301,22 +325,61 @@ async function validasiGrup(req, idGrup, ids) {
   return Number(g.id);
 }
 
+/**
+ * Tenant untuk akun aplikasi. 'superadmin' boleh tanpa tenant (pemilik platform,
+ * ids = NULL); role lain TIDAK boleh, karena /api/auth/login menolak akun
+ * non-superadmin yang ids-nya kosong dengan 403 'Akun belum ditautkan ke data
+ * server'. Dulu kolom ini boleh kosong (hint lama di form: "kosong = semua"),
+ * jadi akun teknisi/agen/pelanggan buatan panel tidak bisa login sama sekali.
+ */
+function tenantUntukRole(role, ids) {
+  if (role === 'superadmin') return ids;
+  if (!ids || !ids.length) {
+    throw new Error(`Akun ${role} harus ditautkan ke data server — isi kolom Data Server, jangan dibiarkan kosong`);
+  }
+  return ids;
+}
+
+/**
+ * Tautan role ke baris induknya. Aplikasi agen dan warga membaca
+ * req.user.id_ref (SELECT ... FROM agen/pelanggan WHERE id = ?), jadi tanpa ref
+ * keduanya login berhasil tapi semua halaman kosong/error — gejala yang sama
+ * dilaporkan sebagai "bug login".
+ */
+async function validasiRef(role, idRef, ids) {
+  if (role === 'superadmin' || role === 'teknisi') return null;
+  const tabel = role === 'agen' ? 'agen' : 'pelanggan';
+  if (!idRef) {
+    throw new Error(`Ref ${role} wajib dipilih — aplikasi ${role} menampilkan data ${tabel} milik akun ini`);
+  }
+  const r = await db.one(`SELECT id, id_data_server FROM ${tabel} WHERE id = ?`, [idRef]);
+  if (!r) throw new Error(`Ref ${role} (${idRef}) tidak ada di tabel ${tabel}`);
+  // baris lama tanpa id_data_server dianggap tenant 1 (pemilik platform)
+  const dsRef = r.id_data_server == null ? 1 : Number(r.id_data_server);
+  if (ids && !ids.map(Number).includes(dsRef)) {
+    throw new Error(`Ref ${role} #${idRef} milik data server ${dsRef}, bukan data server akun ini (${ids.join(', ')})`);
+  }
+  return Number(r.id);
+}
+
 router.post('/pengguna', requirePJ(), requireMenu('pengguna', 'tambah'), async (req, res, next) => {
   try {
     const username = v.username(req.body.username);
+    if (!req.body.password) throw new Error('Password wajib diisi saat membuat pengguna');
     const pass = v.password(req.body.password);
     const nama = v.str(req.body.nama, { min: 2, max: 100 });
     const role = v.enumOf(req.body.role, ['superadmin', 'agen', 'teknisi', 'pelanggan']);
     if (role === 'superadmin' && req.user.role !== 'superadmin') {
       return res.status(403).json({ error: 'Hanya superadmin platform yang dapat membuat superadmin' });
     }
-    const idRef = v.num(req.body.id_ref, { int: true, min: 1, def: null });
     const nohp = v.phone(req.body.no_hp);
 
     const dup = await db.one('SELECT id FROM app_user WHERE username = ?', [username]);
     if (dup) return res.status(400).json({ error: 'Username sudah dipakai' });
 
-    const { ids } = await tentukanTenantUser(req);
+    const { ids: idsDiminta } = await tentukanTenantUser(req);
+    const ids = tenantUntukRole(role, idsDiminta);
+    const idRef = await validasiRef(role, v.num(req.body.id_ref, { int: true, min: 1, def: null }), ids);
     const idGrup = await validasiGrup(req, v.num(req.body.id_group_akses, { int: true, min: 1, def: null }), ids);
 
     const hash = await bcrypt.hash(pass, config.security.bcryptRounds);
@@ -338,14 +401,27 @@ router.put('/pengguna/:id', requirePJ(), requireMenu('pengguna', 'ubah'), async 
     if (!u) return res.status(404).json({ error: 'Pengguna tidak ada' });
     const nama = v.str(req.body.nama, { min: 2, max: 100, def: u.nama });
     const status = v.enumOf(req.body.status, ['aktif', 'blokir'], u.status);
-    await db.run('UPDATE app_user SET nama=?, status=? WHERE id=?', [nama, status, id]);
+    // blokir -> aktif harus sekalian menghapus penghitung gagal (ambang
+    // maxLoginFail sudah terlampaui, satu salah ketik langsung memblokir lagi).
+    const bukaBlokir = status === 'aktif' && u.status !== 'aktif';
+    await db.run('UPDATE app_user SET nama=?, status=?, gagal_login=? WHERE id=?',
+      [nama, status, bukaBlokir ? 0 : (u.gagal_login || 0), id]);
     if (req.body.password) {
       const hash = await bcrypt.hash(v.password(req.body.password), config.security.bcryptRounds);
       await db.run('UPDATE app_user SET password_hash=? WHERE id=?', [hash, id]);
     }
+    // akun agen/warga yang terlanjur dibuat tanpa Ref bisa ditambal dari sini;
+    // tanpa jalur ini, satu-satunya cara memperbaikinya adalah SQL manual.
+    if (req.body.id_ref !== undefined && (u.role === 'agen' || u.role === 'pelanggan')) {
+      const idsNow = daftarTenant(u.id_data_server);
+      const ref = await validasiRef(u.role,
+        v.num(req.body.id_ref, { int: true, min: 1, def: null }), idsNow);
+      await db.run('UPDATE app_user SET id_ref=? WHERE id=?', [ref, id]);
+    }
     // pemindahan tenant/grup hanya milik superadmin platform
     if (req.tenantSemua && (req.body.id_data_server !== undefined || req.body.id_group_akses !== undefined)) {
-      const { ids } = await tentukanTenantUser(req);
+      const { ids: idsDiminta } = await tentukanTenantUser(req);
+      const ids = tenantUntukRole(u.role, idsDiminta);
       const idGrup = await validasiGrup(req,
         v.num(req.body.id_group_akses, { int: true, min: 1, def: u.id_group_akses ? Number(u.id_group_akses) : null }), ids);
       await db.run('UPDATE app_user SET id_data_server=?, id_group_akses=? WHERE id=?',

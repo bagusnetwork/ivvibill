@@ -99,6 +99,7 @@ app.use('/api', require('./src/routes/master'));         // topologi ODP + desa
 app.use('/api', require('./src/routes/noc'));            // NOC ping test
 app.use('/api', require('./src/routes/keuangan'));       // kas & laporan keuangan
 app.use('/api', require('./src/routes/peta'));           // peta sebaran ODP + pelanggan
+app.use('/api', require('./src/routes/absen'));           // absensi teknisi berkoordinat
 app.use('/api', require('./src/routes/lain'));
 
 // ---------- upload (bukti pembayaran) ---------------------------
@@ -159,7 +160,11 @@ app.use((err, req, res, next) => {   // eslint-disable-line no-unused-vars
   // tanpa itu, pesan validasi diterjemahkan ke 400 dan sisanya 500.
   const kuat = Number(err.status) ||
     (multerKode ? (multerKode === 'LIMIT_FILE_SIZE' ? 413 : 400) : null);
-  const pola = /tidak valid|wajib|minimal|maksimal|Harus|sudah|tidak cukup|tidak ditemukan|ditolak|gagal|tidak ada|belum diatur|belum disimpan|tidak aktif|terlalu panjang|kosong|dikenali|bukan milik/i;
+  // 'hanya' ditambahkan: pesan validator "Username hanya huruf, angka, . _ -"
+  // adalah salah input pengguna, tapi dulu jatuh ke HTTP 500.
+  // 'bukan data server' adalah kalimat validasiRef v1.5 ("Ref agen #2 milik data
+  // server 1, bukan data server akun ini") — tolak pakai input, bukan crash.
+  const pola = /tidak valid|wajib|minimal|maksimal|Harus|sudah|tidak cukup|tidak ditemukan|ditolak|gagal|tidak ada|belum diatur|belum disimpan|tidak aktif|terlalu panjang|kosong|dikenali|bukan milik|bukan data server|hanya/i;
   const code = kuat || (pola.test(msg) ? 400 : 500);
   if (code === 500) console.error('[ivvibill error]', err);
   if (res.headersSent) return;

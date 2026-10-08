@@ -1,6 +1,6 @@
 /* ivvibill — Karyawan & Teknisi */
 'use strict';
-const JUDUL = { dashboard: 'Ringkasan', pekerjaan: 'Order Pekerjaan', tiket: 'Tiket Gangguan',
+const JUDUL = { dashboard: 'Ringkasan', absen: 'Absensi', pekerjaan: 'Order Pekerjaan', tiket: 'Tiket Gangguan',
   pelanggan: 'Pelanggan', interface: 'Monitoring Interface', olt: 'Redaman OLT', issue: 'Issue PPPoE' };
 
 async function loadDash() {
@@ -176,6 +176,83 @@ async function loadIssue() {
 async function selesaiIssue2(id) {
   try { await API.put(`/api/issue/${id}/selesai`, {}); toast('Diselesaikan'); loadIssue(); }
   catch (e) { toast(e.message, true); }
+}
+
+// ---------------- absensi (koordinat hanya dicatat, tidak ada penolakan)
+let ABS_POS = null;
+
+function absenLokasi() {
+  const el = document.getElementById('absLokasi');
+  ABS_POS = null;
+  if (!navigator.geolocation) { el.textContent = 'GPS: browser ini tidak mendukung lokasi'; return; }
+  el.textContent = 'GPS: mencari sinyal…';
+  navigator.geolocation.getCurrentPosition(
+    (p) => {
+      ABS_POS = { lat: p.coords.latitude, long: p.coords.longitude, akurasi: Math.round(p.coords.accuracy) };
+      el.textContent = `GPS: ${ABS_POS.lat.toFixed(6)}, ${ABS_POS.long.toFixed(6)} (±${ABS_POS.akurasi} m)`;
+    },
+    (e) => {
+      el.textContent = (e && e.code === 1
+        ? 'GPS: izin lokasi ditolak — izinkan di pengaturan browser'
+        : 'GPS: sinyal tidak ditemukan') + ' — absen tetap bisa disimpan';
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
+  );
+}
+
+async function absen(jenis) {
+  const btn = document.getElementById(jenis === 'masuk' ? 'btnMasuk' : 'btnPulang');
+  btn.disabled = true;
+  try {
+    const body = { jenis, catatan: document.getElementById('absCatatan').value || null };
+    if (ABS_POS) Object.assign(body, ABS_POS);
+    const r = await API.post('/api/absen', body);
+    const jamBaru = r.hari_ini ? jamAbsen(jenis === 'masuk' ? r.hari_ini.jam_masuk : r.hari_ini.jam_pulang) : '-';
+    toast(`${jenis === 'masuk' ? 'Absen masuk' : 'Absen pulang'} pukul ${jamBaru}`
+      + (ABS_POS ? '' : ' tanpa koordinat'));
+    if (r.jarak_meter != null) toast(`Jarak titik masuk ke pulang ${r.jarak_meter} m`);
+    loadAbsen();
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; }
+}
+
+const jamAbsen = (s) => s ? String(s).slice(11, 16) : '-';
+
+function durasiAbsen(m) {
+  if (m == null) return '-';
+  const x = Number(m);
+  return `${Math.floor(x / 60)} jam ${x % 60} menit`;
+}
+
+async function loadAbsen() {
+  document.getElementById('absTanggal').textContent =
+    new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  absenLokasi();
+  try {
+    const d = await API.get('/api/absen/saya');
+    const h = d.hari_ini || {};
+    const adaMasuk = !!h.jam_masuk, adaPulang = !!h.jam_pulang;
+    document.getElementById('btnMasuk').textContent = adaMasuk ? 'Perbarui Absen Masuk' : 'Absen Masuk';
+    document.getElementById('btnPulang').textContent = adaPulang ? 'Perbarui Absen Pulang' : 'Absen Pulang';
+    document.getElementById('btnPulang').disabled = !adaMasuk;
+    const titik = (lat, long) => lat == null ? 'tanpa koordinat'
+      : `${Number(lat).toFixed(5)}, ${Number(long).toFixed(5)}`;
+    document.getElementById('absStatus').innerHTML = adaMasuk || adaPulang
+      ? `<b>Masuk ${jamAbsen(h.jam_masuk)}</b> ${h.lat_masuk != null ? `· ${esc(titik(h.lat_masuk, h.long_masuk))}` : ''}`
+        + `<br><b>Pulang ${jamAbsen(h.jam_pulang)}</b> ${h.lat_pulang != null ? `· ${esc(titik(h.lat_pulang, h.long_pulang))}` : ''}`
+        + (h.jarak_meter != null ? `<br>Jarak titik masuk → pulang: <b>${esc(h.jarak_meter)} m</b>` : '')
+      : 'Belum ada absen hari ini. Tekan <b>Absen Masuk</b> di bawah.';
+    document.getElementById('tbAbsenSaya').innerHTML = (d.data || []).map(a => `
+      <tr><td>${esc(String(a.tanggal).slice(0, 10))}</td>
+        <td>${jamAbsen(a.jam_masuk)}${a.jam_masuk ? ` <span class="hint">${a.lat_masuk != null ? '📍' : '—'}</span>` : ''}</td>
+        <td>${jamAbsen(a.jam_pulang)}${a.jam_pulang ? ` <span class="hint">${a.lat_pulang != null ? '📍' : '—'}</span>` : ''}</td>
+        <td>${durasiAbsen(a.jam_masuk && a.jam_pulang
+          ? Math.round((new Date(String(a.jam_pulang).replace(' ', 'T')) - new Date(String(a.jam_masuk).replace(' ', 'T'))) / 60000)
+          : null)}</td>
+        <td class="t-num">${a.jarak_meter != null ? esc(a.jarak_meter) + ' m' : '-'}</td>
+        <td class="hint">${esc(a.catatan || '')}</td></tr>`).join('')
+      || '<tr><td colspan="6" class="empty">Belum pernah absen</td></tr>';
+  } catch (e) { toast(e.message, true); }
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

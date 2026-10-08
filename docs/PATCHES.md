@@ -4,6 +4,118 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-08 — v1.5.0 — login akun role dibetulkan, absensi teknisi berkoordinat, template impor/ekspor berbahasa Indonesia
+
+**Masalah**
+
+Tiga keluhan pemilik ISP sekaligus.
+
+1. **Aplikasi Agen / Karyawan-Teknisi / Akun Saya menolak login.** Penyebabnya bukan
+   sandi, melainkan akun yang dibuat dari panel dalam keadaan tidak lengkap:
+   - `id_data_server` kosong → `tenantSql()` menghasilkan `AND 1 = 0`, jadi login
+     "berhasil" tetapi setiap daftar kosong dan setiap tulis ditolak;
+   - role `agen`/`pelanggan` tanpa `id_ref` (atau `id_ref` milik data server lain) →
+     aplikasi tidak tahu agen/pelanggan mana yang sedang masuk;
+   - password dibiarkan kosong saat membuat akun, dan username berisi spasi
+     menghasilkan 500 alih-alih pesan yang bisa dikerjakan.
+   Karena respons `/api/auth/login` sengaja umum ("Username atau password salah"),
+   admin tidak punya cara melihat alasan penolakan yang sebenarnya.
+2. **Tidak ada catatan kehadiran teknisi lapangan.** Pemilik hanya bisa menanyakan
+   "tadi ke lokasi jam berapa" lewat WA.
+3. **Template impor pelanggan membingungkan.** Judul kolom memakai nama teknis
+   (`username_pppoe`, `hari_tagihan`, ...) dan ada kolom `kode` yang sebenarnya
+   digenerate sistem, sehingga pengguna mengisi kolom itu lalu bingung mengapa
+   isinya diabaikan.
+
+**Diubah**
+
+*Login & akun role*
+
+- `src/routes/lain.js` — validasi saat membuat/mengubah akun: role non-superadmin
+  wajib punya data server (`tenantUntukRole`), `agen`/`pelanggan` wajib menunjuk
+  baris agen/warga yang benar-benar ada **dan** berada di data server akun itu
+  (`validasiRef`), password wajib saat pembuatan, username dibersihkan dari spasi.
+  `PUT /pengguna/:id` kini memperbaiki `id_ref` yang salah (dulu kolom itu tidak
+  pernah diperbarui, jadi akun rusak tidak bisa disembuhkan dari panel).
+- `src/routes/auth.js` — setiap percobaan login dicatat beserta alasannya di kolom
+  baru `login_attempt.alasan`: `sukses, sandi_salah, akun_blokir, belum_tenant,
+  belum_ref, username_tidak_ada, master_tanpa_sandi, server_nonaktif, langganan_habis`.
+  Alasan hanya dibaca admin; respons ke pemohon tetap umum.
+- `GET /api/pengguna/login-gagal` **baru** — 25 penolakan terakhir, sudah dipotong
+  per tenant. `GET /api/pengguna` ikut mengeluarkan `gagal_login`.
+- Blokir otomatis (5× salah sandi) bisa dibuka dari panel: `PUT /pengguna/:id`
+  dengan `status: aktif` sekaligus menolkan `gagal_login`.
+- Panel (`public/panel/index.html`, `public/panel/panel.js`) — kolom **Ref** dan
+  **Gagal** di daftar pengguna, tombol **Buka blokir**, panel "Percobaan login gagal"
+  dengan alasan berbahasa Indonesia, dan form Tambah/Ubah Pengguna memakai
+  **pemilih Ref** (cari nama, bukan mengetik angka) yang ikut daftar data server
+  yang diketik di form — jadi Ref milik ISP lain tidak bisa lagi terpilih.
+  Password ditandai wajib dan data server terisi otomatis.
+
+*Absensi teknisi*
+
+- Tabel `absen_teknisi` + `src/routes/absen.js` **baru**:
+  `POST /api/absen` (masuk/pulang), `GET /api/absen/saya`, `GET /api/absen` (monitor).
+  Satu teknisi satu baris per hari (`uq_absen_hari` + `INSERT IGNORE`), jadi absen
+  ulang cukup memperbarui jam/titik. Koordinat **hanya dicatat, tidak pernah
+  menolak** — tidak ada aturan "terlalu jauh dari kantor". Yang ditolak hanyalah
+  bentuk nilai yang salah atau separuh (`lat` tanpa `long`). Jarak masuk→pulang
+  dihitung Haversine dan ditulis ulang setiap kali: bila salah satu titik direkam
+  tanpa GPS, jarak lama dikosongkan supaya panel tidak menampilkan angka di baris
+  bertanda "tanpa GPS".
+- Aplikasi teknisi — tab **Absensi**: tombol Absen Masuk / Absen Pulang, lokasi dari
+  `navigator.geolocation`, dan riwayat 31 hari. Bila HP menolak izin GPS atau sinyal
+  hilang, pesan ditampilkan dan absen **tetap tersimpan** tanpa koordinat.
+- Panel — menu **Absensi Teknisi**: rekap per teknisi (hari absen, masuk+pulang
+  lengkap, tanpa koordinat, total jarak) + catatan harian per tanggal, filter rentang
+  tanggal dan per teknisi, tiap titik ada tautan ke OpenStreetMap. Untuk sesi
+  platform, setiap baris diberi label data servernya (`tenantSql` memang tidak
+  memfilter untuk superadmin platform); master ISP hanya melihat teknisi miliknya.
+- `src/routes/tenant.js` — entri menu `absen`; tab Absensi di aplikasi teknisi sengaja
+  **tidak** digrant grup (sama seperti Order Pekerjaan) supaya kehadiran teknisi tidak
+  bisa disembunyikan dari dirinya sendiri.
+
+*Template impor/ekspor pelanggan*
+
+- `src/routes/pelanggan.js` — judul kolom ekspor & template memakai Bahasa Indonesia
+  (`Nama, Tipe, Paket, Agen, Username PPPoE, ..., Hari Tagihan`), kolom **Kode dibuang**
+  dari template dan ekspor (saat impor nama kolom lama tetap dikenali, jadi berkas
+  lama masih jalan), lembar kedua "Petunjuk" (13 baris) di xlsx dan baris `#` di CSV,
+  pesan galat "kolom tidak dikenali" menyebutkan kolom yang hilang, dan teks modal
+  Import ditulis ulang.
+
+*Perkakas*
+
+- `scripts/migrate-v15.js` **baru** — idempoten, `--dry-run` tersedia.
+- `sql/schema.sql` — `absen_teknisi` + `login_attempt.alasan`.
+- `server.js` — pasang rute absen; pola pesan galat validasi ditambah
+  (`bukan data server`, `dikenali`, ...) supaya 400 bukan 500.
+- `mt/daftar_target.sh`, `mt/install_fase2.sh` — peta pemasangan + rantai migrasi
+  (`multitenant -> v12 -> v13 -> collation -> v15`) dan lompatan versi `1.4.2 -> 1.5.0`.
+- `mt/uji_staging.sh` 57 pemeriksaan (bagian 9 tautan akun role, bagian 10 absensi),
+  `mt/uji_lanjutan.sh` 125 pemeriksaan (bagian 10 blokir otomatis + template Indonesia
+  + jarak absen + DOM panel/teknisi).
+
+**Cara dipasang ke produksi**
+
+`sudo bash /home/bagus-nuralam/Documents/Qoder/2026-10-01/10533054/mt/install_fase2.sh`
+— tidak ada dependensi npm baru, jadi jangan `npm install`/`npm ci`. Migrasi v15 hanya
+`CREATE TABLE` dan satu `ADD COLUMN`, aman diulang.
+
+**Catatan**
+
+- Akun role yang sudah ada dan rusak (tanpa data server / tanpa Ref) **tidak** diubah
+  otomatis — migrasi tidak menebak pemiliknya. Buka menu Pengguna, ubah akun itu,
+  isi data server dan pilih Ref dari daftar, simpan; kalau sandinya hilang, isi
+  password baru di form yang sama.
+- GPS memerlukan konteks aman. Di `http://ivvinet.my.id` (belum HTTPS) browser
+  desktop menolak `geolocation`; di HP Android/Chrome lokasi tetap jalan lewat HTTP
+  untuk host `localhost`/jaringan lokal, tetapi perilaku "tanpa koordinat" adalah
+  jalur resmi, bukan kegagalan.
+- Verifikasi staging: `reset_staging -> uji_staging (57/57) -> uji_lanjutan (125/125)
+  -> uji_scheduler (SEMUA OK)`, plus pengecekan manual lewat browser untuk panel
+  (Pengguna, Absensi) dan aplikasi teknisi/agen/pelanggan.
+
 ## 2026-10-08 — v1.4.2 — uji export/import + unggahan >2MB tak lagi HTTP 500
 
 **Masalah**
