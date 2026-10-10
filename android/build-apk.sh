@@ -5,6 +5,7 @@
 if [ -z "${IVVI_KEYSTORE_PASS:-}" ]; then
   if [ -f android/.keystore-pass ]; then
     IVVI_KEYSTORE_PASS=$(sed -n 1p android/.keystore-pass)
+    export IVVI_KEYSTORE_PASS
   else
     echo "!! set IVVI_KEYSTORE_PASS atau isi android/.keystore-pass"; exit 1
   fi
@@ -180,8 +181,8 @@ EOF
   (cd "$work/obj" && cp ../apk/base.apk unsigned.apk && zip -q unsigned.apk classes.dex)
   "$BT/zipalign" -f -p 4 "$work/obj/unsigned.apk" "$work/obj/aligned.apk"
 
-  "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:ivvibill123 \
-    --key-pass pass:ivvibill123 --out "out/$outname" "$work/obj/aligned.apk"
+  "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass env:IVVI_KEYSTORE_PASS \
+    --key-pass env:IVVI_KEYSTORE_PASS --out "out/$outname" "$work/obj/aligned.apk"
   echo "  ✓ out/$outname"
 }
 
