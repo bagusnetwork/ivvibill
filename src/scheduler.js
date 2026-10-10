@@ -7,8 +7,9 @@
 //  4. Isolir menunggak            (lewat jatuh tempo)
 //  5. Antrean WhatsApp             (tiap menit)
 //  6. Polling router interface    (tiap menit, kecuali pppoe)
-//  7. Polling redaman OLT         (interval per perangkat)
+//  7. Polling redaman OLT         (interval per perangkat) + cocokkan ONU
 //  8. Deteksi issue pelanggan PPPoE (offline/isolir)
+//  9. Jadwal voucher hotspot: cabut user jatuh tempo + retry push gagal
 //
 // Semua tugas berjalan in-process; untuk shared hosting tanpa
 // proses panjang, tersedia juga skrip cron eksternal di
@@ -19,6 +20,7 @@ const billing = require('./services/billing');
 const wa = require('./services/wa');
 const monitor = require('./services/monitoring');
 const olt = require('./services/olt');
+const onu = require('./services/onu');
 
 /** Daftar ISP aktif; kolom jadwal dipilih eksplisit agar rahasia gateway tidak terbawa. */
 async function daftarTenant() {
@@ -31,7 +33,7 @@ async function daftarTenant() {
 const log = (...a) => console.log(`[ivvibill ${new Date().toISOString()}]`, ...a);
 
 let timers = [];
-let running = { wa: false, router: false, olt: false, billing: false, issue: false };
+let running = { wa: false, router: false, olt: false, billing: false, issue: false, voucher: false };
 
 // ---------- tugas ------------------------------------------------
 
@@ -72,31 +74,16 @@ async function tugasOlt() {
       if (now - last < interval) continue;
       try {
         const hasil = await olt.pollOlt(dev, dev);
-        let kritis = 0, warning = 0;
-        for (const o of hasil.onus) {
-          if (o.error) continue;
-          if (o.status_redaman === 'kritis') kritis++;
-          else if (o.status_redaman === 'warning') warning++;
-          if (o.sn) {
-            await db.run(
-              `INSERT INTO master_onu (id_perangkat, pon, sn, mac, nama_onu, rx_dbm, tx_dbm, status_online)
-               VALUES (?,?,?,?,?,?,?,?)
-               ON DUPLICATE KEY UPDATE pon=VALUES(pon), mac=VALUES(mac), nama_onu=VALUES(nama_onu),
-                 rx_dbm=VALUES(rx_dbm), tx_dbm=VALUES(tx_dbm), status_online=VALUES(status_online)`,
-              [dev.id, o.pon, o.sn, o.mac || null, o.nama || null, o.rx, o.tx, o.online ? 1 : 0]
-            );
-            await db.insert(
-              'INSERT INTO redaman_log (id_perangkat, sn, pon, rx_dbm, redaman_db, status) VALUES (?,?,?,?,?,?)',
-              [dev.id, o.sn, o.pon, o.rx, o.redaman, o.status_redaman]
-            );
-          }
-        }
+        const s = await onu.simpan(dev.id, hasil.onus);
         await db.run(
           `UPDATE setting_olt SET last_check_at = NOW(), last_check_msg = ? WHERE id = ?`,
-          [`ONU:${hasil.onus.length} kritis:${kritis} warning:${warning}`, dev.sid]
+          [`ONU:${hasil.onus.length} kritis:${s.kritis} warning:${s.warning}`, dev.sid]
         );
         await db.run(`UPDATE master_perangkat SET last_check = NOW(), last_msg = ? WHERE id = ?`,
           [`OK ${hasil.onus.length} ONU`, dev.id]);
+        // redaman baru berarti baris ONU baru; pengikatan ke pelanggan mengikuti
+        const c = await onu.cocokkan({ idPerangkat: dev.id });
+        if (c.berubah) log(`Cocok ONU ${dev.nama}:`, JSON.stringify(c));
       } catch (e) {
         await db.run(`UPDATE setting_olt SET last_check_at = NOW(), last_check_msg = ? WHERE id = ?`,
           [String(e.message).slice(0, 250), dev.sid]);
@@ -159,6 +146,72 @@ async function tugasIssue() {
   finally { running.issue = false; }
 }
 
+/**
+ * Jadwal voucher hotspot — versi ivvibill dari '/system schedule' gratisinaja.
+ * Gratisinaja menaruh hitung mundurnya di router (skrip On Login membuat
+ * entri scheduler per voucher); di sini jatuh tempo dijalankan proses sendiri
+ * supaya statusnya terlihat di panel dan bisa diulang kalau router macet.
+ *  1. voucher lewat expired_at  -> user hotspot + sesinya dibuang, status batal
+ *     pakai 'kedaluwarsa'
+ *  2. push yang gagal/belum, selama masih berlaku dan baru dibuat -> dikirim
+ *     ulang, jadi router yang tadi mati tidak membuat voucher selamanya cacat
+ */
+async function tugasVoucher() {
+  if (running.voucher) return;
+  running.voucher = true;
+  try {
+    const mati = await db.q(
+      `SELECT id, kode, id_data_server, router_status FROM voucher
+       WHERE status IN ('stok','terjual','terpakai') AND expired_at < NOW()
+       ORDER BY expired_at LIMIT 50`);
+    let dicabut = 0, ditunda = 0, hangus = 0;
+    for (const m of mati) {
+      let h = { ada: false, gagal: [] };
+      if (m.router_status === 'ok') h = await monitor.hapusHotspotUser(m.kode, Number(m.id_data_server));
+      if (h.gagal && h.gagal.length) { ditunda++; continue; }   // router macet: coba lagi siklus berikut
+      await db.run("UPDATE voucher SET status='kedaluwarsa', router_status='belum', router_nama=NULL WHERE id=?",
+        [m.id]);
+      if (h.ada) dicabut++;
+      hangus++;
+    }
+
+    const tunggu = await db.q(
+      `SELECT vc.id, vc.kode, vc.id_data_server, vc.status, pk.profile_hotspot, pk.nama_paket,
+              pk.masa_aktif, pk.satuan
+       FROM voucher vc JOIN paket pk ON pk.id = vc.id_paket
+       WHERE vc.router_status <> 'ok' AND vc.status IN ('stok','terjual','terpakai')
+         AND vc.expired_at > NOW() AND vc.created_at > NOW() - INTERVAL 7 DAY
+         AND pk.profile_hotspot IS NOT NULL AND pk.profile_hotspot <> ''
+       ORDER BY vc.id LIMIT 20`);
+    let terkirim = 0;
+    const perTenant = new Map();
+    for (const t of tunggu) {
+      // hanya voucher yang sudah login punya schedule: stok tidak boleh
+      // kehabisan masa aktif sebelum terjual
+      const dur = t.status === 'terpakai' ? monitor.intervalVoucher(t) : null;
+      const k = `${t.id_data_server}\n${dur ? 'j' : '-'}\n${t.profile_hotspot}`;
+      if (!perTenant.has(k)) perTenant.set(k, []);
+      perTenant.get(k).push(t);
+    }
+    for (const [k, rows] of perTenant) {
+      const [ds, kinds, profil] = k.split('\n');
+      try {
+        const r = await monitor.pushVoucher(Number(ds), rows,
+          { profil, komentar: `ivvibill ${rows[0].nama_paket || ''}`,
+            jadwal: kinds === 'j' ? monitor.intervalVoucher(rows[0]) : null });
+        terkirim += r.terkirim;
+      } catch (e) { log('Retry voucher error:', e.message); }
+    }
+    if (hangus || terkirim || ditunda) {
+      log('Jadwal voucher:', JSON.stringify({ hangus, dicabut, terkirim_ulang: terkirim, ditunda }));
+    }
+    // ikut dikembalikan: endpoint /internal/cron/voucher memakainya sebagai
+    // bukti siklus benar-benar berjalan, bukan hanya "200 kosong"
+    return { hangus, dicabut, terkirim_ulang: terkirim, ditunda };
+  } catch (e) { log('Voucher error:', e.message); return { error: e.message }; }
+  finally { running.voucher = false; }
+}
+
 // ---------- kontrol ------------------------------------------------
 
 function mulai() {
@@ -167,10 +220,11 @@ function mulai() {
   timers.push(setInterval(tugasRouter, 60 * 1000));             // router tiap menit
   timers.push(setInterval(tugasOlt, 60 * 1000));                // cek jadwal OLT tiap menit
   timers.push(setInterval(tugasBilling, 60 * 1000));            // billing tiap menit
+  timers.push(setInterval(tugasVoucher, 60 * 1000));            // jatuh tempo + retry push voucher
   timers.push(setInterval(tugasIssue, Number(process.env.ISSUE_INTERVAL_MIN || 10) * 60 * 1000));
   // run sekali di awal (delay supaya server siap)
-  setTimeout(() => { tugasWa(); tugasRouter(); }, 5000);
-  log('Scheduler aktif (wa, router, olt, billing, issue)');
+  setTimeout(() => { tugasWa(); tugasRouter(); tugasVoucher(); }, 5000);
+  log('Scheduler aktif (wa, router, olt, billing, voucher, issue)');
 }
 
 function berhenti() {
@@ -178,4 +232,4 @@ function berhenti() {
   timers = [];
 }
 
-module.exports = { mulai, berhenti, tugasWa, tugasRouter, tugasOlt, tugasBilling, tugasIssue };
+module.exports = { mulai, berhenti, tugasWa, tugasRouter, tugasOlt, tugasBilling, tugasIssue, tugasVoucher };

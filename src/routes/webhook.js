@@ -1,7 +1,7 @@
 'use strict';
 // ============================================================
-// Webhook payment gateway (Midtrans & Flip) — TANPA login,
-// diamankan dengan verifikasi signature + IP whitelist internal.
+// Webhook TANPA login: payment gateway (Midtrans & Flip) dengan verifikasi
+// signature + IP whitelist, dan laporan sesi dari MikroTik dengan token perangkat.
 // Dipasang sebelum rute ber-auth di server.js.
 //
 // Multitenant: tenant diketahui lebih dulu dari nomor referensi
@@ -14,6 +14,7 @@ const db = require('../db');
 const cfgData = require('../services/configData');
 const crypto = require('../util/crypto');
 const billing = require('../services/billing');
+const mon = require('../services/monitoring');
 const config = require('../config');
 
 const router = express.Router();
@@ -99,6 +100,28 @@ router.post('/webhook/flip', raw, async (req, res) => {
       await billing.lunaskanTagihan(t.id, 'flip', { ref: id, jumlah: Number(body.amount || 0) });
     }
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ------------------------------------------------ laporan sesi dari MikroTik
+/**
+ * Dikirim /system script 'IvvibillAPI' yang dipasang tombol Test perangkat,
+ * tiap 40 detik. Tanpa login: yang membuktikan siapa pengirim adalah token acak
+ * per perangkat (master_perangkat.token_push), dan token itu hanya bisa
+ * membaca/menulis baris milik perangkatnya sendiri.
+ */
+router.post('/router/push', async (req, res) => {
+  try {
+    const b = parseBody(req);
+    const token = String(req.query.token || b.token || '');
+    if (!/^[0-9a-f]{20,64}$/.test(token)) return res.status(401).json({ error: 'token tidak valid' });
+    const dev = await db.one(
+      'SELECT id, id_data_server, nama, brand FROM master_perangkat WHERE token_push = ?', [token]);
+    if (!dev) return res.status(404).json({ error: 'perangkat tidak dikenali' });
+    if (dev.brand !== 'mikrotik') return res.status(400).json({ error: 'perangkat bukan MikroTik' });
+    res.json({ ok: true, ...(await mon.simpanPush(dev, b)) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

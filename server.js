@@ -58,6 +58,10 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
   crossOriginResourcePolicy: { policy: 'same-origin' }
 }));
+// Laporan sesi dari router dikirim /tool fetch dengan content-type form, jadi
+// body-nya harus dibaca mentah SEBELUM parser json/urlencoded global menghabiskan
+// stream. Parser yang sudah menandai req._body membuat parser berikutnya melewat.
+app.use('/api/router/push', express.raw({ type: () => true, limit: '256kb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 app.use(cookieParser());
@@ -116,6 +120,7 @@ app.post('/internal/cron/:tugas', requireInternal, async (req, res) => {
     if (t === 'olt') return res.json(await scheduler.tugasOlt());
     if (t === 'billing') return res.json(await scheduler.tugasBilling());
     if (t === 'issue') return res.json(await scheduler.tugasIssue());
+    if (t === 'voucher') return res.json(await scheduler.tugasVoucher());
     res.status(404).json({ error: 'Tugas tidak dikenal' });
   } catch (e) {
     res.status(500).json({ error: e.message });

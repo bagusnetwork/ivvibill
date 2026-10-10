@@ -296,14 +296,18 @@ async function muatUnmanage() {
     document.getElementById('jnUnmanage').textContent = (d.data || []).length;
     tb.innerHTML = (d.data || []).length ? d.data.map(s => `
       <tr><td>${esc(s.router)}</td><td><b>${esc(s.user)}</b></td>
-        <td>${esc(s.address || '-')}</td><td>${esc(s.uptime || '-')}</td></tr>`).join('')
-      : '<tr><td colspan="4" class="empty">Semua sesi PPPoE tercatat sebagai pelanggan</td></tr>';
+        <td>${esc(s.address || '-')}</td>
+        <td>${esc(s.uptime || '-')}${s.dari === 'snapshot' ? ' <span class="hint">(laporan router)</span>' : ''}</td>
+        <td class="t-actions">${s.address
+          ? `<button class="btn sm" onclick="remoteOnuIp('${esc(s.address)}','${esc(s.user)}')">Remote ONU</button>`
+          : '<span class="hint">tanpa IP</span>'}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="empty">Semua sesi PPPoE tercatat sebagai pelanggan</td></tr>';
     if ((d.router_gagal || []).length) {
       document.getElementById('unmanageHint').textContent =
         `Router gagal disentuh: ${d.router_gagal.join(' | ')}`;
     }
   } catch (e) {
-    tb.innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="5" class="empty">${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -762,7 +766,12 @@ async function loadPaket() {
         <td class="t-num">${rupiah(p.harga)}</td>
         <td class="t-num">${rupiah(p.harga_agen)}</td>
         <td>${esc(p.kecepatan || '-')}</td>
-        <td><span class="badge ${p.status === 'aktif' ? 'ok' : 'mute'}">${esc(p.status)}</span></td>
+        <td>${p.masa_aktif} ${esc(p.satuan || 'hari')}
+          ${p.jenis === 'hotspot'
+            ? (p.profile_hotspot
+                ? `<div class="hint">${esc(p.profile_hotspot)}</div>`
+                : '<div class="hint"><span class="badge bad">tanpa profile — voucher tidak bisa dibuat</span></div>')
+            : `<div class="hint">${esc(p.status)}</div>`}</td>
         <td class="t-actions"><button class="btn sm secondary" onclick="formPaket(${esc(JSON.stringify(p))})">Ubah</button></td>
       </tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada paket</td></tr>';
   } catch (e) { toast(e.message, true); }
@@ -775,9 +784,82 @@ function formPaket(p) {
   document.getElementById('kAgen').value = p ? Number(p.harga_agen) : '';
   document.getElementById('kSpeed').value = p ? (p.kecepatan || '') : '';
   document.getElementById('kAktif').value = p ? p.masa_aktif : 30;
+  document.getElementById('kSatuan').value = p ? (p.satuan || 'hari') : 'hari';
+  document.getElementById('kProfil').value = p ? (p.profile_hotspot || '') : '';
   document.getElementById('kStatus').value = p ? p.status : 'aktif';
+  muatProfilHotspot();
   modalOpen('mPaket');
 }
+
+/**
+ * Daftar profile hotspot benar-benar ada di router (bukan ketik buta):
+ * voucher dengan profile yang salah ditolak RouterOS saat login.
+ */
+async function muatProfilHotspot() {
+  const dl = document.getElementById('dlProfil');
+  const hint = document.getElementById('profilHint');
+  dl.innerHTML = ''; hint.textContent = '';
+  try {
+    const d = await API.get('/api/hotspot/profil');
+    const nama = [...new Set((d.data || []).map(p => p.nama))];
+    dl.innerHTML = nama.map(n => `<option value="${esc(n)}"></option>`).join('');
+    hint.textContent = nama.length
+      ? ` — di router: ${nama.slice(0, 8).join(', ')}${nama.length > 8 ? ' …' : ''}`
+      : ' — router tidak membalas daftar profile';
+  } catch (e) { hint.textContent = ` — gagal membaca router: ${e.message}`; }
+}
+
+/**
+ * Bandingkan tabel paket dengan profile bandwidth di router. Router hanya
+ * dibaca saat modal dibuka — daftar paket tidak boleh menunggu jawaban MikroTik.
+ */
+function sinkronPaket() { modalOpen('mSinkron'); muatSinkron(); }
+
+async function muatSinkron() {
+  const jenis = document.getElementById('skJenis').value;
+  document.getElementById('skHint').textContent = 'Menghubungi router…';
+  document.getElementById('skBaru').innerHTML = '';
+  document.getElementById('skHilang').innerHTML = '';
+  try {
+    const d = await API.get(`/api/paket/sinkron?jenis=${jenis}`);
+    const bl = d.baru || [], coc = d.cocok || [], hl = d.hilang || [];
+    document.getElementById('skHint').textContent =
+      `${(d.router || []).join(', ') || 'tidak ada router aktif'} — ${bl.length} profile belum jadi paket, ` +
+      `${coc.length} sudah cocok` + ((d.gagal || []).length ? ` · ${d.gagal.length} router gagal` : '');
+    document.getElementById('skBaru').innerHTML = bl.length
+      ? `<table><thead><tr><th style="width:34px"><input type="checkbox" onchange="skPilihAll(this)"></th>
+          <th>Profile di router</th><th>Kecepatan</th><th>Router</th></tr></thead><tbody>` +
+        bl.map(p => `<tr><td><input type="checkbox" class="skSel" value="${esc(p.nama)}"></td>
+          <td><b>${esc(p.nama)}</b></td><td>${esc(p.kecepatan || '-')}</td>
+          <td>${esc((p.router || []).join(', '))}</td></tr>`).join('') + '</tbody></table>'
+      : '<p class="hint">Semua profile router di jenis ini sudah punya paket.</p>';
+    document.getElementById('skHilang').innerHTML = hl.length
+      ? `<p class="hint"><span class="badge bad">${hl.length} paket aktif, profile-nya tidak ada di router</span></p>` +
+        hl.map(p => `<div class="hint">• ${esc(p.nama_paket)} → ${esc(p.profile)}</div>`).join('') +
+        `<p class="hint">${(d.gagal || []).map(esc).join('<br>')}</p>`
+      : '';
+  } catch (e) { document.getElementById('skHint').textContent = e.message; }
+}
+
+function skPilihAll(chk) {
+  document.querySelectorAll('.skSel').forEach(c => { c.checked = chk.checked; });
+}
+
+async function simpanSinkron() {
+  const profil = [...document.querySelectorAll('.skSel:checked')].map(c => c.value);
+  if (!profil.length) return toast('Pilih minimal satu profile', true);
+  try {
+    const r = await API.post('/api/paket/sinkron',
+      { jenis: document.getElementById('skJenis').value, profil });
+    const lewat = (r.dilewati || []);
+    modalClose('mSinkron');
+    toast(`${(r.dibuat || []).length} paket dibuat (nonaktif, harga 0)` +
+      (lewat.length ? ` · ${lewat.length} dilewati` : ''), lewat.length > 0);
+    lewat.slice(0, 3).forEach(x => toast(`${x.nama}: ${x.alasan}`, true));
+    loadPaket();
+  } catch (e) { toast(e.message, true); }
+}
+
 async function simpanPaket() {
   const id = document.getElementById('kPid').value;
   const body = {
@@ -787,6 +869,8 @@ async function simpanPaket() {
     harga_agen: document.getElementById('kAgen').value,
     kecepatan: document.getElementById('kSpeed').value,
     masa_aktif: document.getElementById('kAktif').value,
+    satuan: document.getElementById('kSatuan').value,
+    profile_hotspot: document.getElementById('kProfil').value,
     status: document.getElementById('kStatus').value
   };
   try {
@@ -803,22 +887,110 @@ async function loadVoucher() {
     const st = document.getElementById('vstatus').value;
     const d = await API.get(`/api/voucher?q=${q}&status=${st}&limit=100`);
     const badge = (s) => ({ stok: 'info', terjual: 'warn', terpakai: 'ok', kedaluwarsa: 'mute', batal: 'mute' }[s] || 'mute');
+    const push = (v) => {
+      const s = v.router_status || 'belum';
+      const label = { ok: '🟢 di router', gagal: '🔴 gagal', belum: '⚪ belum' }[s] || s;
+      const b = s === 'ok' ? 'ok' : s === 'gagal' ? 'bad' : 'mute';
+      return `<span class="badge ${b}">${esc(label)}</span>` +
+        (v.router_error ? `<div class="hint">${esc(v.router_error)}</div>`
+          : (s === 'ok' && v.router_nama ? `<div class="hint">${esc(v.router_nama)}</div>` : ''));
+    };
+    const aksi = (v) => `
+      <td class="t-actions">
+        ${v.router_status !== 'ok' && v.status !== 'kedaluwarsa' && v.status !== 'batal'
+          ? `<button class="btn sm" onclick="voucherPush(${v.id})">Push ulang</button>` : ''}
+        ${v.status === 'stok' || v.status === 'terjual'
+          ? `<button class="btn sm ghost" onclick="voucherCabut(${v.id},'${esc(v.kode)}')">Cabut</button>` : ''}
+      </td>`;
     document.getElementById('tbVoucher').innerHTML = (d.data || []).map(v => `
-      <tr><td><b>${esc(v.kode)}</b></td><td>${esc(v.nama_paket || '-')}</td>
+      <tr><td><input type="checkbox" class="vSel" value="${v.id}" onchange="vPilihBaris()"></td>
+        <td><b>${esc(v.kode)}</b></td>
+        <td>${esc(v.nama_paket || '-')}${v.masa_aktif
+          ? `<div class="hint">${v.masa_aktif} ${esc(v.satuan || 'hari')} · ${esc(v.profile_hotspot || 'tanpa profile')}</div>`
+          : ''}</td>
         <td class="t-num">${rupiah(v.harga_jual)}</td>
         <td><span class="badge ${badge(v.status)}">${esc(v.status)}</span></td>
+        <td>${push(v)}</td>
         <td>${esc(String(v.created_at).slice(0, 16))}</td>
-        <td>${v.used_at ? esc(String(v.used_at).slice(0, 16)) : '-'}</td></tr>`).join('')
-      || '<tr><td colspan="6" class="empty">Belum ada voucher</td></tr>';
+        <td>${v.used_at ? esc(String(v.used_at).slice(0, 16)) : '-'}</td>
+        ${aksi(v)}</tr>`).join('')
+      || '<tr><td colspan="9" class="empty">Belum ada voucher</td></tr>';
+    document.getElementById('vAll').checked = false;
+    vPilihBaris();
   } catch (e) { toast(e.message, true); }
 }
+
+function vTerpilih() {
+  return [...document.querySelectorAll('.vSel:checked')].map(c => Number(c.value));
+}
+
+function vPilihAll(chk) {
+  document.querySelectorAll('.vSel').forEach(c => { c.checked = chk.checked; });
+  vPilihBaris();
+}
+
+function vPilihBaris() {
+  const n = vTerpilih().length;
+  document.getElementById('vBulk').style.display = n ? 'flex' : 'none';
+  document.getElementById('vBulkJml').textContent = `${n} dipilih`;
+}
+
+function vBulkBersihkan() {
+  document.querySelectorAll('.vSel').forEach(c => { c.checked = false; });
+  document.getElementById('vAll').checked = false;
+  vPilihBaris();
+}
+
+/** Cabut/hapus voucher banyak sekaligus lewat POST /api/voucher/bulk. */
+async function vBulkTerapkan() {
+  const ids = vTerpilih();
+  if (!ids.length) return toast('Belum ada voucher dipilih', true);
+  const aksi = document.getElementById('vBulkAksi').value;
+  const kata = aksi === 'hapus'
+    ? `Hapus permanen ${ids.length} voucher? Barisnya dibuang dari database`
+    : `Cabut ${ids.length} voucher? User hotspotnya dibuang di router`;
+  if (!confirm(`${kata}${aksi === 'hapus' ? ' — hanya voucher stok/batal yang jadi dihapus' : ''}.`)) return;
+  try {
+    const r = await API.post('/api/voucher/bulk', { ids, aksi });
+    const gagal = (r.gagal || []).length;
+    toast(`${(r.diubah || []).length} voucher ${aksi}${gagal ? ` · ${gagal} gagal` : ''}`, gagal > 0);
+    (r.gagal || []).slice(0, 3).forEach(g => toast(`${g.kode || '#' + g.id}: ${g.alasan}`, true));
+    vBulkBersihkan();
+    loadVoucher();
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Kirim ulang user hotspot untuk voucher yang push-nya gagal/belum. */
+async function voucherPush(id) {
+  toast('Mengirim ke router…');
+  try {
+    const r = await API.post(`/api/voucher/${id}/push-ulang`, {});
+    toast(r.terkirim ? `User hotspot dibuat di ${r.router || 'router'}` +
+      (r.jadwal_gagal ? ' — jadwal jatuh temponya gagal, lihat kolom Router' : '')
+      : 'Push masih gagal — lihat pesan di kolom Router', (r.terkirim && !r.jadwal_gagal) ? undefined : true);
+    loadVoucher();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function voucherCabut(id, kode) {
+  if (!confirm(`Cabut voucher ${kode}? User hotspotnya dibuang di router dan voucher jadi batal.`)) return;
+  try {
+    const r = await API.post(`/api/voucher/${id}/cabut`, {});
+    toast(r.ada ? 'User hotspot dihapus' : 'Voucher dibatalkan (user tidak ada di router)');
+    loadVoucher();
+  } catch (e) { toast(e.message, true); }
+}
+
 async function genVoucher() {
   try {
     const r = await API.post('/api/voucher/generate', {
       id_paket: document.getElementById('vPaket').value,
       jumlah: document.getElementById('vJml').value
     });
-    modalClose('mVoucher'); toast(`${r.dibuat} voucher dibuat`); loadVoucher();
+    modalClose('mVoucher');
+    toast(`+${r.dibuat} voucher — ${r.terkirim} terkirim ke router` +
+      (r.gagal ? `, ${r.gagal} GAGAL (lihat kolom Router)` : ''), r.gagal ? true : undefined);
+    loadVoucher(); loadPaket();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -941,7 +1113,25 @@ async function pollOlt(id) {
   toast('Polling OLT…');
   try {
     const r = await API.post(`/api/olt/poll/${id}`, {});
-    toast(`${(r.onus || []).length} ONU dibaca`); loadOlt();
+    toast(`${(r.onus || []).length} ONU dibaca, ${r.disimpan ? r.disimpan.tersimpan : 0} tersimpan, ` +
+      `${r.cocok ? r.cocok.berubah : 0} terikat ke pelanggan`);
+    loadOlt();
+  } catch (e) { toast(e.message, true); }
+}
+
+/**
+ * Ikat baris master_onu ke pelanggan (MAC -> akun/LOID -> nama). Jalur otomatis
+ * sudah jalan tiap polling; tombol ini untuk kasus data pelanggan baru diubah.
+ */
+async function cocokOnu() {
+  toast('Mencocokkan ONU dengan pelanggan…');
+  try {
+    const r = await API.post('/api/olt/cocok', {});
+    document.getElementById('onuCocokHint').textContent =
+      `${r.dicek} ONU dicek, ${r.cocok} terikat, ${r.berubah} berubah` +
+      (r.manual ? `, ${r.manual} dikunci manual` : '');
+    toast('Pencocokan selesai');
+    loadOlt(); loadPelanggan();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -971,7 +1161,10 @@ async function loadPerangkat() {
         <td>${esc(p.tipe)}</td><td>${esc(p.alamat)}${p.port ? ':' + esc(p.port) : ''}</td>
         <td>${esc(p.lokasi || '-')}</td>
         <td>${p.last_check ? esc(String(p.last_check).slice(5, 16)) : '-'}<div class="hint">${esc(p.last_msg || '')}</div></td>
-        <td><span class="badge ${p.status === 'aktif' ? 'ok' : 'mute'}">${esc(p.status)}</span></td>
+        <td><span class="badge ${p.status === 'aktif' ? 'ok' : 'mute'}">${esc(p.status)}</span>
+          ${p.tipe === 'router' ? `<div class="hint">${p.push_terpasang
+            ? `push ${p.push_sesi || 0} sesi${p.push_lihat ? ' · ' + esc(String(p.push_lihat).slice(5, 16)) : ' · belum lapor'}`
+            : 'push belum dipasang'}</div>` : ''}</td>
         <td class="t-actions">
           <button class="btn sm ghost" onclick="testPerangkat(${p.id})">Tes</button>
           <button class="btn sm ghost" onclick="bukaWebfig(${esc(JSON.stringify(p))})" title="Buka halaman web perangkat (WebFig/GUI)">WebFig</button>
@@ -1020,7 +1213,11 @@ async function testPerangkat(id) {
   toast('Menguji koneksi…');
   try {
     const r = await API.post(`/api/perangkat/${id}/test`, {});
-    toast(r.ok ? `OK (${r.ms || '?'} ms${r.interfaces ? ', ' + r.interfaces + ' interface' : ''})` : `Gagal: ${r.error}`, !r.ok);
+    // pada MikroTik, Test sekaligus memasang script+schedule push sesi (ala gratisinaja)
+    const p = r.push && r.push.gagal ? `push gagal: ${r.push.gagal}`
+      : r.push && r.push.jadwal ? `push ${r.push.status_jadwal} tiap ${r.push.interval}` : '';
+    toast(r.ok ? `OK (${r.ms || '?'} ms${r.interfaces ? ', ' + r.interfaces + ' interface' : ''}${p ? ', ' + p : ''})`
+      : `Gagal: ${r.error}`, !r.ok);
     loadPerangkat();
   } catch (e) { toast(e.message, true); }
 }
@@ -1812,6 +2009,24 @@ async function remoteOnu(id) {
         <div><div class="hint">Router · port remote</div><b>${esc(r.router)} · ${r.port_remote}</b></div>
         <div><div class="hint">NAT rule</div><b>${r.nat === 'update' ? 'to-addresses diupdate' : 'rule baru dibuat'}</b></div>
         <div><div class="hint">IP dari</div><b>${esc(r.via)}</b></div>
+      </div>`;
+    const a = document.getElementById('roBuka');
+    a.href = r.link; a.textContent = `🌐 Buka ${r.link}`;
+    modalOpen('mRemoteOnu');
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Versi tab Unmanage: IP sudah dikenal dari sesi PPPoE, tidak ada baris pelanggan. */
+async function remoteOnuIp(ip, akun) {
+  toast('Menyiapkan remote ONU…');
+  try {
+    const r = await API.post('/api/remote-onu', { ip, akun });
+    document.getElementById('roInfo').innerHTML = `
+      <div class="form-grid">
+        <div><div class="hint">Akun PPPoE (unmanage)</div><b>${esc(akun || '-')}</b></div>
+        <div><div class="hint">IP pelanggan</div><b>${esc(r.ip_pelanggan)}</b></div>
+        <div><div class="hint">Router · port remote</div><b>${esc(r.router)} · ${r.port_remote}</b></div>
+        <div><div class="hint">NAT rule</div><b>${r.nat === 'update' ? 'to-addresses diupdate' : 'rule baru dibuat'}</b></div>
       </div>`;
     const a = document.getElementById('roBuka');
     a.href = r.link; a.textContent = `🌐 Buka ${r.link}`;

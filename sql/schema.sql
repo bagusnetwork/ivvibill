@@ -121,8 +121,10 @@ CREATE TABLE IF NOT EXISTS paket (
   jenis         ENUM('pppoe','hotspot') NOT NULL DEFAULT 'pppoe',
   harga         DECIMAL(15,2) NOT NULL DEFAULT 0,
   kecepatan     VARCHAR(40) DEFAULT NULL,          -- mis. "10M/10M"
-  masa_aktif    INT NOT NULL DEFAULT 30,           -- hari
+  masa_aktif    INT NOT NULL DEFAULT 30,           -- durasi aktif, satuan di kolom satuan
+  satuan        ENUM('hari','jam') NOT NULL DEFAULT 'hari',
   harga_agen    DECIMAL(15,2) NOT NULL DEFAULT 0,  -- harga jual agen (voucher)
+  profile_hotspot VARCHAR(64) DEFAULT NULL,        -- nama /ip/hotspot/user/profile di router
   deskripsi     VARCHAR(255) DEFAULT NULL,
   status        ENUM('aktif','nonaktif') NOT NULL DEFAULT 'aktif',
   created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -303,14 +305,19 @@ CREATE TABLE IF NOT EXISTS voucher (
   harga_beli  DECIMAL(15,2) NOT NULL DEFAULT 0,
   harga_jual  DECIMAL(15,2) NOT NULL DEFAULT 0,
   status      ENUM('stok','terjual','terpakai','kedaluwarsa','batal') NOT NULL DEFAULT 'stok',
+  router_status ENUM('belum','ok','gagal') NOT NULL DEFAULT 'belum',
+  router_nama VARCHAR(100) DEFAULT NULL,       -- nama perangkat tempat user hotspot dibuat
+  router_error  VARCHAR(255) DEFAULT NULL,     -- pesan trap/koneksi saat push terakhir
   created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  pushed_at   DATETIME DEFAULT NULL,
   sold_at     DATETIME DEFAULT NULL,
   used_at     DATETIME DEFAULT NULL,
   expired_at  DATETIME DEFAULT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uq_voucher_kode (kode),
   KEY idx_voucher_agen (id_agen, status),
-  KEY idx_voucher_server (id_data_server, status)
+  KEY idx_voucher_server (id_data_server, status),
+  KEY idx_voucher_push (router_status, expired_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
@@ -327,13 +334,15 @@ CREATE TABLE IF NOT EXISTS master_perangkat (
   use_https      TINYINT NOT NULL DEFAULT 0,
   username       VARCHAR(60) DEFAULT NULL,
   password_enc   TEXT,                           -- AES-256-GCM
+  token_push     VARCHAR(64) DEFAULT NULL,       -- kunci endpoint /api/router/push
   lokasi         VARCHAR(120) DEFAULT NULL,
   status         ENUM('aktif','nonaktif') NOT NULL DEFAULT 'aktif',
   last_check     DATETIME DEFAULT NULL,
   last_msg       VARCHAR(255) DEFAULT NULL,
   created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  KEY idx_perangkat_server (id_data_server, tipe, status)
+  KEY idx_perangkat_server (id_data_server, tipe, status),
+  KEY idx_perangkat_token (token_push)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- setting ambang analisa redaman per OLT
@@ -359,16 +368,20 @@ CREATE TABLE IF NOT EXISTS master_onu (
   pon            VARCHAR(30) DEFAULT NULL,
   sn             VARCHAR(60) DEFAULT NULL,
   mac            VARCHAR(40) DEFAULT NULL,
-  nama_onu       VARCHAR(120) DEFAULT NULL,
+  nama_onu       VARCHAR(120) DEFAULT NULL,        -- HSGQ: name/description/onu_name (LOID)
   rx_dbm         DECIMAL(6,2) DEFAULT NULL,
   tx_dbm         DECIMAL(6,2) DEFAULT NULL,
   status_online  TINYINT NOT NULL DEFAULT 0,
   id_pelanggan   INT DEFAULT NULL,
-  match_by       VARCHAR(20) DEFAULT NULL,       -- mac|sn|nama
+  match_by       VARCHAR(20) DEFAULT NULL,       -- mac|loid|akun|nama|manual
+  matched_at     DATETIME DEFAULT NULL,
   updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
+  -- tanpa unique ini upsert polling OLT (ON DUPLICATE KEY UPDATE) selalu
+  -- INSERT baris baru, sehingga satu ONU punya puluhan baris
+  UNIQUE KEY uq_onu_sn (id_perangkat, sn),
   KEY idx_onu_perangkat (id_perangkat, pon),
-  KEY idx_onu_sn (id_perangkat, sn),
+  KEY idx_onu_mac (mac),
   KEY idx_onu_pelanggan (id_pelanggan)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -577,6 +590,24 @@ CREATE TABLE IF NOT EXISTS pppoe_status (
   last_seen    DATETIME DEFAULT NULL,
   updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id_pelanggan)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Snapshot sesi yang DILAPORKAN ROUTER (schedule /system schedule tiap 40 detik),
+-- bukan hasil ivvibill polling API. Link API ke CCR1009 bisa drop 1 dari 3
+-- percobaan, jadi daftar Unmanage dan status online tetap punya angka segar
+-- walaupun koneksi API sedang mati. Baris lama dibuang saat push berikutnya.
+CREATE TABLE IF NOT EXISTS sesi_router (
+  id           INT NOT NULL AUTO_INCREMENT,
+  id_perangkat INT NOT NULL,
+  tipe         ENUM('pppoe','hotspot') NOT NULL DEFAULT 'pppoe',
+  akun         VARCHAR(120) NOT NULL,
+  ip           VARCHAR(45) DEFAULT NULL,
+  uptime       VARCHAR(60) DEFAULT NULL,
+  seen_at      DATETIME NOT NULL,
+  tanda_push   CHAR(16) DEFAULT NULL,        -- penanda laporan yang menulis baris ini
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_sesi (id_perangkat, tipe, akun),
+  KEY idx_sesi_seen (seen_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------

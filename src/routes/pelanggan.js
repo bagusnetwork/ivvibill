@@ -38,11 +38,14 @@ router.post('/paket', requirePJ(), requireMenu('paket', 'tambah'), async (req, r
     const harga = v.num(req.body.harga, { min: 0, max: 1e9, def: 0 });
     const kecepatan = v.str(req.body.kecepatan, { max: 40, def: null });
     const masaAktif = v.num(req.body.masa_aktif, { min: 1, max: 3650, def: 30, int: true });
+    const satuan = v.enumOf(req.body.satuan, ['hari', 'jam'], 'hari');
+    const profil = v.str(req.body.profile_hotspot, { max: 64, def: null });
     const hargaAgen = v.num(req.body.harga_agen, { min: 0, max: 1e9, def: 0 });
     const id = await db.insert(
-      `INSERT INTO paket (id_data_server, nama_paket, jenis, harga, kecepatan, masa_aktif, harga_agen)
-       VALUES (?,?,?,?,?,?,?)`,
-      [ds, nama, jenis, harga, kecepatan, masaAktif, hargaAgen]
+      `INSERT INTO paket (id_data_server, nama_paket, jenis, harga, kecepatan, masa_aktif, satuan,
+                          harga_agen, profile_hotspot)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [ds, nama, jenis, harga, kecepatan, masaAktif, satuan, hargaAgen, profil]
     );
     res.json({ id });
   } catch (e) { next(e); }
@@ -59,12 +62,15 @@ router.put('/paket/:id', requirePJ(), requireMenu('paket', 'ubah'), async (req, 
     const harga = v.num(req.body.harga, { min: 0, max: 1e9, def: Number(p.harga) });
     const kecepatan = v.str(req.body.kecepatan, { max: 40, def: p.kecepatan });
     const masaAktif = v.num(req.body.masa_aktif, { min: 1, max: 3650, def: p.masa_aktif, int: true });
+    const satuan = v.enumOf(req.body.satuan, ['hari', 'jam'], p.satuan || 'hari');
+    const profil = v.str(req.body.profile_hotspot, { max: 64, def: p.profile_hotspot });
     const hargaAgen = v.num(req.body.harga_agen, { min: 0, max: 1e9, def: Number(p.harga_agen) });
     const status = v.enumOf(req.body.status, ['aktif', 'nonaktif'], p.status);
     await db.run(
-      `UPDATE paket SET nama_paket=?, jenis=?, harga=?, kecepatan=?, masa_aktif=?, harga_agen=?, status=?
+      `UPDATE paket SET nama_paket=?, jenis=?, harga=?, kecepatan=?, masa_aktif=?, satuan=?,
+                        harga_agen=?, profile_hotspot=?, status=?
        WHERE id=?`,
-      [nama, jenis, harga, kecepatan, masaAktif, hargaAgen, status, id]
+      [nama, jenis, harga, kecepatan, masaAktif, satuan, hargaAgen, profil, status, id]
     );
     res.json({ ok: true });
   } catch (e) { next(e); }
@@ -82,6 +88,99 @@ router.delete('/paket/:id', requirePJ(), requireMenu('paket', 'hapus'), async (r
     if (dipakai) return res.status(400).json({ error: 'Paket masih dipakai pelanggan' });
     await db.run('DELETE FROM paket WHERE id = ?', [id]);
     res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+// ------------------------------------------------- sinkronisasi paket ↔ router
+/**
+ * Kunci pencocokan paket dengan profile bandwidth di router.
+ * hotspot: profile_hotspot yang dipakai saat voucher didorong ke router, jadi
+ *          itu yang dibandingkan (nama_paket hanya cadangan untuk paket lama).
+ * pppoe:   ivvibill tidak membuat secret PPPoE, jadi tidak ada kolom profile
+ *          pppoe — nama paket yang jadi pegangan.
+ */
+function kunciProfil(p) {
+  return String((p.jenis === 'hotspot' ? (p.profile_hotspot || p.nama_paket) : p.nama_paket) || '')
+    .toLowerCase().trim();
+}
+
+/**
+ * Diff dua arah antara tabel paket dan profile di router. Membaca saja:
+ * baru = ada di router belum jadi paket, hilang = paket aktif yang profile-nya
+ * sudah tidak ada di router (vouchernya bakal ditolak RouterOS saat login).
+ */
+router.get('/paket/sinkron', async (req, res, next) => {
+  try {
+    const jenis = v.enumOf(req.query.jenis, ['hotspot', 'pppoe'], 'hotspot');
+    const ts = tenantSql(req, 'id_data_server');
+    const [daftar, r] = await Promise.all([
+      db.q(`SELECT * FROM paket WHERE jenis = ?${ts.sql}`, [jenis, ...ts.params]),
+      mon.profilRouter(tenantAktif(req), jenis)
+    ]);
+    const peta = new Map(daftar.map(p => [kunciProfil(p), p]));
+    const byNama = new Map();
+    for (const p of r.data) {
+      const k = String(p.nama).toLowerCase().trim();
+      if (!k) continue;
+      if (!byNama.has(k)) byNama.set(k, { nama: p.nama, kecepatan: p.kecepatan,
+        shared: p.shared, router: [], nonaktif: p.nonaktif });
+      const e = byNama.get(k);
+      if (!e.router.includes(p.router)) e.router.push(p.router);
+      if (!e.kecepatan && p.kecepatan) e.kecepatan = p.kecepatan;
+      if (p.nonaktif === false) e.nonaktif = false;
+    }
+    const baru = [], cocok = [];
+    for (const [k, e] of byNama) {
+      const p = peta.get(k);
+      if (p) cocok.push({ nama: e.nama, kecepatan: e.kecepatan, id: p.id,
+        nama_paket: p.nama_paket, status: p.status });
+      else baru.push(e);
+    }
+    const hilang = daftar.filter(p => p.status === 'aktif' && !byNama.has(kunciProfil(p)))
+      .map(p => ({ id: p.id, nama_paket: p.nama_paket, profile: kunciProfil(p), jenis: p.jenis }));
+    res.json({ jenis, router: [...new Set(r.data.map(p => p.router))],
+      baru, cocok, hilang, gagal: r.gagal });
+  } catch (e) { next(e); }
+});
+
+/**
+ * Buat paket dari profile yang dipilih admin. Kecepatan diambil dari rate-limit
+ * router; harga 0 dan status nonaktif disengaja — tarif adalah keputusan pemilik
+ * ISP, dan paket nonaktif tidak muncul di daftar penjualan sampai harganya diisi.
+ */
+router.post('/paket/sinkron', requirePJ(), requireMenu('paket', 'tambah'), async (req, res, next) => {
+  try {
+    const jenis = v.enumOf(req.body.jenis, ['hotspot', 'pppoe'], 'hotspot');
+    const ds = tenantAktif(req);
+    const daftar = Array.isArray(req.body.profil) ? req.body.profil : [];
+    const namaList = [...new Set(daftar.map(x => v.str(x, { min: 1, max: 64 })).filter(Boolean))].slice(0, 100);
+    if (!namaList.length) return res.status(400).json({ error: 'Tidak ada profile dipilih' });
+
+    const r = await mon.profilRouter(ds, jenis);
+    const diRouter = new Map(r.data.map(p => [String(p.nama).toLowerCase().trim(), p]));
+    const dibuat = [], dilewati = [];
+    for (const nama of namaList) {
+      const p = diRouter.get(String(nama).toLowerCase().trim());
+      if (!p) { dilewati.push({ nama, alasan: 'Sudah tidak ada di router' }); continue; }
+      const ada = await db.one(
+        `SELECT id FROM paket WHERE id_data_server = ? AND LOWER(nama_paket) = ? LIMIT 1`,
+        [ds, String(nama).toLowerCase().trim()]);
+      if (ada) { dilewati.push({ nama, alasan: `Sudah jadi paket #${ada.id}` }); continue; }
+      const id = await db.insert(
+        `INSERT INTO paket (id_data_server, nama_paket, jenis, harga, kecepatan, masa_aktif,
+                            satuan, harga_agen, profile_hotspot, deskripsi, status)
+         VALUES (?,?,?,?,?,?,?,?,?,?, 'nonaktif')`,
+        [ds, nama, jenis, 0, p.kecepatan, 30, 'hari', 0,
+          jenis === 'hotspot' ? nama : null,
+          `diambil dari profile router ${p.router}`]
+      );
+      dibuat.push({ id, nama_paket: nama, kecepatan: p.kecepatan });
+    }
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'sinkron_paket',
+        `${jenis}: dibuat ${dibuat.length}, dilewati ${dilewati.length}`,
+        (req.ip || '').replace('::ffff:', '')]);
+    res.json({ dibuat, dilewati });
   } catch (e) { next(e); }
 });
 

@@ -4,6 +4,363 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-09 — v1.7.0 — voucher dibersihkan serentak (cabut/hapus massal) + tabel Paket disinkronkan dengan profile bandwidth yang benar-benar ada di MikroTik
+
+**Masalah**
+
+1. **Menu Voucher tidak punya aksi serentak.** Satu voucher hanya bisa dicabut lewat
+   tombol per baris. agen ISP mencetak 500 stok untuk promo yang dibatalkan, lalu
+   harus mengklik 500 kali — dan baris `stok`/`batal` yang sudah tidak dipakai tidak
+   bisa dibuang sama sekali, jadi daftar voucher terus membengkak.
+2. **Paket hotspot harus diketik manual dan tidak pernah dibandingkan dengan router.**
+   Nama profile di `/ip/hotspot/user/profile` ditulis tangan ke `paket.profile_hotspot`;
+   salah satu huruf saja berarti generate voucher menolak (atau lebih buruk: user
+   hotspot dibuat dengan profile yang salah). Tidak ada cara tahu profil apa yang ada
+   di router, profil mana yang belum punya paket, dan paket mana yang profile-nya
+   sudah dihapus admin router kemarin.
+
+Tidak ada preseden di aplikasi pembanding (gratisinaja) untuk dua hal ini — keduanya
+dirancang mengikuti konvensi ivvibill sendiri: parser body dan bentuk hasil meniru
+`ubahStatusBulk` di rute pelanggan (`ids` array/CSV, maksimal 200, sukses dan gagal
+dikirim terpisah), UI meniru kolom pilih + bar aksi massal yang sudah ada di Pelanggan.
+
+**Diubah**
+
+*Aksi massal voucher — `src/routes/agen.js`*
+
+- `POST /api/voucher/bulk` **baru** (`requirePJ()` — superadmin/master saja; teknisi
+  dan agen tidak ikut), guard menu per aksi: `cabut` ikut grant **voucher · generate**,
+  `hapus` butuh grant **voucher · hapus** sendiri, sehingga grup akses yang hanya boleh
+  mencetak stok tidak bisa menghapus baris.
+- `voucherBulk()` memproses per baris dengan `tenantSql(req,'id_data_server')`, jadi
+  id milik tenant lain masuk ke `gagal` (`Tidak ada di data server ini`) dan tidak
+  mengubah apa pun. Maksimal 200 id per permintaan.
+  - `cabut` = perilaku tombol Cabut yang sudah ada: user hotspot + `/system schedule`
+    jatuh temponya dibuang di router, barisnya tetap ada dengan `status='batal'`,
+    `router_status='belum'`. Masalah router dilaporkan di kolom `hasil`, tidak
+    membatalkan pembatalan (sama seperti satu baris).
+  - `hapus` = baris dibuang permanen, **hanya** untuk `stok`/`batal`. Voucher
+    `terjual`/`terpakai`/`kedaluwarsa` ditolak dengan alasan
+    `Status X — hanya stok/batal yang bisa dihapus`, karena baris itu riwayat penjualan
+    agen: menghapusnya membuat saldo agen tidak bisa dicocokkan lagi.
+    Penjaga kedua: kalau `router_status='ok'` tetapi router sedang tidak bisa
+    dikonfirmasi, barisnya **tidak** dihapus — itu akan meninggalkan user hotspot aktif
+    tanpa jejak di panel (internet gratis yang tidak bisa dicabut).
+- Setiap baris yang berhasil dicatat ke `audit_log` sebagai `voucher_bulk_cabut` /
+  `voucher_bulk_hapus` dengan kode voucher dan hasilnya.
+- `hapusHotspotUser()` dipakai apa adanya dari v1.6 — satu sesi API per router untuk
+  seluruh batch (400 voucher tidak berarti 400 koneksi).
+
+*Baca profile router — `src/services/monitoring.js`*
+
+- `profilRouter(idDataServer, jenis)` **baru** — `/ip/hotspot/user/profile/print` untuk
+  hotspot, `/ppp/profile/print` untuk pppoe, `=.proplist=name,rate-limit,shared-users,
+  disabled`, dan `name` tidak pernah dipakai mentah (`amanTeks`, membatasi panjang).
+  Dua jenis punya nama kolom yang sama, jadi satu fungsi cukup. Router yang mati masuk
+  ke `gagal` per perangkat, bukan menghanguskan seluruh permintaan.
+- `profilHotspot()` tetap ada sebagai pembungkus tipis dengan bentuk respons lama
+  (`{data:[{router,nama}],gagal}`) — `GET /api/hotspot/profil` dan form Paket v1.6 tidak
+  berubah sedikit pun.
+
+*Diff + impor paket — `src/routes/pelanggan.js`*
+
+- `GET /api/paket/sinkron?jenis=hotspot|pppoe` **baru** (baca saja). Isinya:
+  `baru` (profile di router yang belum jadi paket, lengkap dengan kecepatan dan daftar
+  router yang memilikinya — profile dengan nama sama di dua router digabung sekali),
+  `cocok` (sudah jadi paket: id + nama paket + statusnya), `hilang` (paket **aktif**
+  yang profile-nya tidak ada lagi di router), `gagal`, `router`.
+  Kunci pencocokan: hotspot → `profile_hotspot` (fallback `nama_paket`), pppoe →
+  `nama_paket`; dibandingkan lower-case + trim, jadi `HS-10M` = `hs-10m`.
+  Untuk pppoe ini masuk akal: ivvibill tidak pernah membuat secret PPPoE, jadi
+  `nama_paket` memang nama profile-nya.
+- `POST /api/paket/sinkron` (`requirePJ()` + grant **paket · tambah**) membuat paket dari
+  profile terpilih, maksimal 100 nama, dan **selalu** `status='nonaktif'` dengan
+  `harga 0` / `masa_aktif 30 hari` — paket hasil sinkron tidak mungkin langsung bisa
+  dijual sebelum admin meng isi harga. `kecepatan` diambil dari `rate-limit` router,
+  `profile_hotspot` hanya diisi untuk jenis hotspot, `deskripsi` mencatat router
+  asalnya. Sebelum insert nama divalidasi ulang terhadap router: profile yang sudah
+  hilang sejak halaman dibuka masuk `dilewati` (`Sudah tidak ada di router`), begitu
+  juga nama yang sudah jadi paket (`Sudah jadi paket #N`) — jadi menekan tombol dua kali
+  tidak membuat paket kembar. Dicatat ke `audit_log` sebagai `sinkron_paket`.
+- Rute baru ini aman terhadap `GET /paket/:id` yang sudah ada — rute itu memang tidak
+  pernah ada, jadi tidak ada bayangan `/paket/sinkron`.
+
+*Panel — `public/panel/index.html` + `public/panel/panel.js`*
+
+- Tabel Voucher dapat kolom **pilih** (`#vAll` pilih-sekalian) dan bar aksi massal
+  (`#vBulkAksi`: Cabut dari router / Hapus permanen) yang hanya muncul saat ada baris
+  terpilih; hasilnya di-toast terpisah (`N diubah`, `M gagal: alasan…`) supaya penolakan
+  status terlihat, bukan didiamkan.
+- Menu Paket dapat tombol **⟳ Sinkron dari Router** (`sinkronPaket()`) membuka modal
+  `#mSinkron`: pemilih jenis hotspot/pppoe, muat ulang, daftar profile baru berbentuk
+  tabel + checkbox, badge paket aktif yang profile-nya hilang, dan pesan kalau ada router
+  yang tidak membalas. Fungsi panel tetap di berkas eksternal karena CSP
+  `script-src 'self'`.
+
+**Cara dipasang ke produksi**
+
+```
+sudo bash /home/bagus-nuralam/Documents/Qoder/2026-10-01/10533054/mt/install_fase2.sh
+```
+
+**Tidak ada perubahan skema dan tidak ada dependensi npm baru** — tidak ada migrasi v17,
+`package.json` identik dengan produksi (jangan `npm install`/`npm ci`), kolom
+`paket.profile_hotspot` yang dipakai fitur ini sudah dibuat migrasi v16. Yang dilakukan
+installer: menimpa berkas target, `node scripts/migrate-v16.js` (idempoten, kali ini
+"tidak ada perubahan"), naikkan versi `1.6.0 → 1.7.0`, sisipkan entri ini ke
+`docs/PATCHES.md`, restart `ivvibill.service`.
+
+Lalu periksa (baca-saja) dan komit:
+
+```
+bash /home/bagus-nuralam/Documents/Qoder/2026-10-01/10533054/mt/uji_produksi.sh
+sudo /usr/bin/bash /home/bagus-nuralam/Documents/Qoder/2026-10-01/10533054/mt/commit_produksi.sh
+```
+
+`mt/uji_produksi.sh` dapat bagian **2h** (20 pemeriksaan: rute `voucher/bulk` +
+`paket/sinkron`, pagar `hanya stok/batal`, `profilRouter()` + jalur `/ppp/profile/print`,
+`profilHotspot()` pemanggil lama tidak rusak, audit `sinkron_paket`, empat fungsi panel,
+`#vAll` `#vBulkAksi` `#mSinkron` `#skJenis`, tombol sinkron, dan ketiga endpoint menolak
+401 tanpa cookie).
+
+**Catatan**
+
+- **Sinkronisasi hanya membaca router.** Yang dikirim ke MikroTik adalah `.../print` —
+  tidak ada `add`/`set`/`remove` di jalur ini, jadi ia aman dilakukan saat router produksi
+  sedang membawa trafik. `PUSH_HOTSPOT=0` (staging) tidak menahannya dan memang tidak
+  seharusnya; yang menahan hanya penulisan user hotspot/schedule.
+- Paket hasil sinkron masuk **nonaktif** dan **harga 0**. Setelah diimpor: isi harga,
+  harga agen, dan masa aktif di menu Paket, baru aktifkan. Tidak ada satu pun paket yang
+  diubah atau dihapus oleh fitur ini — `hilang` hanya laporan, keputusan di tangan admin.
+- `hapus` permanen sengaja menolak voucher yang sudah terjual/terpakai. Untuk membereskan
+  stok rusak, pilih `cabut` dulu (batal + user router terbuang), lalu `hapus`.
+- Verifikasi staging: `reset_staging → uji_staging (87/87) → uji_lanjutan (218/218;
+  bagian 13 baru, 45 pemeriksaan) → node .uji-scheduler.js (SEMUA OK)`. Dry-run
+  `uji_produksi.sh` ke staging (`ROOT=$PWD/stage/app B=http://127.0.0.1:3011`) 170 LULUS,
+  2 GAGAL — keduanya hanya label versi (`src/config.js` staging tetap 1.4.2 dan
+  `docs/PATCHES.md` staging tidak disisipi, karena keduanya dikelola installer di
+  produksi), bukan fitur.
+  Bagian 13 memakai **mock RouterOS** di `127.0.0.1:18728` yang encode/decode-nya
+  mengimpor `RouterOS._encodeSentence`/`_decodeSentences` dari klien aplikasi, jadi
+  protokolnya diuji sungguhan tanpa menyentuh perangkat siapa pun — satu-satunya router
+  yang bisa dihubungi di staging adalah CCR1009 produksi, dan mock inilah yang membuat
+  jalur baca profile bisa diuji. Mock + perangkat uji dihapus di akhir bagian.
+- Bug yang ditemukan dan diperbaiki saat menguji: `p.router.join` di `POST /paket/sinkron`
+  (kolom `router` di baris `profilRouter()` adalah nama perangkat, array hanya ada di
+  diff GET) — 500 pada setiap impor paket. Tertangkap karena suite membandingkan isi
+  `dibuat[]`, bukan hanya kode HTTP.
+
+## 2026-10-09 — v1.6.0 — voucher benar-benar jadi user hotspot + jadwal jatuh tempo di router, remote ONU dari daftar Unmanage, ONU tersinkron ke pelanggan, router melapor sendiri ke panel
+
+**Masalah**
+
+Lima keluhan pemilik ISP, semuanya di jalur hotspot/MikroTik.
+
+1. **Generate voucher tidak membuat apa pun di MikroTik.** Voucher hanya jadi baris
+   di database. Tidak ada `/ip/hotspot/user`, tidak ada kolom status pengiriman,
+   sehingga kalau router mati atau profile salah, admin tidak tahu dan voucher
+   tetap terlihat " normal" di panel.
+2. **Tidak ada jadwal jatuh tempo di sisi router.** Gratisinaja menaruh hitung
+   mundurnya di router (skrip On Login membuat `/system schedule` per voucher yang
+   membuang sesi + user + dirinya sendiri). ivvibill hanya mengandalkan `expired_at`
+   di MySQL, jadi sesi hotspot tetap hidup setelah masa aktif habis sampai scheduler
+   sempat lewat.
+   Ternyata jatuh temponya sendiri **salah sejak dibuat**: `expired_at` dihitung di
+   JavaScript dengan `toISOString()` (UTC) lalu ditulis ke kolom DATETIME, sementara
+   seluruh jam di mesin ini WIB (+07). Voucher 3 jam sudah "kedaluwarsa" begitu
+   tercetak, dan voucher harian mati jam 17.00.
+3. **Tab Unmanage tidak punya Remote ONU.** Sesi PPPoE yang belum tercatat sebagai
+   pelanggan bisa dilihat, tetapi teknisi tidak bisa membuka halaman router pelanggan
+   itu seperti di menu Pelanggan.
+4. **Data OLT tidak pernah sinkron ke pelanggan.** Kolom `master_onu.id_pelanggan`
+   ada sejak skema v1.2 tetapi tidak pernah ditulis, sehingga kolom redaman di daftar
+   pelanggan selalu kosong. Polling OLT juga membuat baris ONU baru setiap menit
+   (tidak ada unique key) — satu ONU jadi puluhan baris.
+5. **Unmanage dan status online ikut buta saat link RouterOS drop.** ivvibill selalu
+   *menanyakan* sesi ke router lewat API; satu dari tiga percobaan connection ke
+   CCR1009 biasa gagal, dan begitu itu terjadi daftar Unmanage kosong serta
+   pelanggan sedang dipakai tetap terlihat offline. Aplikasi pembanding (gratisinaja)
+   tidak mengalami ini karena routernya yang **melapor** sendiri: ada `/system script`
+   + `/system schedule` yang tiap 40 detik meng-POST daftar sesi ke panel. Tombol
+   **Test** di menu Perangkat ivvibill belum memasang apa pun di router.
+
+**Diubah**
+
+*Skema*
+
+- `scripts/migrate-v16.js` **baru** — idempoten, ada `--dry-run`:
+  `paket.satuan` ENUM('hari','jam'), `paket.profile_hotspot`, `voucher.router_status`
+  /`router_nama`/`router_error`/`pushed_at` + `idx_voucher_push`, `master_perangkat.token_push`
+  + `idx_perangkat_token`, tabel `sesi_router` (+`tanda_push`), dan di `master_onu`:
+  unique `uq_onu_sn (id_perangkat, sn)` (baris duplikat dibuang lebih dulu, yang
+  terakhir dipertahankan; `sn=''` dinormalkan jadi NULL supaya tidak saling tabrak),
+  `matched_at`, `idx_onu_mac`.
+- `sql/schema.sql` mengikuti, `match_by` kini `mac|loid|akun|nama|manual`.
+
+*Jatuh tempo voucher*
+
+- `src/routes/agen.js` — `expired_at` dihitung MySQL dengan
+  `DATE_ADD(NOW(), INTERVAL ? HOUR|DAY)` (`masaAktif()`), bukan lagi `toISOString()`
+  UTC. Durasi paket mengikuti `paket.satuan`, jadi "3 jam" benar-benar 3 jam.
+- `src/scheduler.js` — `tugasVoucher()` **baru** (menit ke-1, otomatis jalan begitu
+  layanan restart karena scheduler in-process; `POST /internal/cron/voucher` juga
+  tersedia). Mengerjakan dua hal: (a) voucher lewat `expired_at` dibuang user hotspot
+  + sesinya di router lalu statusnya jadi `kedaluwarsa`; (b) push yang `belum`/`gagal`
+  dan masih berlaku dikirim ulang, ditunda setelah 7 hari. Antrean retry digabung per
+  tenant + profile + satuan durasi, dan jadwal router hanya dibuat untuk voucher
+  berstatus `terpakai` — stok yang belum dipakai tidak boleh menaruh schedule.
+
+*User hotspot + schedule di router*
+
+- `src/services/monitoring.js` — `pushVoucher()` sekarang satu-satunya penulis status
+  push. `tambahHotspotUser()` mencetak daftar user sekali untuk satu batch, membuat
+  `/ip/hotspot/user/add` (atau `set` bila sudah ada) dengan profile dari paket,
+  memvalidasi profile benar-benar terdaftar di router (`profil_tidak_ada`), dan
+  membersihkan karakter yang merusak argumen RouterOS. Setelah user jadi,
+  `buatJadwalVoucher()` membuat `/system schedule`: `name=<kode>`,
+  `start-date/start-time` dari jam router (`/system/clock/print`), `interval` sesuai
+  masa aktif paket (3 jam → `3h`, 30 hari → `30d`), `recurring=no`, dan `on-event`
+  yang membuang sesi aktif + user + schedule itu sendiri (nama schedule = kode
+  voucher, jadi tidak bentrok dengan skrip On Login gratisinaja yang sudah ada).
+  Kegagalan schedule **tidak** membatalkan voucher — dicatat di `router_error`
+  sebagai `jadwal router gagal: …` dan disapu scheduler aplikasi.
+  `hapusHotspotUser()` ikut menghapus entri `/system schedule` bernama sama.
+- `src/routes/agen.js` — `POST /voucher/generate` menolak paket hotspot tanpa
+  `profile_hotspot` (400 "isi di menu Paket") dan menolak profile yang tidak
+  terdaftar di router sebelum voucher tercetak; responsnya kini
+  `{ dibuat, terkirim, gagal, jadwal_gagal, router, profil_tidak_ada }`.
+  `POST /voucher/:id/pakai` menjawab `expired_at` hasil `DATE_ADD` (login script
+  hotspot perlu angka itu) dan me-retry push dengan jadwal yang benar.
+  `POST /voucher/:id/push-ulang` **baru** (kirim ulang manual), dan
+  `POST /voucher/:id/cabut` membatalkan stok + membuang user/schedule di router;
+  voucher `terpakai` ditolak 400 supaya tidak bisa dipakai untuk menghapus diam-diam.
+- `PUSH_HOTSPOT` (variabel lingkungan) — kalau `0`, semua push ditahan dan setiap baris
+  ditandai `gagal: push hotspot dimatikan`. `mt/reset_staging.sh` memasangnya, jadi
+  staging **tidak mungkin** menyentuh CCR1009 produksi. Perlu ditegaskan:
+  `DISABLE_SCHEDULER` tidak melindungi router, karena push terjadi di dalam request HTTP.
+
+*Remote ONU dari Unmanage*
+
+- `src/routes/monitoring.js` — `POST /api/remote-onu` menerima `ip` langsung (selain
+  `id_pelanggan`), `POST /api/pelanggan/:id/remote-onu` tetap, `GET /api/hotspot/profil`
+  **baru** (daftar `/ip/hotspot/user/profile` router milik tenant untuk isian paket),
+  `POST /api/olt/cocok` **baru** (jalankan pencocokan ONU kapan saja). Kunci remote
+  180 detik + NAT dst-port tetap seperti v1.4; scoped clause diperbaiki ke
+  `s.id_data_server` karena `setting_mikrotik JOIN master_perangkat` sama-sama punya
+  kolom itu (dulu 500 "Column id_data_server is ambiguous").
+- Panel — tab Unmanage dapat tombol **Remote ONU** per sesi, tabel Voucher dapat kolom
+  **Router** (badge status + pesan galat, termasuk `jadwal router gagal`) dengan tombol
+  **Push ulang** dan **Cabut**, form Paket dapat **Satuan masa aktif** + **Profile
+  hotspot** (datalist terisi dari router), dan menu Perangkat dapat tombol
+  **Cocokkan ONU ↔ Pelanggan**. Skrip panel ada di berkas terpisah (`panel.js`) karena
+  CSP `script-src 'self'`.
+
+*Router melapor sendiri — tombol Test memasang script + schedule*
+
+- `src/services/monitoring.js` — `pasangPush(idPerangkat)` dipanggil **setelah**
+  tombol **Test** di menu Perangkat berhasil menyentuh router. Ia menulis
+  `/system script` bernama `IvvibillAPI` dan `/system schedule` bernama
+  `SchIvvibill` (`interval=40s`, `on-event=/system script run IvvibillAPI`) —
+  persis pola gratisinaja (`GratisinAjaAPI`/`SchGratisinAja`), dengan nama milik
+  ivvibill sendiri supaya dua aplikasi di satu CCR1009 tidak saling menimpa;
+  `pasangScriptPush` hanya membuat/memperbarui nama milik ivvibill dan tidak pernah
+  menghapus milik aplikasi lain. Skripnya satu baris (aman lewat API RouterOS),
+  mengumpulkan `/ppp active` + `/ip hotspot active` masing-masing dalam
+  `:do { } on-error={ }` sehingga router tanpa hotspot tetap jalan, lalu `/tool fetch`
+  POST ke `BASE_URL/api/router/push?token=<token perangkat>`. Token 40 karakter hex
+  dibuat sekali dan disimpan di `master_perangkat.token_push` — menekan Test berulang
+  tidak mengganti kunci yang sudah terlanjur ada di router.
+- `src/routes/webhook.js` — `POST /api/router/push` **tanpa login**, dibuka dengan
+  token perangkat (`401` kalau hex tidak sah, `404` kalau token tidak dikenal, `400`
+  kalau perangkatnya OLT). `server.js` memasang `express.raw` khusus untuk rute ini
+  karena `/tool fetch` mengirim JSON dengan content-type form; tanpa itu
+  `express.urlencoded` global mengubah payload jadi key-value acak.
+- `src/services/monitoring.js` — `simpanPush()` menyimpan snapshot sesi ke
+  `sesi_router`, membuang sesi yang tidak ikut dilaporkan pada push berikutnya
+  (penanda per laporan, bukan per detik — `DATETIME` hanya berpresisi 1 detik sehingga
+  `seen_at < NOW()` kehilangan sesi yang putus di detik yang sama), menyegarkan
+  `pppoe_status` pelanggan yang dikenali, menutup issue `offline`, dan mengisi
+  `setting_mikrotik.uptime`/`board_name`. `sesiSnapshot()` dipakai daftar Unmanage saat
+  API router mati, jadi baris hasil laporan berlabel `(laporan router)`
+  (`dari='snapshot'`). Push **tidak pernah** menandai pelanggan offline: satu router
+  hanya tahu sesinya sendiri.
+- `src/routes/monitoring.js` — `GET /api/perangkat` mengembalikan `push_terpasang`,
+  `push_lihat` (kapan router terakhir melapor) dan `push_sesi`; token tidak pernah
+  dibaca keluar. Panel menampilkan `push N sesi · <waktu>` atau `push belum dipasang`
+  di kolom status, dan hasil Test berisi `push dibuat tiap 40s`.
+- `PUSH_HOTSPOT=0` juga menahan `pasangPush()` — staging memakai kredensial router
+  produksi, dan tanpa penjaga ini menekan Test di staging akan memasang schedule yang
+  menembak `127.0.0.1:3011`.
+
+*Sinkron ONU ↔ pelanggan*
+
+- `src/services/onu.js` **baru** — `simpan()` dipakai scheduler **dan** tombol Poll
+  manual (dulu hanya scheduler yang menulis, jadi "Poll sekarang" menampilkan ONU tanpa
+  pernah menyimpannya), plus `cocokkan()` bertingkat meniru gratisinaja:
+  MAC ONU → `pelanggan.mac_address`, lalu nama/LOID ONU → `username_pppoe`, lalu →
+  `nama`. Baris `match_by='manual'` tidak pernah ditimpa, pelanggan tanpa pengenal
+  tidak masuk peta, dan akun/nama di bawah 3 karakter diabaikan (terlalu mudah kena
+  cocok kebetulan). Pelanggan dimuat sekali per tenant, bukan per ONU.
+
+**Cara dipasang ke produksi**
+
+`sudo bash /home/bagus-nuralam/Documents/Qoder/2026-10-01/10533054/mt/install_fase2.sh`
+
+Tidak ada dependensi npm baru (`package.json` identik dengan produksi), jadi **jangan**
+`npm install`/`npm ci`. Migrasi v16 hanya `ADD COLUMN`/`ADD INDEX`/`ADD UNIQUE`/`CREATE TABLE`,
+`DELETE` baris duplikat `master_onu`, dan `ALTER ... +tanda_push`; aman diulang. Setelah
+restart, `tugasVoucher()` langsung ikut scheduler in-process — tidak ada crontab yang perlu
+ditambah.
+
+Supaya router mulai melapor: buka menu **Perangkat**, tekan **Test** pada setiap perangkat
+MikroTik. Hasil Test sekarang berisi `push dibuat tiap 40s` (atau alasan mengapa tidak).
+Itu satu-satunya cara schedule `SchIvvibill` dipasang — tidak ada jalur otomatis yang
+menulis ke router saat install.
+
+Lalu periksa (baca-saja, tidak menyentuh data pelanggan) dan komit:
+
+```
+bash /home/bagus-nuralam/Documents/Qoder/2026-10-01/10533054/mt/uji_produksi.sh
+sudo /usr/bin/bash /home/bagus-nuralam/Documents/Qoder/2026-10-01/10533054/mt/commit_produksi.sh
+```
+
+`mt/uji_produksi.sh` sekarang punya bagian **2g** (41 pemeriksaan v1.5 + v1.6: berkas,
+rute, `DATE_ADD`, `tugasVoucher`, kolom/skema `token_push` + `sesi_router`, nama schedule
+`SchIvvibill`, fungsi panel di berkas eksternal, endpoint menolak 401, dan penjaga bahwa
+`.env` produksi tidak ikut memasang `PUSH_HOTSPOT=0`).
+
+**Catatan**
+
+- **Isi `paket.profile_hotspot` lebih dulu** untuk setiap paket hotspot (menu Paket).
+  Tanpa itu generate menolak 400. Kalau nama profile tidak ada di router, generate juga
+  menolak dan menampilkan daftar profile yang tersedia.
+- Sintaks `/system schedule/add` **belum terbukti di CCR1009 produksi** — staging tidak
+  punya perangkat MikroTik dan push-nya dimatikan. Sengaja dibuat tidak membatalkan
+  voucher: kalau router menolak, `router_error` berisi `jadwal router gagal: …` di kolom
+  Router dan jatuh tempo tetap dijalankan scheduler aplikasi. Cek generate pertama.
+- Voucher yang sudah tercetak sebelum versi ini punya `expired_at` hasil bug UTC (terlalu
+  cepat mati). Tidak diubah otomatis — kalau masih stok, pakai **Cabut** lalu generate
+  ulang, atau perbaiki `expired_at`-nya lewat menu.
+- Unique `uq_onu_sn` membuang baris ONU duplikat. Log redaman (`redaman_log`) tidak ikut
+  terhapus, jadi riwayat grafiknya utuh.
+- **Schedule push hanya dibuat saat menekan Test** pada perangkat MikroTik — tidak ada
+  yang berubah di router sampai tombol itu ditekan, dan `token_push` baru terisi saat
+  itu. Router harus bisa mencapai `BASE_URL`; kalau panel hanya bisa lewat nama host
+  ber-TLS yang tidak dipercaya `/tool fetch`, isi `PUSH_URL` di `.env` dengan alamat
+  yang dijangkau router (mis. `http://10.x.x.x:3010`) — `urlPush()` memprioritaskannya.
+  Kalau keduanya kosong, Test mengembalikan `push gagal: BASE_URL/PUSH_URL belum diisi` dan
+  tetap menjawab hasil uji koneksi seperti sebelumnya.
+- Schedule `SchIvvibill` interval 40 detik berarti satu POST per router per 40 detik.
+  Rate limiter global `/api` (240/menit) masih longgar untuk beberapa router, tetapi
+  bila jumlah router bertambah, `BATAS_SESI` (2000 sesi per laporan) dan penanda
+  `tanda_push` yang menjaga tabel `sesi_router` tetap kecil.
+- Verifikasi staging: `install_staging -> reset_staging -> uji_staging (87/87) ->
+  uji_lanjutan (173/173, termasuk 24 pemeriksaan bagian 12 tentang push sesi) ->
+  uji_scheduler (SEMUA OK, `{"hangus":2,"dicabut":0,"terkirim_ulang":0,"ditunda":0}`)`.
+  Dry-run `uji_produksi.sh` ke staging: 152/152. Empat pemeriksaan membuktikan guard
+  `PUSH_HOTSPOT=0` menahan baik push voucher maupun pemasangan schedule router, sehingga
+  staging tidak mungkin menulis ke CCR1009 produksi.
+
 ## 2026-10-08 — v1.5.0 — login akun role dibetulkan, absensi teknisi berkoordinat, template impor/ekspor berbahasa Indonesia
 
 **Masalah**

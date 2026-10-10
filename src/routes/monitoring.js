@@ -12,6 +12,7 @@ const { requireAuth, requireRole, requirePJ } = require('../middleware/auth');
 const { tenantSql, tenantAktif, requireMenu } = require('../util/scope');
 const monitor = require('../services/monitoring');
 const olt = require('../services/olt');
+const onu = require('../services/onu');
 const crypto = require('../util/crypto');
 const { RouterOS, testConnection } = require('../services/routeros');
 
@@ -22,13 +23,25 @@ router.use(requireAuth);
 router.get('/perangkat', async (req, res, next) => {
   try {
     const ts = tenantSql(req, 'id_data_server');
+    // token_push sengaja TIDAK ikut dibaca — itu kunci tulis endpoint /api/router/push
     const rows = await db.q(
       `SELECT id, id_data_server, nama, brand, tipe, alamat, port, use_https, username, lokasi,
-              status, last_check, last_msg
+              status, last_check, last_msg, (token_push IS NOT NULL) AS push_terpasang
        FROM master_perangkat WHERE 1=1${ts.sql} ORDER BY tipe, nama`,
       ts.params
     );
-    res.json({ data: rows.map(r => ({ ...r, password: undefined })) });
+    const laporan = rows.length ? await db.q(
+      `SELECT id_perangkat, MAX(seen_at) AS lihat, COUNT(*) AS sesi FROM sesi_router
+       WHERE tipe = 'pppoe' AND id_perangkat IN (${rows.map(() => '?').join(',')})
+       GROUP BY id_perangkat`, rows.map(r => r.id)) : [];
+    const peta = new Map(laporan.map(r => [Number(r.id_perangkat), r]));
+    res.json({
+      data: rows.map(r => ({
+        ...r, password: undefined,
+        push_lihat: (peta.get(Number(r.id)) || {}).lihat || null,
+        push_sesi: Number((peta.get(Number(r.id)) || {}).sesi || 0)
+      }))
+    });
   } catch (e) { next(e); }
 });
 
@@ -115,7 +128,15 @@ router.post('/perangkat/:id/test', requireRole('superadmin', 'master', 'teknisi'
     const pass = crypto.decrypt(d.password_enc);
     if (d.brand === 'mikrotik') {
       const r = await testConnection({ host: d.alamat, port: d.port || 8728, user: d.username, password: pass });
-      return res.json(r);
+      // Koneksi terbukti = kesempatan memasang script + schedule push sesi,
+      // persis tombol Test di gratisinaja. Gagal pasang tidak boleh membuat
+      // perangkat terlihat mati, jadi hasilnya hanya dilaporkan sebagai 'push'.
+      let push = null;
+      if (r.ok) {
+        try { push = await monitor.pasangPush(d.id); }
+        catch (e) { push = { gagal: String(e.message).slice(0, 200) }; }
+      }
+      return res.json({ ...r, push });
     }
     // OLT: uji login driver
     try {
@@ -264,9 +285,12 @@ router.post('/olt/poll/:id', requirePJ(), requireMenu('perangkat', 'poll'), asyn
        JOIN master_perangkat d ON d.id = s.id_perangkat WHERE s.id = ?${ts.sql}`, [id, ...ts.params]);
     if (!d) return res.status(404).json({ error: 'Setting OLT tidak ada' });
     const hasil = await olt.pollOlt({ ...d, password: crypto.decrypt(d.password_enc) }, d);
+    // simpan seperti polling scheduler: tombol manual dulu hanya menampilkan
+    const disimpan = await onu.simpan(d.id, hasil.onus);
+    const cocok = await onu.cocokkan({ idPerangkat: d.id });
     await db.run('UPDATE setting_olt SET last_check_at=NOW(), last_check_msg=? WHERE id=?',
-      [`manual: ${hasil.onus.length} ONU`, id]);
-    res.json({ ok: true, pons: hasil.pons, onus: hasil.onus });
+      [`manual: ${hasil.onus.length} ONU tersimpan:${disimpan.tersimpan} cocok:${cocok.berubah}`, id]);
+    res.json({ ok: true, pons: hasil.pons, onus: hasil.onus, disimpan, cocok });
   } catch (e) { next(e); }
 });
 
@@ -275,6 +299,67 @@ router.get('/olt/brands', (req, res) => {
 });
 
 // ------------------------------------------- remote ONU (auto NAT)
+/**
+ * Bagian bersama remote ONU: kunci 180 detik antar teknisi lalu pindahkan
+ * rule dst-nat ke IP target. Dipakai tombol di daftar pelanggan DAN di tab
+ * Unmanage — dua implementasi NAT akan saling bertabrakan di port yang sama.
+ * s = baris setting_mikrotik + kolom api; ipUser sudah selesai diresolve.
+ */
+async function bukaRemote({ req, s, ipUser, label }) {
+  const portRemote = Number(s.port_remote) || 8080;
+  const kunci = s.last_remote ? new Date(s.last_remote).getTime() : 0;
+  const sedang = s.user_remote && s.user_remote !== req.user.username && (Date.now() - kunci) <= 180000;
+  if (sedang) {
+    const e = new Error(`Akun ${s.user_remote} sedang remote pelanggan lain — tunggu beberapa saat`);
+    e.status = 409;
+    throw e;
+  }
+
+  await db.run('UPDATE setting_mikrotik SET user_remote=?, last_remote=NOW() WHERE id=?',
+    [req.user.username || req.user.nama, s.id]);
+
+  const api = new RouterOS({
+    host: s.alamat_api, port: s.port_api || 8728,
+    user: s.user_api, password: crypto.decrypt(s.password_enc), timeout: 8000
+  });
+  let aksiNat = '';
+  try {
+    const ada = await api.run(['/ip/firewall/nat/print', '=.proplist=.id', `?dst-port=${portRemote}`]);
+    if (ada[0] && ada[0]['.id']) {
+      await api.run(['/ip/firewall/nat/set', `=.id=${ada[0]['.id']}`, `=to-addresses=${ipUser}`]);
+      aksiNat = 'update';
+    } else {
+      await api.run(['/ip/firewall/nat/add',
+        '=chain=dstnat', '=protocol=tcp',
+        `=dst-address=${s.alamat_api}`, `=dst-port=${portRemote}`,
+        `=to-addresses=${ipUser}`, '=to-ports=80',
+        '=comment=Remote ONU - ivvibill']);
+      aksiNat = 'buat';
+    }
+  } finally { api.close(); }
+
+  await db.insert(
+    'INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+    [req.user.id, Number(s.id_data_server), 'remote_onu',
+      `${label} → ${ipUser}:${portRemote} (${aksiNat})`, (req.ip || '').replace('::ffff:', '')]);
+
+  return {
+    ok: true, link: `http://${s.alamat_api}:${portRemote}`,
+    ip_pelanggan: ipUser, port_remote: portRemote, nat: aksiNat, router: s.nama
+  };
+}
+
+/** Kolom router + kredensial yang dibutuhkan bukaRemote, scoped ke tenant. */
+async function routerRemote(idRouter, ts) {
+  const dasar = `SELECT s.*, d.alamat AS alamat_api, d.port AS port_api,
+       d.username AS user_api, d.password_enc
+     FROM setting_mikrotik s
+     JOIN master_perangkat d ON d.id = s.id_perangkat`;
+  return idRouter
+    ? db.one(`${dasar} WHERE s.id = ?${ts.sql}`, [idRouter, ...ts.params])
+    : db.one(`${dasar} WHERE s.status = 'active'${ts.sql} ORDER BY s.id LIMIT 1`, ts.params);
+}
+
 /**
  * Remote ONU pelanggan — meniru gratisinaja user_remote:
  * resolve IP pelanggan (live dari /ppp/active bila status basi), kunci
@@ -286,6 +371,7 @@ router.post('/pelanggan/:id/remote-onu', requireRole('superadmin', 'master', 'te
   try {
     const idPel = v.num(req.params.id, { int: true, min: 1 });
     const ts = tenantSql(req, 'id_data_server');
+    const tsR = tenantSql(req, 's.id_data_server');
     const p = await db.one(
       `SELECT p.id, p.nama, p.alamat, p.username_pppoe, ps.ip_address AS ip_lokal, ps.online
        FROM pelanggan p
@@ -294,21 +380,8 @@ router.post('/pelanggan/:id/remote-onu', requireRole('superadmin', 'master', 'te
     if (!p) return res.status(404).json({ error: 'Pelanggan tidak ada' });
 
     const idRouter = v.num(req.body && req.body.router_id, { int: true, min: 1, def: null });
-    const qRouter = `SELECT s.*, d.alamat AS alamat_api, d.port AS port_api,
-         d.username AS user_api, d.password_enc
-       FROM setting_mikrotik s
-       JOIN master_perangkat d ON d.id = s.id_perangkat`;
-    const s = idRouter
-      ? await db.one(`${qRouter} WHERE s.id = ?${ts.sql}`, [idRouter, ...ts.params])
-      : await db.one(`${qRouter} WHERE s.status = 'active'${ts.sql} ORDER BY s.id LIMIT 1`, ts.params);
+    const s = await routerRemote(idRouter, tsR);
     if (!s) return res.status(400).json({ error: 'Router MikroTik tidak ditemukan di tenant ini' });
-
-    const portRemote = Number(s.port_remote) || 8080;
-    const kunci = s.last_remote ? new Date(s.last_remote).getTime() : 0;
-    const sedang = s.user_remote && s.user_remote !== req.user.username && (Date.now() - kunci) <= 180000;
-    if (sedang) {
-      return res.status(409).json({ error: `Akun ${s.user_remote} sedang remote pelanggan lain — tunggu beberapa saat` });
-    }
 
     // IP pelanggan: dari status PPPoE; bila kosong/basi, tanya langsung ke router
     let ipUser = p.ip_lokal || null;
@@ -328,39 +401,46 @@ router.post('/pelanggan/:id/remote-onu', requireRole('superadmin', 'master', 'te
       return res.status(400).json({ error: 'IP Address pelanggan tidak ditemukan — pastikan akun PPPoE sedang online' });
     }
 
-    await db.run('UPDATE setting_mikrotik SET user_remote=?, last_remote=NOW() WHERE id=?',
-      [req.user.username || req.user.nama, s.id]);
+    const r = await bukaRemote({ req, s, ipUser, label: `#${p.id} ${p.nama}` });
+    res.json({ ...r, nama: p.nama, alamat: p.alamat || '-', via });
+  } catch (e) { next(e); }
+});
 
-    const api = new RouterOS({
-      host: s.alamat_api, port: s.port_api || 8728,
-      user: s.user_api, password: crypto.decrypt(s.password_enc), timeout: 8000
-    });
-    let aksiNat = '';
-    try {
-      const ada = await api.run(['/ip/firewall/nat/print', '=.proplist=.id', `?dst-port=${portRemote}`]);
-      if (ada[0] && ada[0]['.id']) {
-        await api.run(['/ip/firewall/nat/set', `=.id=${ada[0]['.id']}`, `=to-addresses=${ipUser}`]);
-        aksiNat = 'update';
-      } else {
-        await api.run(['/ip/firewall/nat/add',
-          '=chain=dstnat', '=protocol=tcp',
-          `=dst-address=${s.alamat_api}`, `=dst-port=${portRemote}`,
-          `=to-addresses=${ipUser}`, '=to-ports=80',
-          '=comment=Remote ONU - ivvibill']);
-        aksiNat = 'buat';
-      }
-    } finally { api.close(); }
+/**
+ * Remote ONU sesi unmanage (PPPoE aktif yang tidak ada di daftar pelanggan).
+ * IP sudah dibawa dari daftar unmanage, jadi tidak perlu resolve apa pun —
+ * ini yang membuat gratisinaja bisa remote dari daftar yang sama.
+ */
+router.post('/remote-onu', requireRole('superadmin', 'master', 'teknisi'),
+  requireMenu('pelanggan', 'ubah'), async (req, res, next) => {
+  try {
+    const ip = v.str(req.body && req.body.ip, { max: 45, def: '' });
+    if (!/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(ip)) {
+      return res.status(400).json({ error: 'IP target tidak valid' });
+    }
+    const ts = tenantSql(req, 's.id_data_server');
+    const idRouter = v.num(req.body && req.body.router_id, { int: true, min: 1, def: null });
+    const s = await routerRemote(idRouter, ts);
+    if (!s) return res.status(400).json({ error: 'Router MikroTik tidak ditemukan di tenant ini' });
+    const akun = v.str(req.body && req.body.akun, { max: 60, def: '' });
+    const r = await bukaRemote({ req, s, ipUser: ip, label: `unmanage ${akun || ip}` });
+    res.json({ ...r, akun, via: 'unmanage' });
+  } catch (e) { next(e); }
+});
 
-    await db.insert(
-      'INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
-      [req.user.id, Number(s.id_data_server), 'remote_onu',
-        `#${p.id} ${p.nama} → ${ipUser}:${portRemote} (${aksiNat})`, (req.ip || '').replace('::ffff:', '')]);
+/** Profile hotspot yang tersedia di router tenant — untuk dropdown form paket. */
+router.get('/hotspot/profil', async (req, res, next) => {
+  try {
+    res.json(await monitor.profilHotspot(tenantAktif(req)));
+  } catch (e) { next(e); }
+});
 
-    res.json({
-      ok: true, link: `http://${s.alamat_api}:${portRemote}`,
-      nama: p.nama, alamat: p.alamat || '-', ip_pelanggan: ipUser,
-      port_remote: portRemote, nat: aksiNat, router: s.nama, via
-    });
+/** Jalankan pencocokan ONU <-> pelanggan sekarang (tanpa menunggu polling). */
+router.post('/olt/cocok', requireRole('superadmin', 'master'), requireMenu('perangkat', 'poll'),
+  async (req, res, next) => {
+  try {
+    const idPerangkat = v.num(req.body && req.body.id_perangkat, { int: true, min: 1, def: null });
+    res.json(await onu.cocokkan({ idPerangkat }));
   } catch (e) { next(e); }
 });
 

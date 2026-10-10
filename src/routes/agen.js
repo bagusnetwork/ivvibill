@@ -8,11 +8,21 @@
 const express = require('express');
 const db = require('../db');
 const v = require('../util/validate');
+const mon = require('../services/monitoring');
 const { requireAuth, requireRole, requirePJ } = require('../middleware/auth');
 const { tenantSql, tenantAktif, requireMenu } = require('../util/scope');
 
 const router = express.Router();
 router.use(requireAuth);
+
+/**
+ * Masa aktif voucher dihitung MySQL, bukan JS: [jumlah, kata kunci INTERVAL].
+ * Unit diambil dari daftar putih ini saja, angkanya lewat parameter.
+ */
+function masaAktif(paket) {
+  return [Math.max(1, Number(paket && paket.masa_aktif || 30)),
+    paket && paket.satuan === 'jam' ? 'HOUR' : 'DAY'];
+}
 
 function kodeVoucher(prefix = 'IVV') {
   const acak = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -123,7 +133,8 @@ router.get('/voucher', async (req, res, next) => {
     if (status) { where.push('vc.status = ?'); params.push(status); }
     if (cari) { where.push('vc.kode LIKE ?'); params.push(`%${cari}%`); }
     const rows = await db.q(
-      `SELECT vc.*, pk.nama_paket, pk.masa_aktif FROM voucher vc
+      `SELECT vc.*, pk.nama_paket, pk.masa_aktif, pk.satuan, pk.profile_hotspot
+       FROM voucher vc
        LEFT JOIN paket pk ON pk.id = vc.id_paket
        WHERE ${where.join(' AND ')} ORDER BY vc.id DESC LIMIT ?`,
       [...params, limit]
@@ -141,25 +152,48 @@ router.post('/voucher/generate', requirePJ(), requireMenu('voucher', 'generate')
     const paket = await db.one(
       `SELECT * FROM paket WHERE id = ? AND jenis = 'hotspot' AND id_data_server = ?`, [idPaket, ds]);
     if (!paket) return res.status(400).json({ error: 'Paket hotspot tidak ada' });
+    if (!paket.profile_hotspot) {
+      return res.status(400).json({
+        error: `Paket '${paket.nama_paket}' belum punya Profile Hotspot — isi di menu Paket` });
+    }
     const [{ prefix_invoice }] = await db.q('SELECT prefix_invoice FROM data_server WHERE id = ?', [ds]);
 
+    // profile harus benar-benar ada di router sebelum voucher dicetak: voucher
+    // dengan profile khayalan login-nya ditolak RouterOS tanpa pesan jelas
+    const profil = await mon.profilHotspot(ds);
+    if (profil.data.length) {
+      const ada = profil.data.some(p => p.nama === paket.profile_hotspot);
+      if (!ada) {
+        return res.status(400).json({
+          error: `Profile '${paket.profile_hotspot}' tidak terdaftar di router ` +
+            `(tersedia: ${profil.data.map(p => p.nama).slice(0, 6).join(', ')})` });
+      }
+    }
+
     const dibuat = await db.tx(async (t) => {
-      let n = 0;
+      const baris = [];
+      // DATE_ADD(NOW()) memakai jam WIB yang sama dengan NOW() di query lain;
+      // toISOString() menulis UTC sehingga voucher harian mati jam 17.00 sore
+      const [lama, unit] = masaAktif(paket);
       for (let i = 0; i < jumlah; i++) {
         const kode = kodeVoucher(prefix_invoice);
-        const exp = new Date(Date.now() + Number(paket.masa_aktif || 30) * 86400000);
-        await t.insert(
+        const id = await t.insert(
           `INSERT INTO voucher (id_data_server, kode, id_paket, harga_beli, harga_jual, expired_at)
-           VALUES (?,?,?,?,?,?)`,
-          [ds, kode, idPaket, Number(paket.harga), Number(paket.harga_agen || paket.harga), exp.toISOString().slice(0, 19).replace('T', ' ')]
+           VALUES (?,?,?,?,?, DATE_ADD(NOW(), INTERVAL ? ${unit}))`,
+          [ds, kode, idPaket, Number(paket.harga), Number(paket.harga_agen || paket.harga), lama]
         );
-        n++;
+        baris.push({ id, kode });
       }
-      return n;
+      return baris;
     });
+
+    const push = await mon.pushVoucher(ds, dibuat,
+      { profil: paket.profile_hotspot, komentar: `ivvibill ${paket.nama_paket}` });
     await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
-      [req.user.id, ds, 'generate_voucher', `paket#${idPaket} x${dibuat}`, (req.ip || '').replace('::ffff:', '')]);
-    res.json({ dibuat });
+      [req.user.id, ds, 'generate_voucher',
+        `paket#${idPaket} x${dibuat.length} terkirim:${push.terkirim} gagal:${push.gagal}`,
+        (req.ip || '').replace('::ffff:', '')]);
+    res.json({ dibuat: dibuat.length, ...push });
   } catch (e) { next(e); }
 });
 
@@ -211,18 +245,158 @@ router.post('/voucher/:id/jual', requireRole('agen'), async (req, res, next) => 
   } catch (e) { next(e); }
 });
 
-/** Voucher dipakai (dipanggil hotspot login script / teknisi). */
+/**
+ * Voucher dipakai (dipanggil hotspot login script / teknisi).
+ * Hitung mundur dimulai di sini, bukan saat voucher dicetak — persis perilaku
+ * gratisinaja, yang memakai waktu login pertama sebagai active_time. Kalau
+ * push saat generate gagal, kesempatan ini dipakai untuk mengirim ulang.
+ */
 router.post('/voucher/:id/pakai', requireRole('superadmin', 'master', 'teknisi'), async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });
-    const ts = tenantSql(req, 'id_data_server');
-    const vcr = await db.one(`SELECT id FROM voucher WHERE id = ?${ts.sql}`, [id, ...ts.params]);
+    const ts = tenantSql(req, 'vc.id_data_server');
+    const vcr = await db.one(
+      `SELECT vc.*, pk.masa_aktif, pk.satuan, pk.profile_hotspot, pk.nama_paket
+       FROM voucher vc LEFT JOIN paket pk ON pk.id = vc.id_paket
+       WHERE vc.id = ?${ts.sql}`, [id, ...ts.params]);
     if (!vcr) return res.status(404).json({ error: 'Voucher tidak ada' });
+    const [lama, unit] = masaAktif(vcr);
     await db.run(
-      `UPDATE voucher SET status='terpakai', used_at=NOW() WHERE id=? AND status IN ('stok','terjual')`, [id]);
-    res.json({ ok: true });
+      `UPDATE voucher SET status='terpakai', used_at=NOW(),
+         expired_at = DATE_ADD(NOW(), INTERVAL ? ${unit})
+       WHERE id=? AND status IN ('stok','terjual')`, [lama, id]);
+    const jatuhTempo = await db.one('SELECT expired_at FROM voucher WHERE id = ?', [id]);
+    let push = null;
+    if (vcr.router_status !== 'ok' && vcr.profile_hotspot) {
+      push = await mon.pushVoucher(Number(vcr.id_data_server),
+        [{ id: vcr.id, kode: vcr.kode }],
+        { profil: vcr.profile_hotspot, komentar: `ivvibill ${vcr.nama_paket || ''}`,
+          // hitung mundur baru mulai sekarang, jadi schedule router pun dipasang
+          // di sini — bukan saat voucher masih jadi stok
+          jadwal: mon.intervalVoucher(vcr) });
+    }
+    res.json({ ok: true, expired_at: jatuhTempo ? jatuhTempo.expired_at : null, push });
   } catch (e) { next(e); }
 });
+
+/** Kirim ulang user hotspot untuk voucher yang push-nya gagal. */
+router.post('/voucher/:id/push-ulang', requirePJ(), requireMenu('voucher', 'generate'), async (req, res, next) => {
+  try {
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const ts = tenantSql(req, 'vc.id_data_server');
+    const vcr = await db.one(
+      `SELECT vc.*, pk.masa_aktif, pk.satuan, pk.profile_hotspot, pk.nama_paket
+       FROM voucher vc LEFT JOIN paket pk ON pk.id = vc.id_paket
+       WHERE vc.id = ?${ts.sql}`, [id, ...ts.params]);
+    if (!vcr) return res.status(404).json({ error: 'Voucher tidak ada' });
+    if (!vcr.profile_hotspot) {
+      return res.status(400).json({
+        error: `Paket '${vcr.nama_paket || vcr.id_paket}' belum punya Profile Hotspot` });
+    }
+    const push = await mon.pushVoucher(Number(vcr.id_data_server),
+      [{ id: vcr.id, kode: vcr.kode }],
+      { profil: vcr.profile_hotspot, komentar: `ivvibill ${vcr.nama_paket || ''}`,
+        jadwal: vcr.status === 'terpakai' ? mon.intervalVoucher(vcr) : null });
+    res.json(push);
+  } catch (e) { next(e); }
+});
+
+/**
+ * Cabut voucher: user hotspot dibuang di router + status batal. Dipakai untuk
+ * voucher salah cetak, hangus, atau stok yang tidak jadi dijual.
+ */
+router.post('/voucher/:id/cabut', requirePJ(), requireMenu('voucher', 'generate'), async (req, res, next) => {
+  try {
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const ts = tenantSql(req, 'id_data_server');
+    const vcr = await db.one(`SELECT * FROM voucher WHERE id = ?${ts.sql}`, [id, ...ts.params]);
+    if (!vcr) return res.status(404).json({ error: 'Voucher tidak ada' });
+    if (vcr.status === 'terpakai') {
+      return res.status(400).json({ error: 'Voucher sudah dipakai — tidak bisa dicabut' });
+    }
+    const hasil = await mon.hapusHotspotUser(vcr.kode, Number(vcr.id_data_server));
+    await db.run(`UPDATE voucher SET status='batal', router_status='belum', router_error=NULL WHERE id=?`, [id]);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, Number(vcr.id_data_server), 'cabut_voucher',
+        `${vcr.kode} user=${hasil.ada ? 'dihapus' : 'tidak ada di router'} sesi:${hasil.sesi_dibuang}`,
+        (req.ip || '').replace('::ffff:', '')]);
+    res.json({ ok: true, ...hasil });
+  } catch (e) { next(e); }
+});
+
+/**
+ * Aksi massal voucher — parser dan bentuk hasilnya ikut ubahStatusBulk di rute
+ * pelanggan (ids array/CSV, maksimal 200, tenant dicek per baris, sukses dan
+ * gagal dikirim terpisah supaya panel bisa menunjukkan alasannya).
+ *
+ * cabut : user hotspot + schedule jatuh temponya dibuang di router, baris
+ *         tetap ada dengan status 'batal'.
+ * hapus : barisnya dibuang permanen. Hanya untuk 'stok'/'batal' — voucher
+ *         terjual atau terpakai adalah riwayat penjualan agen, menghapusnya
+ *         membuat saldo agen tidak bisa dicocokkan lagi.
+ */
+async function voucherBulk(req, res, next) {
+  try {
+    const aksi = v.enumOf(req.body.aksi, ['cabut', 'hapus'], null);
+    if (!aksi) return res.status(400).json({ error: 'Aksi tidak valid (cabut|hapus)' });
+    const ids = Array.isArray(req.body.ids) ? req.body.ids : String(req.body.ids || '').split(',');
+    const lim = ids.map(x => v.num(x, { int: true, min: 1, def: null })).filter(x => x !== null).slice(0, 200);
+    if (!lim.length) return res.status(400).json({ error: 'Daftar voucher kosong' });
+
+    const diubah = [], gagal = [];
+    for (const id of lim) {
+      const ts = tenantSql(req, 'id_data_server');
+      const vcr = await db.one(`SELECT * FROM voucher WHERE id = ?${ts.sql}`, [id, ...ts.params]);
+      if (!vcr) { gagal.push({ id, alasan: 'Tidak ada di data server ini' }); continue; }
+
+      let router = { ada: false, sesi_dibuang: 0, gagal: [] };
+      // router_status 'ok' = panel yakin user hotspot-nya masih hidup di router
+      const perluRouter = aksi === 'cabut' || vcr.router_status === 'ok';
+      if (perluRouter) {
+        try {
+          router = await mon.hapusHotspotUser(vcr.kode, Number(vcr.id_data_server));
+        } catch (e) {
+          router = { ada: false, sesi_dibuang: 0, gagal: [String(e.message).slice(0, 120)] };
+        }
+      }
+
+      if (aksi === 'hapus') {
+        if (!['stok', 'batal'].includes(vcr.status)) {
+          gagal.push({ id, kode: vcr.kode, alasan: `Status ${vcr.status} — hanya stok/batal yang bisa dihapus` });
+          continue;
+        }
+        // Baris yang hilang di router masih bisa dibereskan nanti; baris yang
+        // dihapus padahal usernya belum tentu terbuang = akses gratis tanpa jejak
+        if (router.gagal.length && vcr.router_status === 'ok') {
+          gagal.push({ id, kode: vcr.kode, alasan: `Router belum bisa dikonfirmasi: ${router.gagal[0]}` });
+          continue;
+        }
+        await db.run('DELETE FROM voucher WHERE id = ?', [id]);
+        diubah.push({ id, kode: vcr.kode, hasil: router.ada ? 'user router dibuang + baris dihapus' : 'dihapus' });
+      } else {
+        if (vcr.status === 'terpakai') {
+          gagal.push({ id, kode: vcr.kode, alasan: 'Voucher sudah dipakai — tidak bisa dicabut' });
+          continue;
+        }
+        await db.run(`UPDATE voucher SET status='batal', router_status='belum', router_error=NULL WHERE id=?`, [id]);
+        diubah.push({ id, kode: vcr.kode,
+          hasil: router.ada ? `dibuang dari router${router.sesi_dibuang ? `, ${router.sesi_dibuang} sesi putus` : ''}`
+            : (router.gagal.length ? `batal (router: ${router.gagal[0]})` : 'dibatalkan') });
+      }
+
+      await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+        [req.user.id, Number(vcr.id_data_server), `voucher_bulk_${aksi}`,
+          `${vcr.kode}: ${diubah[diubah.length - 1].hasil}`, (req.ip || '').replace('::ffff:', '')]);
+    }
+    res.json({ aksi, diubah, gagal });
+  } catch (e) { next(e); }
+}
+
+router.post('/voucher/bulk', requirePJ(),
+  // hapus permanen punya grant sendiri di group akses; cabut ikut aksi generate
+  (req, res, next) =>
+    requireMenu('voucher', req.body && req.body.aksi === 'hapus' ? 'hapus' : 'generate')(req, res, next),
+  voucherBulk);
 
 router.get('/voucher/stok-ringkas', requireRole('superadmin', 'master', 'agen'), async (req, res, next) => {
   try {

@@ -178,8 +178,8 @@
           <div class="panel-head"><h2>PPPoE aktif tanpa tagihan</h2>
             <button class="btn sm secondary" onclick="muatUnmanage()">Muat ulang</button></div>
           <div class="panel-body" style="padding:0">
-            <table><thead><tr><th>Router</th><th>Username</th><th>IP</th><th>Uptime</th></tr></thead>
-            <tbody id="tbUnmanage"><tr><td colspan="4" class="empty">Belum dimuat</td></tr></tbody></table>
+            <table><thead><tr><th>Router</th><th>Username</th><th>IP</th><th>Uptime</th><th>Aksi</th></tr></thead>
+            <tbody id="tbUnmanage"><tr><td colspan="5" class="empty">Belum dimuat</td></tr></tbody></table>
           </div>
           <div class="panel-body"><p class="hint" id="unmanageHint">
             Sesi PPPoE di router yang usernya tidak ada di daftar pelanggan — perlu didata atau dimatikan manual.</p></div>
@@ -257,10 +257,11 @@
       <!-- ================= PAKET ================= -->
       <div data-view="paket" data-onload="loadPaket" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
+          <button class="btn secondary" onclick="sinkronPaket()">⟳ Sinkron dari Router</button>
           <button class="btn" onclick="formPaket()">+ Tambah Paket</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
           <table><thead><tr><th>Nama</th><th>Jenis</th><th class="t-num">Harga</th>
-            <th class="t-num">Harga agen</th><th>Kecepatan</th><th>Aktif</th><th class="t-actions">Aksi</th></tr></thead>
+            <th class="t-num">Harga agen</th><th>Kecepatan</th><th>Durasi · Profil hotspot</th><th class="t-actions">Aksi</th></tr></thead>
           <tbody id="tbPaket"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
       </div>
@@ -271,14 +272,23 @@
           <input id="vq" placeholder="Cari kode voucher…" oninput="loadVoucher()">
           <select id="vstatus" onchange="loadVoucher()">
             <option value="">Semua status</option><option>stok</option><option>terjual</option>
-            <option>terpakai</option><option>kedaluwarsa</option></select>
+            <option>terpakai</option><option>kedaluwarsa</option><option>batal</option></select>
           <div class="spacer"></div>
           <button class="btn" onclick="modalOpen('mVoucher')">+ Generate Voucher</button>
         </div>
+        <div class="toolbar" id="vBulk" style="display:none">
+          <span class="hint" id="vBulkJml">0 dipilih</span>
+          <select id="vBulkAksi">
+            <option value="cabut">Cabut (user router dibuang, voucher jadi batal)</option>
+            <option value="hapus">Hapus permanen (hanya stok/batal)</option></select>
+          <button class="btn sm" onclick="vBulkTerapkan()">Terapkan ke terpilih</button>
+          <button class="btn sm secondary" onclick="vBulkBersihkan()">Batal pilih</button>
+        </div>
         <div class="panel"><div class="panel-body" style="padding:0">
-          <table><thead><tr><th>Kode</th><th>Paket</th><th class="t-num">Harga</th>
-            <th>Status</th><th>Dibuat</th><th>Dipakai</th></tr></thead>
-          <tbody id="tbVoucher"><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table>
+          <table><thead><tr><th style="width:34px"><input type="checkbox" id="vAll" onchange="vPilihAll(this)"></th>
+            <th>Kode</th><th>Paket</th><th class="t-num">Harga</th>
+            <th>Status</th><th>Router</th><th>Dibuat</th><th>Dipakai</th><th>Aksi</th></tr></thead>
+          <tbody id="tbVoucher"><tr><td colspan="9" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
       </div>
 
@@ -315,7 +325,8 @@
 
       <!-- ================= OLT ================= -->
       <div data-view="olt" data-onload="loadOlt" style="display:none">
-        <div class="toolbar"><div class="spacer"></div>
+        <div class="toolbar"><span class="hint" id="onuCocokHint"></span><div class="spacer"></div>
+          <button class="btn secondary" onclick="cocokOnu()" title="Cocokkan MAC/nama ONU dengan data pelanggan (MAC - akun - nama)">Cocokkan ONU ↔ Pelanggan</button>
           <button class="btn secondary" onclick="loadOlt()">⟳ Muat ulang</button></div>
         <div class="panel"><div class="panel-head"><h2>Setting & ambang redaman</h2></div>
           <div class="panel-body" style="padding:0">
@@ -766,13 +777,42 @@
       <div class="form-row"><label>Harga</label><input id="kHarga" type="number"></div>
       <div class="form-row"><label>Harga agen</label><input id="kAgen" type="number"></div>
       <div class="form-row"><label>Kecepatan</label><input id="kSpeed" placeholder="10M/10M"></div>
-      <div class="form-row"><label>Masa aktif (hari)</label><input id="kAktif" type="number" value="30"></div>
+      <div class="form-row"><label>Masa aktif</label><input id="kAktif" type="number" value="30"></div>
+      <div class="form-row"><label>Satuan masa aktif</label><select id="kSatuan">
+        <option value="hari">hari</option><option value="jam">jam</option></select>
+        <div class="hint">Voucher hotspot menghitung mundur dari saat pertama dipakai</div></div>
+      <div class="form-row"><label>Profile hotspot (MikroTik)</label>
+        <input id="kProfil" list="dlProfil" placeholder="mis. hotspot-3jam">
+        <datalist id="dlProfil"></datalist>
+        <div class="hint">Nama profile di /ip/hotspot/user/profile — wajib agar voucher terkirim ke router
+          <span id="profilHint"></span></div></div>
       <div class="form-row"><label>Status</label><select id="kStatus">
         <option>aktif</option><option>nonaktif</option></select></div>
     </div>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mPaket')">Batal</button>
     <button class="btn" onclick="simpanPaket()">Simpan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mSinkron"><div class="modal">
+  <div class="modal-head"><h2>Sinkronisasi paket ↔ MikroTik</h2>
+    <button class="btn sm ghost" onclick="modalClose('mSinkron')">✕</button></div>
+  <div class="modal-body">
+    <div class="toolbar">
+      <select id="skJenis" onchange="muatSinkron()">
+        <option value="hotspot">Hotspot (/ip/hotspot/user/profile)</option>
+        <option value="pppoe">PPPoE (/ppp/profile)</option></select>
+      <div class="spacer"></div>
+      <button class="btn sm secondary" onclick="muatSinkron()">⟳ Muat ulang</button>
+    </div>
+    <p class="hint" id="skHint">Menghubungi router…</p>
+    <div id="skHilang"></div>
+    <div id="skBaru"></div>
+    <p class="hint">Paket baru masuk sebagai <b>nonaktif</b> dengan harga 0 — isi harga dan masa
+      aktifnya dulu, baru aktifkan supaya tidak terlihat di daftar penjualan.</p>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mSinkron')">Batal</button>
+    <button class="btn" onclick="simpanSinkron()">Buat paket terpilih</button></div>
 </div></div>
 
 <div class="modal-bg" id="mVoucher"><div class="modal">
