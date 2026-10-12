@@ -71,6 +71,12 @@ sebagian besar halaman error, bukan menampilkan gabungan.
   (`171 pelanggan di IVVINET-CBD`) + arah ke menu Data Server.
 * `isiOpsiGrup()` memakai `/api/group-akses?ds=all` bila sesi pemilik platform, jadi
   grup rujukan tetap bisa dipilih lintas tenant.
+* Ikut terperbaiki: `GET /api/audit` (halaman Log Aktivitas) yang dulu 500 untuk
+  akun terikat satu tenant — `tenantSql(req, 'id_data_server')` ditempel pada query
+  ber-`LEFT JOIN app_user` (dua tabel punya kolom itu) →
+  `Column 'id_data_server' in WHERE is ambiguous`. Sekarang `tenantSql(req, 'a.id_data_server')`
+  (bug ini dilaporkan di v2.0.2 dan ternyata tertutup oleh refactor sekat ini).
+  Bukti live: `GET /api/audit?limit=3` dan `?ds=all` sama-sama 200 sebagai `adminmaster`.
 
 **Verifikasi di produksi (bukan uji sintetis)**
 
