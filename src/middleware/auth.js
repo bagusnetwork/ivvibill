@@ -77,7 +77,12 @@ async function muatAppUser(id) {
     const g = await db.one(
       `SELECT g.akses, g.status FROM group_akses g WHERE g.id = ?`, [u.id_group_akses]
     );
-    if (g && g.status === 'aktif') akses = aksesObjek(g);
+    // v2.1.2 — gagal tertutup. Dulu grup nonaktif/terhapus menghasilkan akses=null,
+    // dan bolehMenu() menafsirkan null sebagai "akses penuh": mematikan satu grup
+    // justru MEMBUKA semua menu untuk seluruh anggotanya. Sekarang grup yang tidak
+    // aktif (atau id yang menggantung) berarti tidak ada menu sama sekali.
+    const parsed = g && g.status === 'aktif' ? aksesObjek(g) : null;
+    akses = parsed || { menu: {} };
   }
   return { ...u, tipe: 'user', akses, ids: daftarTenant(u.id_data_server) };
 }

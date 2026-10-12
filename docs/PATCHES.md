@@ -4,6 +4,111 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-12 — v2.1.2 — Group Akses dan menu Pengguna akhirnya satu bahasa
+
+**Gejala user**
+
+"group aksess tidak syncron dengan Pengguna tidak ada pilihan untuk pengguna -
+group aksess perbaiki dan luruskan"
+
+**Reproduksi lewat jalur asli dulu (login `adminmaster`, data server aktif IVVI Network)**
+
+Empat temuan, semuanya nyata dan terukur sebelum satu baris pun diubah:
+
+1. Menu **Group Akses** menampilkan "Belum ada group" padahal grup `Penagih/Teknisi`
+   ada. `GET /api/group-akses` → 0 baris, `GET /api/group-akses?ds=all` → 1 baris
+   (milik tenant IVVINET-CBD). Halaman itu minta satu tenant, tapi dropdown pengguna
+   minta semua tenant — dua sumber kebenaran berbeda di dua halaman yang sama.
+2. Di form Pengguna, dropdown "Group akses" hanya berisi "— semua menu —". Grupnya
+   sudah termuat (`GRUP_SEMUA` = 1 baris) lalu **disaring diam-diam** oleh kolom
+   Data Server yang terisi `1` — grup tenant 2 dibuang tanpa satu pun penjelasan.
+3. Untuk akun master ISP barisnya `display: none` sama sekali (`formPengguna` dan
+   `simpanPengguna` dua-duanya digate `bolehTenantLain()`), jadi master tidak pernah
+   bisa menempelkan grup ke pengguna rumahnya sendiri — padahal grup itu ia kelola
+   sendiri di menu Group Akses.
+4. Grup berstatus **nonaktif** menghasilkan `akses = null`, dan `bolehMenu()`
+   menafsirkan `null` sebagai "akses penuh": mematikan satu grup justru **membuka
+   semua menu** untuk seluruh anggotanya.
+
+**Diubah — `public/panel/panel.js`**
+
+* `formPengguna()`: baris "Group akses" selalu tampil; kolom Data Server tetap hanya
+  untuk pemilik platform tapi nilainya selalu diisi (master = tenantnya sendiri) supaya
+  penyaringan punya dasar yang benar.
+* `saringOpsiGrup()` ditulis ulang: grup di luar data server form tidak dibuang, tapi
+  ditampilkan **disabled** dengan label `"<nama> — <nama tenant>[ (grup nonaktif)][ · data server lain]"`
+  (dulu `(tenant 2)` — angka yang tidak berarti bagi user). Nilai tersimpan tidak lagi
+  hilang diam-diam kalau grupnya tidak ada di daftar: opsi "(tidak ada di daftar ini)"
+  dibuat, jadi Simpan menghasilkan error jujur, bukan senyap melepas grup.
+* `isiPetunjukGrup()` baru — satu baris penjelasan di bawah dropdown: bedanya "tanpa
+  group" (semua menu) vs "grup nonaktif" (tidak ada menu), dan role `superadmin`
+  memang tidak dibatasi grup (select-nya dinonaktifkan + dijelaskan).
+* `simpanPengguna()`: `id_group_akses` **selalu** dikirim, oleh pemilik platform maupun
+  master. Kunci kosong = lepas grup.
+* `loadGroup()`: halaman Group Akses minta `?ds=all` untuk pemilik platform (sesuai
+  keputusan v2.1.1 "daftar rujukan boleh minta lintas tenant"), kolom baru **Dipakai**.
+* `dsAksi()`/`dsBaris()` baru: PUT/DELETE satu baris menyebut data server **baris itu**
+  (`?ds=N`, atau `?ds=all` untuk baris multi-tenant), khusus akun `tenantSemua`.
+  Tanpa ini, pemilik platform melihat grup ISP lain di daftar tapi "Ubah"/"Hapus"
+  ditolak, dan pengguna ISP lain tidak bisa disunting sama sekali.
+
+**Diubah — `public/panel/index.html`**: header tabel grup + kolom "Dipakai", teks
+penjelasan halaman grup dan form pengguna, `#uGrupHint`, dan `?v=20261012b` pada
+`panel.js` / `app.js` (empat halaman: panel, agen, teknisi, pelanggan).
+
+**Diubah — `src/routes/lain.js`**
+
+* `nilaiGrupDiminta(req, sekarang)`: `undefined` = jangan sentuh, `null`/`''` = lepas,
+  angka = tempel. Sebelumnya `v.num(..., def: nilai_lama)` membuat "kosongkan dropdown"
+  selalu jatuh balik ke grup lama.
+* `PUT /api/pengguna/:id` jadi dua cabang: pemilik platform boleh mengubah tenant
+  **dan** grup; master ISP boleh menempel/melepas grup **milik tenantnya sendiri**
+  sementara `id_data_server` tidak pernah disentuh dari jalurnya.
+* `GET /api/pengguna` ikut mengembalikan `g.status AS status_grup` (badge di daftar).
+
+**Diubah — `src/middleware/auth.js`** — `muatAppUser()` gagal tertutup: grup nonaktif,
+grup terhapus, atau JSON grant yang rusak menghasilkan `{menu:{}}` (nol menu), bukan
+`null` (= semua menu).
+
+**Diubah — `src/routes/tenant.js`** — `GET /api/group-akses` menghitung
+`dipakai` (jumlah `app_user` per grup) dan memakai alias `g.id_data_server` pada sekat.
+
+**Diubah — `public/assets/app.js`** — `terapkanAksesMenu()` memasang banner
+"Akun ini tidak punya satu pun menu…" bila grant menutup semua menu (khusus halaman
+yang menavigasi lewat `data-menu`; halaman agen/teknisi/warga tidak ikut).
+
+**Verifikasi end-to-end (UI asli, bukan uji sintetis)**
+
+* Pemilik platform, tenant aktif IVVI Network: halaman grup kini menampilkan
+  `Penagih/Teknisi — IVVINET-CBD — belum dipakai — aktif`; form Pengguna menampilkan
+  grup itu berlabel `· data server lain` (disabled), dan bisa dipilih begitu kolom
+  Data Server diisi 2.
+* Status grup ISP lain diubah dari tenant aktif (1 → grup tenant 2): **sebelum** rilis
+  ini `Grup akses tidak ada`; **sesudah** tersimpan ("nonaktif" tampil di daftar).
+* Grup `UJI-V212` (dashboard + absen) + akun `ujigrupv212` di tenant 2: login akun itu
+  → `/teknisi/` hanya menampilkan tab tanpa grant (Ringkasan/Pelanggan/Interface/OLT/Issue
+  disembunyikan). Grup dijadikan nonaktif → login ulang → `akses = {"menu":{}}`, semua
+  menu ber-grant tertutup, banner muncul.
+* Tempel → lepas lewat form: `id_group_akses` 4 → 3 (Penagih/Teknisi) → `NULL`, kolom
+  daftar ikut berubah (`semua menu`).
+* Jalur master ISP: tenant sementara `UJI V212 (buang)` + login master `ujivs212`.
+  Baris Group akses kini **tampil** (dulunya `display:none`), grup tenantnya bisa dipilih,
+  POST menyimpannya (`ujimaster4 → grup Admin Tagihan`), dan empat uji backend lolos:
+  ganti grup milik sendiri → OK; grup tenant lain → **"Grup akses bukan milik tenant ini"**;
+  kirim `id_data_server` → diabaikan (tetap 4); kirim `null` → grup lepas.
+* Semua data uji dibuang: `app_user` kembali 3 baris (`superadmin`, `adminmaster`,
+  Atin `id_group_akses NULL`), `group_akses` hanya #3, `data_server` hanya 1 & 2, dan
+  sisa tenant uji (template/profil/setting/grup/pengguna/antrean WA) semuanya 0.
+  `audit_log` memang menyimpan jejak pengujian ini (id 423–428) — tidak dihapus.
+
+**Belum selesai (keputusan user)**
+
+Sekat `requireMenu()` masih hanya dipakai pada rute `requirePJ()`, jadi grant grup
+membatasi **apa yang terlihat**, bukan apa yang bisa dipanggil, untuk role non-PJ.
+Ini kondisi lama, bukan regresi rilis ini.
+
+---
+
 ## 2026-10-12 — v2.1.1 — Halaman panel pemilik platform hanya menampilkan SATU data server; rekap lintas ISP pindah ke menu Data Server
 
 **Gejala user**

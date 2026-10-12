@@ -299,7 +299,8 @@ router.get('/pengguna', requirePJ(), async (req, res, next) => {
     const ts = tenantUserSql(req, 'u.id_data_server');
     const rows = await db.q(
       `SELECT u.id, u.username, u.nama, u.role, u.id_ref, u.no_hp, u.status, u.gagal_login,
-              u.last_login, u.created_at, u.id_data_server, u.id_group_akses, g.nama AS nama_grup
+              u.last_login, u.created_at, u.id_data_server, u.id_group_akses,
+              g.nama AS nama_grup, g.status AS status_grup
        FROM app_user u LEFT JOIN group_akses g ON g.id = u.id_group_akses
        WHERE 1=1${ts.sql} ORDER BY u.role, u.nama`, ts.params);
     res.json({ data: rows });
@@ -346,6 +347,19 @@ async function validasiGrup(req, idGrup, ids) {
   if (!g) throw new Error('Grup akses tidak ada');
   if (ids && !ids.includes(Number(g.id_data_server))) throw new Error('Grup akses bukan milik tenant ini');
   return Number(g.id);
+}
+
+/**
+ * Grup yang diminta sebuah request pengguna.
+ * v2.1.2: kunci KOSONG (null / '') berarti "lepas grup", sedangkan kunci yang tidak
+ * dikirim berarti "jangan disentuh". Dulu keduanya jatuh ke nilai lama, sehingga
+ * mengosongkan dropdown di panel tidak pernah benar-benar melepas grupnya.
+ */
+function nilaiGrupDiminta(req, sekarang) {
+  if (req.body.id_group_akses === undefined) return sekarang;
+  const diminta = req.body.id_group_akses;
+  if (diminta === null || String(diminta).trim() === '') return null;
+  return v.num(diminta, { int: true, min: 1 });
 }
 
 /**
@@ -403,7 +417,7 @@ router.post('/pengguna', requirePJ(), requireMenu('pengguna', 'tambah'), async (
     const { ids: idsDiminta } = await tentukanTenantUser(req);
     const ids = tenantUntukRole(role, idsDiminta);
     const idRef = await validasiRef(role, v.num(req.body.id_ref, { int: true, min: 1, def: null }), ids);
-    const idGrup = await validasiGrup(req, v.num(req.body.id_group_akses, { int: true, min: 1, def: null }), ids);
+    const idGrup = await validasiGrup(req, nilaiGrupDiminta(req, null), ids);
 
     const hash = await bcrypt.hash(pass, config.security.bcryptRounds);
     const id = await db.insert(
@@ -441,14 +455,23 @@ router.put('/pengguna/:id', requirePJ(), requireMenu('pengguna', 'ubah'), async 
         v.num(req.body.id_ref, { int: true, min: 1, def: null }), idsNow);
       await db.run('UPDATE app_user SET id_ref=? WHERE id=?', [ref, id]);
     }
-    // pemindahan tenant/grup hanya milik superadmin platform
-    if (req.tenantSemua && (req.body.id_data_server !== undefined || req.body.id_group_akses !== undefined)) {
+    // v2.1.2: dua jalur, bedanya hanya boleh/tidaknya memindah tenant.
+    //  - pemilik platform : boleh mengubah id_data_server sekaligus grupnya;
+    //  - master ISP       : boleh menempelkan/lepas grup MILIK TENANTNYA SENDIRI,
+    //    id_data_server tidak pernah disentuh dari jalur ini.
+    // Sebelumnya seluruh blok digate req.tenantSemua, jadi grup tidak bisa diubah
+    // dari akun ISP sama sekali — padahal grup dikelola oleh akun ISP itu sendiri.
+    const adaPerintahGrup = req.body.id_group_akses !== undefined;
+    if (req.tenantSemua && (req.body.id_data_server !== undefined || adaPerintahGrup)) {
       const { ids: idsDiminta } = await tentukanTenantUser(req);
       const ids = tenantUntukRole(u.role, idsDiminta);
-      const idGrup = await validasiGrup(req,
-        v.num(req.body.id_group_akses, { int: true, min: 1, def: u.id_group_akses ? Number(u.id_group_akses) : null }), ids);
+      const idGrup = await validasiGrup(req, nilaiGrupDiminta(req, u.id_group_akses), ids);
       await db.run('UPDATE app_user SET id_data_server=?, id_group_akses=? WHERE id=?',
         [ids ? ids.join(',') : null, idGrup, id]);
+    } else if (adaPerintahGrup) {
+      const idsMilik = daftarTenant(u.id_data_server) || [];
+      const idGrup = await validasiGrup(req, nilaiGrupDiminta(req, u.id_group_akses), idsMilik);
+      await db.run('UPDATE app_user SET id_group_akses=? WHERE id=?', [idGrup, id]);
     }
     await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
       [req.user.id, req.ds, 'ubah_pengguna', `#${id} ${u.username}`, (req.ip || '').replace('::ffff:', '')]);

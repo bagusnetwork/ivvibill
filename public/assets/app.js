@@ -169,9 +169,29 @@ function bolehMenu(menu) {
 }
 
 function terapkanAksesMenu() {
-  document.querySelectorAll('.nav a[data-menu]').forEach(a => {
-    a.style.display = bolehMenu(a.dataset.menu) ? '' : 'none';
+  const tautan = document.querySelectorAll('.nav a[data-menu]');
+  let buka = 0;
+  tautan.forEach(a => {
+    const boleh = bolehMenu(a.dataset.menu);
+    a.style.display = boleh ? '' : 'none';
+    if (boleh) buka++;
   });
+  // v2.1.2: grup nonaktif sekarang berarti "tanpa menu" (bukan akses penuh).
+  // Tanpa pesan ini yang terlihat hanyalah panel kosong tanpa sebab. Hanya untuk
+  // aplikasi yang menavigasi lewat grant (panel); halaman agen/teknisi/warga tidak
+  // punya data-menu sama sekali dan tidak boleh ikut disembunyikan.
+  const konten = document.querySelector('.content');
+  if (!konten || !tautan.length || !SESI) return;
+  const lama = document.getElementById('aksesTertutup');
+  if (lama) lama.remove();
+  if (buka || SESI.user.tipe === 'master' || SESI.user.role === 'superadmin') return;
+  const w = document.createElement('div');
+  w.id = 'aksesTertutup';
+  w.className = 'peringatan bad';
+  w.textContent = 'Akun ini tidak punya satu pun menu. Penyebabnya biasanya grup aksesnya '
+    'berstatus nonaktif atau belum mencentang menu — minta pemilik data server mengaktifkan '
+    'grupnya atau memilih grup lain di menu Pengguna.';
+  konten.prepend(w);
 }
 
 /** Halaman awal yang aman: kalau tab tujuan disembunyikan grant, lompat ke tab pertama yang boleh.

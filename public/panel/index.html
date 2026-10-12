@@ -592,11 +592,15 @@
           <button class="btn" onclick="formGroup()">+ Tambah Group</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
           <table><thead><tr><th>Nama grup</th><th>Data server</th><th>Menu yang dibuka</th>
-            <th>Status</th><th class="t-actions">Aksi</th></tr></thead>
-          <tbody id="tbGroup"><tr><td colspan="5" class="empty">Memuat…</td></tr></tbody></table>
+            <th>Dipakai</th><th>Status</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbGroup"><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
         <p class="hint">Group membatasi menu panel bagi pengguna non-master. Pengguna tanpa group
-          mendapat seluruh menu pada data server-nya.</p>
+          mendapat seluruh menu pada data server-nya. Group <b>hanya berlaku untuk data server
+          pemiliknya</b> — kolom “Data server” di atas menunjukkan milik ISP mana, dan hanya grup
+          pada data server yang sama yang bisa dipilih di menu Pengguna.<br>
+          Group berstatus <b>nonaktif</b> membuat anggotanya tidak punya satu pun menu (bukan
+          akses penuh) — jadi aktifkan groupnya atau ganti grup di menu Pengguna.</p>
       </div>
 
       <!-- ================= WA ================= -->
@@ -1017,12 +1021,16 @@
       <div class="form-row"><label>Status</label><select id="uStatus">
         <option>aktif</option><option>blokir</option></select></div>
       <div class="form-row" id="uGrupRow"><label>Group akses</label>
-        <select id="uGrup"><option value="">— semua menu —</option></select></div>
+        <select id="uGrup" onchange="isiPetunjukGrup()">
+          <option value="">— semua menu (tanpa group) —</option></select>
+        <div class="hint" id="uGrupHint"></div></div>
     </div>
     <p class="hint" id="uPetunjuk">Akun <b>agen</b> dan <b>pelanggan</b> harus ditautkan ke satu baris
       agen/pelanggan lewat pilihan di atas — tanpa tautan itu aplikasinya login tapi datanya kosong.
       Akun <b>teknisi</b> wajib punya data server. Password selalu wajib saat membuat akun baru;
-      kosongkan saja saat mengubah akun yang sudah ada.</p>
+      kosongkan saja saat mengubah akun yang sudah ada.<br>
+      <b>Group akses</b> menentukan menu apa yang boleh dibuka akun ini di panel. Kosong = seluruh
+      menu pada data server-nya; grup hanya bisa dipilih dari data server yang sama.</p>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mPengguna')">Batal</button>
     <button class="btn" onclick="simpanPengguna()">Simpan</button></div>
@@ -1189,7 +1197,7 @@
 </div></div>
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
-<script src="/assets/app.js"></script>
-<script src="panel.js?v=20261011g"></script>
+<script src="/assets/app.js?v=20261012a"></script>
+<script src="panel.js?v=20261012b"></script>
 </body>
 </html>

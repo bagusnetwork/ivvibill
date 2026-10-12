@@ -1411,6 +1411,8 @@ async function testPerangkat(id) {
 }
 
 // ============================================================ PENGGUNA
+let U_DS_AWAL = '';   // data server milik baris yang sedang dibuka (untuk ?ds= saat PUT)
+
 async function loadPengguna() {
   try {
     const [d] = await Promise.all([API.get('/api/pengguna'), muatNamaRef()]);
@@ -1424,13 +1426,17 @@ async function loadPengguna() {
         <td><span class="badge ${u.role === 'superadmin' ? 'bad' : u.role === 'teknisi' ? 'info' : 'warn'}">${esc(u.role)}</span></td>
         <td>${esc(namaRef(u))}</td>
         <td>${esc(u.id_data_server || 'semua')}</td>
-        <td>${esc(u.nama_grup || 'semua menu')}</td>
+        <td>${u.id_group_akses
+          ? `${esc(u.nama_grup || ('grup #' + u.id_group_akses))}`
+            + (u.status_grup && u.status_grup !== 'aktif'
+              ? ' <span class="badge bad">grup nonaktif — tanpa menu</span>' : '')
+          : '<span class="hint">semua menu</span>'}</td>
         <td>${u.last_login ? esc(String(u.last_login).slice(0, 16)) : '-'}</td>
         <td>${Number(u.gagal_login || 0) > 0 ? `<span class="badge bad">${esc(u.gagal_login)}</span>` : '-'}</td>
         <td><span class="badge ${u.status === 'aktif' ? 'ok' : 'bad'}">${esc(u.status)}</span></td>
         <td class="t-actions">
           <button class="btn sm secondary" onclick="formPengguna(${esc(JSON.stringify(u))})">Ubah</button>
-          ${u.status !== 'aktif' ? `<button class="btn sm" onclick="bukaBlokirPengguna(${u.id})">Buka blokir</button>` : ''}
+          ${u.status !== 'aktif' ? `<button class="btn sm" onclick="bukaBlokirPengguna(${esc(JSON.stringify(u))})">Buka blokir</button>` : ''}
         </td></tr>`).join('') || '<tr><td colspan="10" class="empty">Kosong</td></tr>';
     await isiOpsiGrup();
     loadLoginGagal();
@@ -1481,9 +1487,9 @@ async function muatNamaRef() {
   } catch (_) {}
 }
 
-async function bukaBlokirPengguna(id) {
+async function bukaBlokirPengguna(u) {
   try {
-    await API.put(`/api/pengguna/${id}`, { status: 'aktif' });
+    await API.put(`/api/pengguna/${u.id}${dsAksi(u.id_data_server)}`, { status: 'aktif' });
     toast('Blokir dibuka — pencobaan login dihitung ulang dari nol');
     loadPengguna(); loadLoginGagal();
   } catch (e) { toast(e.message, true); }
@@ -1577,9 +1583,11 @@ function gantiRolePengguna() {
   REF_TERPILIH = '';
   document.getElementById('uRef').value = '';
   muatOpsiRef();
+  isiPetunjukGrup();
 }
 
 function formPengguna(u) {
+  U_DS_AWAL = u && u.id_data_server ? String(u.id_data_server) : '';
   document.getElementById('uId').value = u ? u.id : '';
   document.getElementById('uUsername').value = u ? u.username : '';
   document.getElementById('uUsername').disabled = !!u;
@@ -1590,15 +1598,24 @@ function formPengguna(u) {
   document.getElementById('uStatus').value = u ? u.status : 'aktif';
   const bebas = bolehTenantLain();
   document.getElementById('uDsRow').style.display = bebas ? '' : 'none';
-  document.getElementById('uGrupRow').style.display = bebas ? '' : 'none';
+  // v2.1.2: baris grup akses TIDAK lagi ikut `bebas`. Sebelumnya hanya pemilik
+  // platform yang melihat pilihan "Group akses", sehingga master ISP — yang justru
+  // punya grup sendiri di menu Group Akses — tidak pernah bisa menempelkan grup
+  // ke pengguna rumahnya, dan simpanPengguna() juga tidak pernah mengirim
+  // id_group_akses sehingga pilihan di layar tidak pernah tersimpan.
+  document.getElementById('uGrupRow').style.display = '';
+  // Kolom data server tetap hanya milik pemilik platform, tapi nilainya selalu
+  // diisi supaya saringOpsiGrup() punya dasar yang benar (master = tenantnya).
+  document.getElementById('uDs').value = bebas
+    ? (u && u.id_data_server ? String(u.id_data_server) : String(sesi().ds || ''))
+    : String(sesi().ds || '');
   if (bebas) {
-    document.getElementById('uDs').value = u && u.id_data_server ? String(u.id_data_server)
-      : String(sesi().ds || '');
     document.getElementById('uDsHint').textContent = u && u.id_data_server
       ? '' : 'Terisi data server yang sedang aktif. Kosong hanya boleh untuk role superadmin.';
-    saringOpsiGrup();
-    document.getElementById('uGrup').value = u && u.id_group_akses ? String(u.id_group_akses) : '';
   }
+  saringOpsiGrup();
+  document.getElementById('uGrup').value = u && u.id_group_akses ? String(u.id_group_akses) : '';
+  isiPetunjukGrup();
   document.getElementById('uPassLabel').textContent = u ? 'Password baru (kosongkan bila tidak diubah)' : 'Password *';
   document.getElementById('uPassHint').textContent = u ? '' : 'Wajib — akun tanpa password tidak bisa masuk.';
   if (u && Number(u.gagal_login || 0) > 0) {
@@ -1629,29 +1646,30 @@ async function simpanPengguna() {
     return toast(`Akun ${role} harus punya data server`, true);
   }
   try {
+    const grup = document.getElementById('uGrup').value;
     if (id) {
       const body = { nama: document.getElementById('uNama').value, status: document.getElementById('uStatus').value };
       if (pass) body.password = pass;
       // ref kosong = tidak disentuh; ref bisa dikosongkan lewat SQL saja, karena
       // akun agen/warga tanpa ref adalah akun yang aplikasi-nya rusak.
       if (roleButuhRef(role) && ref) body.id_ref = ref;
-      if (bolehTenantLain()) {
-        body.id_data_server = ds || 'all';
-        body.id_group_akses = document.getElementById('uGrup').value || null;
-      }
-      await API.put(`/api/pengguna/${id}`, body);
+      // v2.1.2: grup selalu dikirim — oleh pemilik platform maupun master tenant.
+      // Nilai kosong berarti "lepas grup" (server membeda-kannya dari kunci yang
+      // tidak dikirim), jadi dropdown yang dikosongkan tidak lagi diam-diam
+      // menyimpan grup lama.
+      body.id_group_akses = grup || null;
+      if (bolehTenantLain()) body.id_data_server = ds || 'all';
+      await API.put(`/api/pengguna/${id}${dsAksi(U_DS_AWAL)}`, body);
     } else {
       const body = {
         username: document.getElementById('uUsername').value,
         nama: document.getElementById('uNama').value,
         role,
         id_ref: roleButuhRef(role) ? ref : null,
-        password: pass
+        password: pass,
+        id_group_akses: grup || null
       };
-      if (bolehTenantLain()) {
-        body.id_data_server = ds || 'all';
-        body.id_group_akses = document.getElementById('uGrup').value || null;
-      }
+      if (bolehTenantLain()) body.id_data_server = ds || 'all';
       await API.post('/api/pengguna', body);
     }
     modalClose('mPengguna'); toast('Tersimpan'); loadPengguna(); loadLoginGagal();
@@ -2612,6 +2630,25 @@ async function hapusTenant(id) {
   } catch (e) { toast(e.message, true); }
 }
 
+/** Data server yang tertulis pada SATU baris (pengguna / grup), untuk override sadar. */
+function dsBaris(teks) {
+  const t = String(teks == null ? '' : teks).trim();
+  if (!t || t.toLowerCase() === 'all') return '';
+  const ids = [...new Set(t.split(',').map(s => Number(s.trim())).filter(n => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return '';
+  return ids.length === 1 ? '?ds=' + ids[0] : '?ds=all';
+}
+
+/**
+ * v2.1.2 — pemilik platform mengelola baris milik ISP mana pun, tapi aksi tulis
+ * (PUT/DELETE) dulu selalu disekat ke data server yang aktif di kanan atas.
+ * Akibatnya: grup ISP lain tampil di daftar (kolom "Data server"-nya jelas) tapi
+ * "Ubah"/"Hapus" menolak, dan pengguna ISP lain tidak bisa disunting.
+ * Nama parameternya eksplisit dan hanya berlaku untuk akun tenantSemua — master
+ * ISP tetap terkunci pada tenantnya sendiri.
+ */
+function dsAksi(teks) { return bolehTenantLain() ? dsBaris(teks) : ''; }
+
 // ============================================================ GROUP AKSES
 let MENU_LIST = [];
 let GROUP_ROWS = [];
@@ -2619,23 +2656,31 @@ let GRUP_SEMUA = [];
 
 async function loadGroup() {
   try {
-    const d = await API.get('/api/group-akses');
+    // v2.1.2: halaman ini adalah daftar rujukan, dan sejak v2.1.1 pemilik platform
+    // boleh memintanya secara eksplisit (?ds=all). Dulu halaman selalu minta satu
+    // tenant, jadi grup ISP lain tampak "Belum ada group" padahal ada — itu sebabnya
+    // daftar Group Akses terasa tidak sinkron dengan menu Pengguna.
+    const s = sesi();
+    const d = await API.get(s && s.tenantSemua ? '/api/group-akses?ds=all' : '/api/group-akses');
     MENU_LIST = d.menus || Object.keys(LABEL_MENU);
     GROUP_ROWS = d.data || [];
     await muatLabelTenant();
+    const nt = NAMA_TENAN();
     document.getElementById('tbGroup').innerHTML = GROUP_ROWS.map((g, i) => {
       const a = bacaAkses(g.akses);
       const buka = a === 'all' ? 'semua menu'
         : Object.keys(a).filter(k => a[k] !== false).map(k => LABEL_MENU[k] || k).join(', ') || 'tidak ada';
+      const pakai = Number(g.dipakai || 0);
       return `<tr><td><b>${esc(g.nama)}</b></td>
-        <td>${esc(LABEL_TENANT[g.id_data_server] || ('tenant ' + g.id_data_server))}</td>
+        <td>${esc(nt[g.id_data_server] || ('tenant ' + g.id_data_server))}</td>
         <td class="hint">${esc(buka)}</td>
+        <td>${pakai ? `<span class="badge ok">${pakai} pengguna</span>` : '<span class="hint">belum dipakai</span>'}</td>
         <td><span class="badge ${g.status === 'aktif' ? 'ok' : 'mute'}">${esc(g.status)}</span></td>
         <td class="t-actions">
           <button class="btn sm secondary" onclick="formGroup(${i})">Ubah</button>
           <button class="btn sm danger" onclick="hapusGroup(${g.id})">Hapus</button>
         </td></tr>`;
-    }).join('') || '<tr><td colspan="5" class="empty">Belum ada group</td></tr>';
+    }).join('') || '<tr><td colspan="6" class="empty">Belum ada group</td></tr>';
     await isiOpsiGrup();
   } catch (e) { toast(e.message, true); }
 }
@@ -2683,16 +2728,66 @@ async function isiOpsiGrup() {
   saringOpsiGrup();
 }
 
-/** Opsi grup dibatasi ke tenant yang tertulis di kolom data server (kosong = semua tenant). */
+/** Peta id data server -> nama, gabungan sesi dan /api/auth/servers. */
+function NAMA_TENAN() {
+  const m = Object.assign({}, LABEL_TENANT);
+  ((sesi() && sesi().servers) || []).forEach(s => { if (s && s.id) m[s.id] = s.nama_server; });
+  return m;
+}
+
+/**
+ * Opsi grup dibatasi ke tenant yang tertulis di kolom data server (kosong = semua tenant).
+ * v2.1.2: grup milik tenant lain tidak lagi dibuang diam-diam — tetap ditampilkan
+ * tapi disabled. Dropdown yang hanya berisi "— semua menu —" tanpa penjelasan adalah
+ * gejala yang dilaporkan user ("tidak ada pilihan group akses untuk pengguna").
+ */
 function saringOpsiGrup() {
   const el = document.getElementById('uGrup');
   if (!el) return;
   const pilih = el.value;
   const batasi = daftarTenantDariForm();
-  const daftar = GRUP_SEMUA.filter(g => !batasi || batasi.includes(Number(g.id_data_server)));
-  el.innerHTML = '<option value="">— semua menu —</option>' + daftar.map(g =>
-    `<option value="${g.id}">${esc(g.nama)} (tenant ${g.id_data_server})</option>`).join('');
-  el.value = daftar.some(g => String(g.id) === pilih) ? pilih : '';
+  const nt = NAMA_TENAN();
+  const label = (g, luar) => `${esc(g.nama)} — ${esc(nt[g.id_data_server] || ('tenant ' + g.id_data_server))}`
+    + (g.status !== 'aktif' ? ' (grup nonaktif)' : '') + (luar ? ' · data server lain' : '');
+  const dalam = GRUP_SEMUA.filter(g => !batasi || batasi.includes(Number(g.id_data_server)));
+  const luar = GRUP_SEMUA.filter(g => batasi && !batasi.includes(Number(g.id_data_server)));
+  el.innerHTML = '<option value="">— semua menu (tanpa group) —</option>'
+    + dalam.map(g => `<option value="${g.id}">${label(g, false)}</option>`).join('')
+    + luar.map(g => `<option value="${g.id}" disabled>${label(g, true)}</option>`).join('');
+  // Nilai lama tetap terpilih walau grupnya di luar tenant form; tanpa ini,
+  // menekan "Ubah" pada akun bergrup lalu Simpan akan melepas grupnya diam-diam.
+  if (pilih && !Array.from(el.options).some(o => o.value === pilih)) {
+    el.insertAdjacentHTML('afterbegin',
+      `<option value="${esc(pilih)}">grup #${esc(pilih)} (tidak ada di daftar ini)</option>`);
+  }
+  el.value = pilih;
+  isiPetunjukGrup();
+}
+
+/** Penjelasan di bawah dropdown grup — supaya "tanpa group" dan "grup nonaktif" tidak sama artinya. */
+function isiPetunjukGrup() {
+  const el = document.getElementById('uGrup');
+  const hint = document.getElementById('uGrupHint');
+  if (!el || !hint) return;
+  const roleEl = document.getElementById('uRole');
+  const role = roleEl ? roleEl.value : '';
+  if (role === 'superadmin') {
+    el.disabled = true;
+    hint.textContent = 'Role superadmin adalah pemilik platform — selalu punya seluruh menu, '
+      + 'jadi grup akses tidak membatasinya.';
+    return;
+  }
+  el.disabled = false;
+  const g = GRUP_SEMUA.find(x => String(x.id) === el.value);
+  if (!el.value) {
+    hint.textContent = GRUP_SEMUA.length
+      ? 'Tanpa group = seluruh menu pada data server-nya (kompatibel dengan akun lama). Pilih grup untuk membatasi menu.'
+      : 'Belum ada grup pada data server ini. Buat lebih dulu di menu Group Akses, lalu pilih di sini.';
+    return;
+  }
+  hint.textContent = g && g.status !== 'aktif'
+    ? 'Grup ini berstatus nonaktif: akun tersebut tidak diberi satu pun menu sampai grupnya diaktifkan atau diganti.'
+    : 'Menu akun ini mengikuti grant grup — bukan nama grupnya. Ubah isinya di menu Group Akses.';
 }
 
 function daftarTenantDariForm() {
@@ -2761,8 +2856,9 @@ async function simpanGroup() {
     akses
   };
   if (bolehTenantLain()) body.id_data_server = document.getElementById('gDs').value || null;
+  const lama = GROUP_ROWS.find(g => String(g.id) === String(id));
   try {
-    if (id) await API.put(`/api/group-akses/${id}`, body);
+    if (id) await API.put(`/api/group-akses/${id}${dsAksi(lama && lama.id_data_server)}`, body);
     else await API.post('/api/group-akses', body);
     modalClose('mGroup'); toast('Tersimpan'); loadGroup();
   } catch (e) { toast(e.message, true); }
@@ -2772,7 +2868,7 @@ async function hapusGroup(id) {
   const g = GROUP_ROWS.find(x => Number(x.id) === Number(id)) || {};
   if (!confirm(`Hapus group "${g.nama || id}"?`)) return;
   try {
-    await API.del(`/api/group-akses/${id}`);
+    await API.del(`/api/group-akses/${id}${dsAksi(g.id_data_server)}`);
     toast('Group dihapus'); loadGroup();
   } catch (e) { toast(e.message, true); }
 }

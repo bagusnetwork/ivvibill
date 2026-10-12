@@ -253,10 +253,14 @@ router.delete('/data-server/:id', requireRole('superadmin'), async (req, res, ne
 // ---------------------------------------------------- grup akses
 router.get('/group-akses', requirePJ(), async (req, res, next) => {
   try {
-    const ts = tenantSql(req, 'id_data_server');
+    const ts = tenantSql(req, 'g.id_data_server');
+    // dipakai: jumlah pengguna yang menempel pada grup ini. Menu Group Akses dan
+    // menu Pengguna selama ini saling tidak tahu — kolom ini membuat tautannya
+    // terlihat di kedua sisi (kolom "Dipakai" + badge di daftar pengguna).
     const rows = await db.q(
-      `SELECT id, id_data_server, nama, akses, status, created_at FROM group_akses
-       WHERE 1=1${ts.sql} ORDER BY id_data_server, nama`, ts.params);
+      `SELECT g.id, g.id_data_server, g.nama, g.akses, g.status, g.created_at,
+              (SELECT COUNT(*) FROM app_user u WHERE u.id_group_akses = g.id) AS dipakai
+       FROM group_akses g WHERE 1=1${ts.sql} ORDER BY g.id_data_server, g.nama`, ts.params);
     res.json({ data: rows, menus: MENU });
   } catch (e) { next(e); }
 });
