@@ -4,6 +4,82 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-12 — v2.0.2 — NOC "Ping Test" akhirnya benar-benar mem-ping: parameter `timeout` ditolak RouterOS 7
+
+**Gejala user**
+
+"NOC ping test tidak berjalan. mikrotik tidak mengirim hasil ping ke app."
+
+**Penyebab (dibuktikan langsung ke RO-IVVI, RouterOS 7.19.2)**
+
+`src/routes/noc.js` mengirim `['/ping', '=address=…', '=count=1', '=timeout=2s']`.
+RouterOS menjawab:
+
+```
+["!trap","=message=unknown parameter timeout"],["!done"]
+```
+
+`timeout` bukan parameter sah `/ping` (yang sah: `address, count, interval, size, ttl,
+interface, do-dns`). Jadi router **tidak pernah mengirim satu paket ICMP pun** — perintah
+ditolak sebelum dikerjakan, dan karena `RouterOS.run()` melempar trap, panel hanya melihat
+`ok:false` dengan `raw:"RouterOS: unknown parameter timeout"` untuk keenam target.
+
+Ada bug kedua yang tertutup oleh yang pertama: parsing balaiannya memakai format CLI
+(`status=reply`, `reply-from`) yang **tidak ada** di output API. Bentuk sebenarnya:
+
+```
+sukses : !re =host=8.8.8.8 =ttl=117 =time=3ms90us =sent=1 =received=1 =packet-loss=0 =avg-rtt=…
+buntu  : !re =host=203.0.113.1 =status=timeout =received=0 =packet-loss=100
+nama salah: !trap "while resolving ip-address: name does not exist"
+```
+
+Kalaupun `timeout` dibuang, kode lama tetap menampilkan "Request timeout" untuk ping yang
+sukses karena `row.status` tidak pernah bernilai `reply`.
+
+**Diubah — `src/routes/noc.js`**
+
+* Perintah jadi `['/ping', '=address=<host>', '=count=1']`; `interval`/`size` tidak dipakai
+  supaya satu detak panel = satu paket ICMP.
+* `dariRouter()` membaca format asli: `received=0` (atau `status=timeout`/`no-host`) → merah;
+  kalau ada `received` → hijau, `ip` diambil dari `=host=` (router yang menyelesaikan nama,
+  jadi `youtube.com` tampil sebagai `74.125.200.93`), `raw` = `time=… ttl=… [loss=…%]`.
+* `msRouterOS()` memaksa durasi RouterOS jadi milidetik: `3ms90us` → 3,09; `1s20ms` → 1020;
+  `540us` → 0,54. `parseFloat("3ms90us")` versi lama memberi angka 3 yang salah satuan.
+* **Koneksi API didaur ulang per router** (`koneksi` + antrean `k.menunggu`, maksimal 6
+  menunggu, ditutup setelah 60 detik menganggur). Enam target berdetak tiap ~2 detik dari
+  browser; sebelumnya tiap detak = TCP + login RouterOS baru (ratusan login/menit) ke router
+  yang sama juga dipakai monitoring, isolir dan tagihan. `sedangJalan` mende-duplikasi detak
+  target yang sama supaya request susulan ikut memakai hasil yang sedang berjalan.
+* Kesalahan router tidak lagi melempar 500: `raw` dipotong ke 90 karakter dan koneksi hanya
+  dibuang ulang kalau gejalanya putusan socket (`ditutup|Timeout|ECONN|reset|EOF`).
+
+**Verifikasi di produksi (bukan uji sintetis)**
+
+* `GET /api/noc/ping` lewat API internal, keenam target: `google-dns 2.42 ms 8.8.8.8`,
+  `cloudflare 6.83 ms 1.1.1.1`, `youtube 21.4 ms 74.125.200.93`, `facebook 2.35 ms
+  57.144.192.1`, `tiktok 1.87 ms 23.53.15.67`, `mobilelegends 1.78 ms 23.215.35.166`.
+* Guard lama: `target=evil` → 400, `router=99` → 404.
+* Halaman NOC asli (login `adminmaster`, klik menu NOC): keenam kotak hijau, baris
+  `64 bytes dari 8.8.8.8: time=2ms659us ttl=117`, statistik `kirim 15 | terima 15 | loss 0% |
+  min 17.2 / avg 19.0 / max 22.4 ms` berjalan; tanpa pesan error di console.
+* Daur ulang koneksi terbukti dari sisi server: `ss -tn dport = :8429` tetap **satu** socket
+  `node→38.46.214.200:8429` setelah 18 ping paralel (sebelumnya satu socket per ping).
+* Setelah halaman NOC ditinggalkan, polling berhenti (guard `style.display==='none'` bekerja)
+  dan `kirim` tidak bertambah lagi.
+* Cabang "buntu" (`status=timeout`) **belum terbukti live** — semua target whitelist memang
+  sedang hidup, dan memutus internet router bukan hal yang boleh dilakukan untuk uji. Format
+  barisnya diambil dari probe langsung ke router (`203.0.113.1` → `=status=timeout
+  =received=0 =packet-loss=100`) dan parsingnya mengikuti bentuk itu.
+
+**Belum diperbaiki (ditemukan sekalian)**
+
+`GET /api/audit` (halaman Log Aktivitas) melempar 500 untuk akun `tenantSemua`:
+`tenantSql(req, 'id_data_server')` di `src/routes/lain.js:564` tidak diberi alias, padahal
+query-nya `LEFT JOIN app_user` yang punya kolom dengan nama sama → `Column 'id_data_server' in WHERE is
+ambiguous`. Perbaikannya satu kata (`a.id_data_server`) tapi menunggu keputusan user.
+
+---
+
 ## 2026-10-11 — v2.0.1 — tombol "Jalankan Siklus" berhenti menagih paksa: gerbang harinya kini dipinjam dari scheduler
 
 **Masalah**
