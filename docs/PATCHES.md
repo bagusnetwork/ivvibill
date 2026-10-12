@@ -268,7 +268,7 @@ sukses karena `row.status` tidak pernah bernilai `reply`.
   `64 bytes dari 8.8.8.8: time=2ms659us ttl=117`, statistik `kirim 15 | terima 15 | loss 0% |
   min 17.2 / avg 19.0 / max 22.4 ms` berjalan; tanpa pesan error di console.
 * Daur ulang koneksi terbukti dari sisi server: `ss -tn dport = :8429` tetap **satu** socket
-  `node→38.46.214.200:8429` setelah 18 ping paralel (sebelumnya satu socket per ping).
+  `node→<IP-publik-RO-IVVI>:8429` setelah 18 ping paralel (sebelumnya satu socket per ping).
 * Setelah halaman NOC ditinggalkan, polling berhenti (guard `style.display==='none'` bekerja)
   dan `kirim` tidak bertambah lagi.
 * Cabang "buntu" (`status=timeout`) **belum terbukti live** — semua target whitelist memang
