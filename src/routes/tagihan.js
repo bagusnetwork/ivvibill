@@ -397,20 +397,76 @@ router.post('/pembayaran/:id/verifikasi', requirePJ(), requireMenu('pembayaran',
 });
 
 // --------------------------------------------- payment gateway
+/** Bentuk kunci Midtrans — dipakai untuk membedakan "salin tempel rusak" dari
+ *  "akun belum boleh transaksi". Nilai aslinya tidak pernah ditampilkan. */
+function bentukKunciMidtrans(k) {
+  const s = String(k || '');
+  if (!s) return 'kosong';
+  const sandbox = s.startsWith('SB-');
+  // Kunci asli Midtrans memakai alfabet base64url di belakang prefiks —
+  // huruf, angka, serta '-' dan '_' — dan panjang ekornya bervariasi
+  // (client key live = 16 karakter, server key = 24). Karena itu pola yang
+  // dipakai [A-Za-z0-9_-] dengan rentang lebar, BUKAN [A-Za-z0-9]{20,24}:
+  // varian sempit itu menandai kunci asli sebagai "POLA TIDAK LAZIM",
+  // padahal fungsi label ini justru membedakan tempelan rusak dari akun
+  // yang belum diizinkan transaksi — salah tuduh membuatnya tidak berguna.
+  const polanya = sandbox
+    ? /^SB-Mid-(server|client)-[A-Za-z0-9_-]{8,64}$/
+    : /^Mid-(server|client)-[A-Za-z0-9_-]{8,64}$/;
+  const jenis = /server/.test(s.slice(0, 16)) ? 'server' : /client/.test(s.slice(0, 16)) ? 'client' : 'tak dikenal';
+  return `${sandbox ? 'sandbox' : 'live'} · ${jenis} · ${s.length} karakter · ${polanya.test(s) ? 'pola benar' : 'POLA TIDAK LAZIM'}`;
+}
+
 router.get('/gateway', requirePJ(), async (req, res, next) => {
   try {
-    const s = await cfgData.getServer(tenantAktif(req), true);
+    const ds = tenantAktif(req);
+    const s = await cfgData.getServer(ds, true);
+    let mode = 'belum_ada';
+    let bentuk = 'kosong';
+    if (s.pg_midtrans_server_key) {
+      let k = '';
+      try { k = crypto.decrypt(s.pg_midtrans_server_key); } catch (_) { k = ''; }
+      mode = k.startsWith('SB-') ? 'sandbox' : (k ? 'live' : 'rusak');
+      bentuk = bentukKunciMidtrans(k);
+    }
     res.json({
       data: {
         pg_active: s.pg_active,
         midtrans_server_key: s.pg_midtrans_server_key ? '****' : '',
         midtrans_client_key: s.pg_midtrans_client_key || '',
+        midtrans_mode: mode,
+        midtrans_bentuk: bentuk,
+        midtrans_siap: s.pg_active === 'midtrans' && !!s.pg_midtrans_server_key,
+        flip_siap: s.pg_active === 'flip' && !!s.pg_flip_secret_key,
         flip_secret: s.pg_flip_secret_key ? '****' : '',
         flip_public: s.pg_flip_public_key || '',
         wa_gateway_url: s.wa_gateway_url || '',
         wa_gateway_key: s.wa_gateway_key ? '****' : '',
-        wa_status: s.wa_status
+        wa_status: s.wa_status,
+        // URL yang harus ditempel di dashboard Midtrans/Flip (Settings →
+        // Notifications). Tanpa ini notifikasi tidak pernah sampai dan tagihan
+        // tetap 'menunggu' selamanya meski pelanggan sudah bayar.
+        webhook_midtrans: (config.app.baseUrl || '') + '/api/webhook/midtrans',
+        webhook_flip: (config.app.baseUrl || '') + '/api/webhook/flip'
       }
+    });
+  } catch (e) { next(e); }
+});
+
+/**
+ * Metode bayar mana yang boleh ditawarkan ke pemohon ini. Dipakai aplikasi
+ * pelanggan & panel; isi jawaban sengaja minimal (tidak ada kunci, tidak ada
+ * URL gateway) supaya role pelanggan tidak membaca konfigurasi tenant.
+ */
+router.get('/gateway/metode', async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const s = await cfgData.getServer(ds, true);
+    res.json({
+      manual: true,
+      midtrans: s.pg_active === 'midtrans' && !!s.pg_midtrans_server_key,
+      flip: s.pg_active === 'flip' && !!s.pg_flip_secret_key,
+      aktif: s.pg_active || 'manual'
     });
   } catch (e) { next(e); }
 });
@@ -438,10 +494,14 @@ router.put('/gateway', requirePJ(), requireMenu('setting', 'gateway'), async (re
   try {
     const ds = tenantAktif(req);
     const aktif = v.enumOf(req.body.pg_active, ['manual', 'midtrans', 'flip'], 'manual');
-    const msKey = v.str(req.body.midtrans_server_key, { max: 400, def: null });
-    const mcKey = v.str(req.body.midtrans_client_key, { max: 200, def: null });
-    const fSec = v.str(req.body.flip_secret, { max: 400, def: null });
-    const fPub = v.str(req.body.flip_public, { max: 200, def: null });
+    // Kunci tidak pernah berisi spasi; satu enter yang ikut tersalin saat
+    // tempel cukup membuat semua transaksi ditolak gateway, jadi dibuang
+    // seluruh whitespace-nya di sini.
+    const bersihKey = (x) => (x ? String(x).replace(/\s+/g, '') : x);
+    const msKey = bersihKey(v.str(req.body.midtrans_server_key, { max: 400, def: null }));
+    const mcKey = bersihKey(v.str(req.body.midtrans_client_key, { max: 200, def: null }));
+    const fSec = bersihKey(v.str(req.body.flip_secret, { max: 400, def: null }));
+    const fPub = bersihKey(v.str(req.body.flip_public, { max: 200, def: null }));
     const waUrl = v.str(req.body.wa_gateway_url, { max: 255, def: null });
     const waKey = v.str(req.body.wa_gateway_key, { max: 400, def: null });
 
@@ -462,6 +522,24 @@ router.put('/gateway', requirePJ(), requireMenu('setting', 'gateway'), async (re
   } catch (e) { next(e); }
 });
 
+/** Basis URL Midtrans dari server key: SB- = sandbox, selain itu production. */
+function basisMidtrans(serverKey) {
+  return serverKey.startsWith('SB-') ? 'https://app.sandbox.midtrans.com' : 'https://app.midtrans.com';
+}
+function headerMidtrans(serverKey) {
+  return {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    Authorization: 'Basic ' + Buffer.from(serverKey + ':').toString('base64')
+  };
+}
+/** Pesan error gateway (selalu array error_messages) untuk dibaca ISP. */
+function pesanGateway(body, text) {
+  if (body && Array.isArray(body.error_messages)) return body.error_messages.join(' | ');
+  if (body && (body.status_message || body.message)) return String(body.status_message || body.message);
+  return String(text || '(tanpa pesan)').slice(0, 240);
+}
+
 /** Checkout Midtrans Snap — membuat transaksi, mengembalikan snap URL. */
 router.post('/gateway/midtrans/snap', requireRole('superadmin', 'master', 'pelanggan'), async (req, res, next) => {
   try {
@@ -477,25 +555,72 @@ router.post('/gateway/midtrans/snap', requireRole('superadmin', 'master', 'pelan
       return res.status(400).json({ error: 'Midtrans belum diaktifkan' });
     }
     const serverKey = crypto.decrypt(s.pg_midtrans_server_key);
-    const snapBase = serverKey.startsWith('SB-')
-      ? 'https://app.sandbox.midtrans.com/snap/v1'
-      : 'https://app.midtrans.com/snap/v1';
+    const prefix = String(s.prefix_invoice || 'IVV').replace(/-+$/, '');
+    // order_id memuat id tagihan pada posisi kedua-dari-ujung, dan itu yang
+    // dipakai webhook untuk mencari tenant + kuncinya.
+    const order = `${prefix}-${t.id}-${Date.now()}`;
     const payload = {
-      transaction_details: { order_id: `${s.prefix_invoice || 'IVV'}-${t.id}-${Date.now()}`, gross_amount: Number(t.total) },
+      transaction_details: { order_id: order, gross_amount: Number(t.total) },
+      // sengaja TANPA nama/telepon pelanggan: nomor order sudah cukup untuk
+      // pencocokan, dan data pribadi tidak perlu berangkat ke gateway
       customer_details: { first_name: String(t.id_pelanggan), email: null }
     };
-    const r = await http.post(`${snapBase}/transactions`, JSON.stringify(payload), {
-      timeout: 20000,
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: 'Basic ' + Buffer.from(serverKey + ':').toString('base64')
-      }
-    });
-    if (r.status >= 400) return res.status(502).json({ error: `Midtrans: ${r.text.slice(0, 200)}` });
-    const token = r.body?.token;
+    const r = await http.post(`${basisMidtrans(serverKey)}/snap/v1/transactions`,
+      JSON.stringify(payload), { timeout: 20000, headers: headerMidtrans(serverKey) });
+    if (r.status >= 400) {
+      return res.status(502).json({ error: `Midtrans: ${pesanGateway(r.body, r.text)}` });
+    }
+    // Simpan order id-nya: notifikasi (settlement maupun expire) dicocokkan
+    // lewat kolom ini, dan operator bisa melihat transaksi mana yang menunggu.
+    await db.run('UPDATE tagihan SET ref_gateway = ? WHERE id = ?', [order, tagihanId]);
     await db.run(`UPDATE tagihan SET status='menunggu' WHERE id=? AND status IN ('buat','terkirim','jatuh_tempo')`, [tagihanId]);
-    res.json({ token, redirect_url: r.body?.redirect_url || null });
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'checkout_midtrans', `${order} · tagihan ${t.nomor_invoice} Rp ${Math.round(Number(t.total))}`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json({ token: r.body?.token, redirect_url: r.body?.redirect_url || null, order_id: order });
+  } catch (e) { next(e); }
+});
+
+/**
+ * Uji kunci Midtrans milik tenant ini — dijalankan dari tombol di Pengaturan.
+ * Membuat SATU transaksi Snap Rp 1.000 yang tidak ada yang membayar; gunanya
+ * supaya kegagalan konfigurasi (kunci salah, akun belum boleh transaksi,
+ * channel belum diaktifkan) terlihat di panel alih-alih baru ketahuan ketika
+ * pelanggan benar-benar mencoba bayar.
+ */
+router.post('/gateway/midtrans/tes', requirePJ(), requireMenu('setting', 'gateway'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const s = await cfgData.getServer(ds, true);
+    if (!s.pg_midtrans_server_key) {
+      return res.status(400).json({ error: 'Server key Midtrans belum disimpan — isi kolomnya dulu' });
+    }
+    const serverKey = crypto.decrypt(s.pg_midtrans_server_key);
+    const basis = basisMidtrans(serverKey);
+    const prefix = String(s.prefix_invoice || 'IVV').replace(/-+$/, '');
+    const order = `${prefix}-UJI-${Date.now()}`;
+    const r = await http.post(`${basis}/snap/v1/transactions`,
+      JSON.stringify({
+        transaction_details: { order_id: order, gross_amount: '1000' },
+        customer_details: { first_name: 'uji-kunci-ivvibill', email: null }
+      }), { timeout: 20000, headers: headerMidtrans(serverKey) });
+    const lolos = r.status < 400 && !!(r.body && r.body.token);
+    const detail = lolos
+      ? 'Kunci diterima Midtrans — Snap siap dipakai pelanggan.'
+      : pesanGateway(r.body, r.text);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'uji_midtrans', `HTTP ${r.status} · ${order} · ${detail}`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json({
+      ok: lolos, http: r.status,
+      lingkungan: serverKey.startsWith('SB-') ? 'sandbox' : 'production',
+      bentuk_server_key: bentukKunciMidtrans(serverKey),
+      bentuk_client_key: bentukKunciMidtrans(s.pg_midtrans_client_key || ''),
+      order_id: order,
+      pesan: detail,
+      peringatan: lolos ? null
+        : 'Uraikan penyebabnya di dashboard Midtrans (Settings → Access Key untuk bentuk kunci, Payment Channel Configuration untuk metode yang aktif, dan status aktivasi akun untuk transaksi live).'
+    });
   } catch (e) { next(e); }
 });
 

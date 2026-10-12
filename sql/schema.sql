@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS tagihan (
   status        ENUM('buat','terkirim','menunggu','lunas','jatuh_tempo','batal') NOT NULL DEFAULT 'buat',
   ingatkan_terakhir DATE DEFAULT NULL,        -- penanda pengingat H-3 (maks 1x/hari per tagihan)
   metode_bayar  VARCHAR(30) DEFAULT NULL,
+  ref_gateway   VARCHAR(80) DEFAULT NULL,     -- order id gateway (Midtrans/Flip) selama 'menunggu'
   paid_at       DATETIME DEFAULT NULL,
   img_invoice   VARCHAR(150) DEFAULT NULL,   -- berkas kwitansi PNG (dikirim ke WA)
   created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

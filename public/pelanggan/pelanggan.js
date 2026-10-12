@@ -3,6 +3,10 @@
 const JUDUL = { dashboard: 'Beranda', tagihan: 'Tagihan & Bayar',
   koneksi: 'Status Koneksi', tiket: 'Tiket Gangguan' };
 let PROFIL = null, TAGIHAN = [];
+/* Metode bayar yang benar-benar aktif di ISP ini. Dulu pilihan Midtrans selalu
+   muncul walaupun tenant-nya gateway 'manual' — pelanggan menekan Bayar lalu
+   menerima "Midtrans belum diaktifkan". Nilainya ditanyakan ke backend. */
+let METODE = { manual: true, midtrans: false, flip: false };
 
 async function loadDash() {
   try {
@@ -50,13 +54,16 @@ async function loadDash() {
 async function loadTagihan() {
   try {
     const [d, rk] = await Promise.all([API.get('/api/tagihan?limit=100'), API.get('/api/rekening')]);
+    await muatMetode();
     TAGIHAN = d.data || [];
     const badge = (s) => ({ buat: 'info', terkirim: 'info', menunggu: 'warn', lunas: 'ok', jatuh_tempo: 'bad', batal: 'mute' }[s] || 'mute');
     document.getElementById('tbTagihan').innerHTML = TAGIHAN.map(t => `
       <tr><td><b>${esc(t.nomor_invoice)}</b></td><td>${esc(t.periode)}</td>
         <td>${esc(t.keterangan || '-')}</td>
         <td class="t-num">${rupiah(t.total)}</td><td>${tgl(t.jatuh_tempo)}</td>
-        <td><span class="badge ${badge(t.status)}">${esc(t.status)}</span></td>
+        <td><span class="badge ${badge(t.status)}">${esc(t.status)}</span>
+          ${t.status === 'menunggu'
+            ? `<div class="hint">${t.ref_gateway ? 'menunggu pembayaran di Midtrans' : 'menunggu verifikasi admin'}</div>` : ''}</td>
         <td class="t-actions">${t.status !== 'lunas' && t.status !== 'batal'
           ? `<button class="btn sm" onclick="formBayar(${t.id})">Bayar</button>` : '-'}</td></tr>`).join('')
       || '<tr><td colspan="7" class="empty">Belum ada tagihan</td></tr>';
@@ -67,13 +74,34 @@ async function loadTagihan() {
   } catch (e) { toast(e.message, true); }
 }
 
+/** Tanya metode apa yang diizinkan ISP ini; gagal tanya = manual saja. */
+async function muatMetode() {
+  try { const m = await API.get('/api/gateway/metode');
+    METODE = { manual: true, midtrans: !!m.midtrans, flip: !!m.flip }; }
+  catch (_) { METODE = { manual: true, midtrans: false, flip: false }; }
+  return METODE;
+}
+
 let bayarId = null;
 function formBayar(id) {
   const t = TAGIHAN.find(x => x.id === id);
   if (!t) return;
   bayarId = id;
+  const sel = document.getElementById('byMetode');
+  // Hanya tawarkan yang benar-benar aktif di tenant ini.
+  Array.from(sel.options).forEach(o => {
+    const boleh = METODE[o.value] !== false;
+    o.hidden = !boleh; o.disabled = !boleh;
+  });
+  sel.value = 'manual';
+  const bukti = document.getElementById('byBuktiWrap');
+  if (bukti) bukti.style.display = '';
+  const catatan = METODE.midtrans
+    ? '<div class="hint">Pilih <b>Payment gateway (Midtrans)</b> untuk bayar langsung di halaman Midtrans '
+      + '(VA bank / QRIS / e-wallet); tagihan berubah menjadi <b>lunas</b> otomatis begitu uangnya masuk.</div>'
+    : '';
   document.getElementById('byInfo').innerHTML =
-    `Invoice <b>${esc(t.nomor_invoice)}</b> — total <b>${rupiah(t.total)}</b>, jatuh tempo ${tgl(t.jatuh_tempo)}.`;
+    `Invoice <b>${esc(t.nomor_invoice)}</b> — total <b>${rupiah(t.total)}</b>, jatuh tempo ${tgl(t.jatuh_tempo)}.` + catatan;
   document.getElementById('byBukti').value = '';
   document.getElementById('byKet').value = '';
   modalOpen('mBayar');
@@ -84,8 +112,14 @@ async function kirimBayar() {
     const metode = document.getElementById('byMetode').value;
     if (metode === 'midtrans') {
       const r = await API.post('/api/gateway/midtrans/snap', { tagihan_id: bayarId });
-      if (r.redirect_url) { window.open(r.redirect_url, '_blank'); modalClose('mBayar'); return; }
-      toast(r.token ? 'Snap token dibuat' : 'Gateway tidak siap', !r.token);
+      if (r.redirect_url) {
+        window.open(r.redirect_url, '_blank');
+        modalClose('mBayar');
+        toast('Halaman bayar Midtrans dibuka — setelah selesai, kembali ke sini dan daftar tagihan diperbarui');
+        setTimeout(loadTagihan, 10000);
+        return;
+      }
+      toast('Gateway tidak memberikan tautan bayar — hubungi ISP Anda', true);
       return;
     }
     const fd = new FormData();

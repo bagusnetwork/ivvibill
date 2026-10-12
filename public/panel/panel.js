@@ -551,7 +551,11 @@ async function loadTagihan() {
         <td>${esc(t.periode)}</td>
         <td class="t-num">${rupiah(t.total)}</td>
         <td>${tgl(t.jatuh_tempo)}</td>
-        <td><span class="badge ${badge(t.status)}">${esc(t.status)}</span></td>
+        <td><span class="badge ${badge(t.status)}">${esc(t.status)}</span>
+          ${t.status === 'menunggu' && t.ref_gateway
+            ? `<div class="hint" title="Nomor order yang dikirim ke gateway; notifikasi dicocokkan lewat nomor ini">gateway: ${esc(t.ref_gateway)}</div>`
+            : t.status === 'lunas' && t.metode_bayar && t.metode_bayar !== 'manual'
+              ? `<div class="hint">bayar: ${esc(t.metode_bayar)}</div>` : ''}</td>
         <td class="t-actions">
           <button class="btn sm ghost" onclick="cetakInvoice('${esc(t.nomor_invoice)}')" title="Cetak / simpan PDF invoice">Cetak</button>
           ${t.status !== 'lunas' && t.status !== 'batal'
@@ -1863,6 +1867,7 @@ async function loadSetting() {
     document.getElementById('gFp').value = gw.flip_public || '';
     document.getElementById('gWaUrl').value = gw.wa_gateway_url || '';
     document.getElementById('gWaKey').value = '';
+    renderGwStatus(gw);
     muatPairingWa();
 
     const tpl = d.template || [];
@@ -2005,6 +2010,54 @@ async function simpanGateway() {
     });
     toast('Gateway tersimpan'); loadSetting();
   } catch (e) { toast(e.message, true); }
+}
+
+/**
+ * 'Gateway aktif: Midtrans' belum berarti apa-apa kalau server key-nya kosong
+ * atau environment-nya sandbox. Baris ini membedakan "sudah dipilih" dari
+ * "sudah bisa dipakai", sekaligus menampilkan URL notifikasi yang wajib
+ * ditempel di dashboard Midtrans — tanpa itu pelunasan tidak pernah diketahui.
+ */
+function renderGwStatus(gw) {
+  const el = document.getElementById('gwStatus');
+  const L = { manual: 'Manual (transfer + unggah bukti)', midtrans: 'Midtrans', flip: 'Flip' };
+  if (el) {
+    let b = `Dipilih: <b>${esc(L[gw.pg_active] || gw.pg_active || 'manual')}</b>`;
+    if (gw.pg_active === 'midtrans') {
+      b += gw.midtrans_siap
+        ? ` · <span class="badge ${gw.midtrans_mode === 'sandbox' ? 'warn' : 'ok'}">${gw.midtrans_mode === 'sandbox' ? 'SANDBOX — uang sungguhan tidak masuk' : 'PRODUCTION'}</span> <span class="hint">${esc(gw.midtrans_bentuk || '')}</span>`
+        : ' · <span class="badge bad">server key belum diisi</span> <span class="hint">pelanggan akan ditolak saat menekan Bayar</span>';
+    } else if (gw.pg_active === 'flip') {
+      b += gw.flip_siap ? ' · <span class="badge ok">secret key terisi</span>'
+        : ' · <span class="badge bad">secret key belum diisi</span>';
+    } else {
+      b += ' · <span class="hint">tidak ada gerbang otomatis; pembayaran dicatat manual atau lewat verifikasi bukti.</span>';
+    }
+    el.innerHTML = b;
+  }
+  const w = document.getElementById('gwWebhook');
+  if (w) w.innerHTML =
+    `<div>Midtrans: <b>${esc(gw.webhook_midtrans || '(BASE_URL belum diatur)')}</b></div>` +
+    `<div>Flip: <b>${esc(gw.webhook_flip || '(BASE_URL belum diatur)')}</b></div>`;
+}
+
+/** Tanya langsung ke Midtrans dengan kunci tenant ini; hasilnya mentah-mentah. */
+async function ujiMidtrans(btn) {
+  const box = document.getElementById('gwUji');
+  if (btn) btn.disabled = true;
+  if (box) box.textContent = 'Menghubungi Midtrans…';
+  try {
+    const r = await API.post('/api/gateway/midtrans/tes', {});
+    if (box) box.innerHTML =
+      (r.ok ? '<span class="badge ok">kunci diterima</span>' : '<span class="badge bad">ditolak Midtrans</span>') +
+      `<div>${esc(r.pesan || '')}</div>` +
+      `<div class="hint">Environment: <b>${esc(r.lingkungan || '?')}</b> · server key ${esc(r.bentuk_server_key || '?')} · client key ${esc(r.bentuk_client_key || '?')}</div>` +
+      (r.peringatan ? `<div class="hint">${esc(r.peringatan)}</div>` : '');
+    toast(r.ok ? 'Midtrans menerima kunci ini — gateway siap' : 'Midtrans menolak kunci ini', !r.ok);
+  } catch (e) {
+    if (box) box.textContent = e.message;
+    toast(e.message, true);
+  } finally { if (btn) btn.disabled = false; }
 }
 
 // ============================================================ PAIRING WHATSAPP GATEWAY

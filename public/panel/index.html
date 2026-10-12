@@ -689,6 +689,7 @@
 
           <div class="panel"><div class="panel-head"><h2>Payment gateway</h2></div>
             <div class="panel-body">
+              <div class="form-row"><label>Status gateway</label><div id="gwStatus" class="hint">memuat…</div></div>
               <div class="form-row"><label>Gateway aktif</label>
                 <select id="gAktif"><option value="manual">Manual (transfer)</option>
                   <option value="midtrans">Midtrans</option><option value="flip">Flip</option></select></div>
@@ -696,13 +697,25 @@
               <div class="form-row"><label>Midtrans client key</label><input id="gMc"></div>
               <div class="form-row"><label>Flip secret key</label><input id="gFs"></div>
               <div class="form-row"><label>Flip public key</label><input id="gFp"></div>
-              <div class="form-row"><label>URL WhatsApp gateway</label><input id="gWaUrl" placeholder="http://127.0.0.1:3000/api"></div>
-              <div class="form-row"><label>API key WhatsApp gateway</label><input id="gWaKey" placeholder="(kosongkan bila tak diubah)"></div>
-              <div class="form-row"><label>Pairing WhatsApp</label>
-                <div id="waPair" class="hint">Status gateway: memuat…</div>
-                <img id="waQr" alt="QR WhatsApp" style="max-width:260px;display:none;margin-top:8px">
+              <div class="form-row"><label>URL notifikasi gateway (webhook)</label>
+                <p class="hint">Tempel alamat ini di dashboard Midtrans pada <b>Settings → Notifications →
+                  Transaction &amp; expiry notification URL</b> (Flip: <b>Settings → Webhook</b>). ivvibill hanya
+                  menandai tagihan LUNAS bila notifikasi ini datang — selama URL-nya belum dipasang, pembayaran di
+                  gateway tidak akan pernah muncul di sini.</p>
+                <div id="gwWebhook" class="hint">memuat…</div>
+              </div>
+              <div class="form-row"><label>WhatsApp gateway</label>
+                <div class="form-row"><label>URL WhatsApp gateway</label><input id="gWaUrl" placeholder="http://127.0.0.1:3000/api"></div>
+                <div class="form-row"><label>API key WhatsApp gateway</label><input id="gWaKey" placeholder="(kosongkan bila tak diubah)"></div>
+                <div class="form-row"><label>Pairing WhatsApp</label>
+                  <div id="waPair" class="hint">Status gateway: memuat…</div>
+                  <img id="waQr" alt="QR WhatsApp" style="max-width:260px;display:none;margin-top:8px">
+                </div>
               </div>
               <button class="btn" onclick="simpanGateway()">Simpan gateway</button>
+              <button class="btn secondary" id="gUjiBtn" onclick="ujiMidtrans(this)"
+                title="Membuat satu transaksi Snap Rp 1.000 yang tidak dibayar, hanya untuk membuktikan kunci diterima Midtrans">🧪 Uji kunci Midtrans</button>
+              <div id="gwUji" class="hint" style="margin-top:8px"></div>
             </div></div>
         </div>
 
@@ -1219,6 +1232,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261012e"></script>
+<script src="panel.js?v=20261013a"></script>
 </body>
 </html>

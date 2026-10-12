@@ -4,6 +4,94 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-13 — v2.3.0 — Payment gateway (Midtrans) benar-benar bisa melunasi: gerbang IP dibuka, order id disimpan, panel punya status kunci
+
+**Gejala user**
+
+"saya baru saja menambahkan payment gateway untuk dataserver ... midtrans" — kunci production
+Midtrans sudah ditempel di Pengaturan → Payment gateway, tetapi tidak ada tagihan yang pernah
+berubah menjadi lunas setelah pelanggan membayar.
+
+**Apa yang sebenarnya terjadi**
+
+1. **Semua notifikasi gateway ditolak sebelum diperiksa.** Rute webhook menahan permintaan
+   lebih dulu bila IP pengirim bukan `127.0.0.1`. Karena nginx memasang `X-Forwarded-For` dan
+   `TRUST_PROXY=1`, `req.ip` adalah alamat asli server Midtrans — selalu berbeda, selalu di
+   luar daftar, sehingga setiap `settlement` mendapat `403 ip not allowed` dan pelunasan
+   otomatis mati tanpa satu pun jejak. Autentikasi yang sesungguhnya adalah `signature_key`
+   (SHA-512 dari `order_id + status_code + gross_amount + server_key`); untuk memalsukan
+   "lunas", pelaku wajib mengetahui server key tenant yang tersimpan terenkripsi di luar
+   jangkauan browser. Jadi gerbang IP adalah pengaman tambahan, bukan gerbang utama.
+2. **Order id gateway tidak pernah disimpan.** Checkout Midtrans memakai
+   `PREFIX-<idTagihan>-<timestamp>`, tetapi nomor itu tidak disimpan di mana pun, sehingga
+   saat notifikasi datang tidak ada cara aman mencocokkannya dengan percobaan bayar tertentu —
+   dan notifikasi "batal/expire" dari percobaan gagal bisa menimpa status tagihan.
+3. **Panel tidak memberi jalan untuk memeriksa kunci.** Tidak ada indikator kunci mana yang
+   terisi, lingkungan apa yang dipakai, dan URL notifikasi apa yang harus ditempel di dashboard
+   Midtrans. Akibatnya setup yang salah terlihat seperti "aplikasinya tidak mau melunasi".
+4. Aplikasi pelanggan menawarkan opsi Midtrans/Flip walau tenant belum mengaktifkan atau belum
+   punya kunci — pelanggan memilih metode yang pasti gagal.
+
+**Diubah**
+
+* `src/routes/webhook.js`
+  * Gerbang IP menjadi **opsional**: hanya aktif bila env `WEBHOOK_IPS` memang diisi; selama
+    kosong, penanda tangan (signature) yang menjadi autentikasi, sesuai desain Midtrans/Flip.
+  * Tagihan dikenali lebih dulu lewat order id → tenant → signature diverifikasi memakai server
+    key **milik tenant itu**; kunci tenant lain tidak pernah dicoba.
+  * `settlement/capture` hanya melunasi bila `gross_amount` sama persis dengan `total` tagihan
+    (selisih → diabaikan + diaudit, tidak auto-lunas); `deny/cancel/expire/failed` melepas
+    status `menunggu` **khusus** baris yang memang sedang menunggu karena order id ini dan tidak
+    punya bukti transfer manual yang menunggu verifikasi — tempo yang sudah lewat kembali ke
+    `jatuh_tempo` agar siklus isolir tetap melihat tunggakan.
+  * Setiap kejadian yang mengubah uang/status ditulis ke log server **dan** `audit_log`
+    (`aksi = webhook_midtrans`). Perbaikan ikutannya: `catatAudit()` dulu mengirim 6 placeholder
+    untuk 5 kolom sehingga insert selalu gagal dan ditelan diam-diam — kini 4 nilai + kolom
+    `user_id` eksplisit `NULL`, kegagalannya dicetak ke log.
+* `src/routes/tagihan.js`
+  * Checkout Midtrans menyimpan order id ke `tagihan.ref_gateway` sebelum status `menunggu`.
+  * `GET /api/gateway` menambah status terbaca: `midtrans_siap`, `midtrans_mode`
+    (live/sandbox), `midtrans_bentuk`, dan kedua **URL notifikasi** yang harus ditempel di
+    dashboard Midtrans/Flip. Kunci server tak pernah turun ke browser (`****`).
+  * `bentukKunciMidtrans()` membedakan "tempelan rusak" dari "akun belum diizinkan": polanya
+    `[A-Za-z0-9_-]{8,64}` dengan prefiks `Mid-`/`SB-Mid-`. (Versi pertama `[A-Za-z0-9]{20,24}`
+    salah menandai kunci asli — server key live berisi `_`, client key live 16 karakter —
+    sehingga kunci yang benar terbaca "POLA TIDAK LAZIM"; label ini justru tidak berguna bila
+    salah tuduh.)
+  * `GET /api/gateway/metode` (tanpa bocor konfigurasi) dan `POST /api/gateway/midtrans/tes`
+    (panggil Snap sungguhan, tampilkan pesan asli Midtrans + lingkungan + bentuk kunci).
+  * Simpan gateway membuang spasi/`\r\n` di ujung kunci (`bersihKey`).
+* `scripts/migrate-v20.js` + `sql/schema.sql` — kolom `tagihan.ref_gateway VARCHAR(80)`.
+* `public/panel/*` — blok status gateway, URL notifikasi siap salin, tombol "Uji kunci Midtrans",
+  dan baris tagihan `menunggu` menampilkan nomor order gateway-nya.
+* `public/pelanggan/*` — hanya metode yang aktif ditawarkan (opsi lain dinonaktifkan), status
+  "menunggu pembayaran di Midtrans" dibedakan dari "menunggu verifikasi admin".
+
+**Verifikasi (jalur asli lewat HTTPS publik)**
+
+* Rantai notifikasi diuji 14 kasus lewat `https://.../api/webhook/midtrans` dengan signature
+  dihitung dari server key tenant: signature salah → `403` + status tak berubah; jumlah beda →
+  diabaikan + diaudit; settlement benar → `lunas`, `metode_bayar=midtrans`, `paid_at`, tepat satu
+  baris `pembayaran` + satu `kas`, isolir→aktif; notifikasi ulang → `lunas:false` tanpa duplikat;
+  `expire` hanya melepas `menunggu` buatan gateway dan mengembalikan `jatuh_tempo`.
+* Perbaikan `catatAudit` dibuktikan 8/8: baris `audit_log` `webhook_midtrans` kini benar-benar
+  tertulis (sebelumnya 0). Semua baris uji dibuat di satu tenant dan dihapus lagi — keadaan akhir
+  identik dengan keadaan awal (pelanggan/tagihan/pembayaran/kas/audit).
+* Panel diverifikasi lewat login + pindah data server sungguhan: status menunjukkan
+  `midtrans · live · siap`, server key ter-mask, dan "Uji kunci" menampilkan `401 Access denied
+  due to unauthorized transaction` milik Midtrans — bentuk kunci keduanya "pola benar", jadi
+  yang menahan adalah sisi akun Midtrans (aktivasi / Payment Channel), bukan tempelan rusak.
+
+**Catatan (di luar kode)**
+
+Agar pembayaran benar-benar masuk: (a) tempel `https://<domain>/api/webhook/midtrans` di
+dashboard Midtrans → Settings → Notifications; (b) pastikan akun sudah live-approved dan kanal
+pembayaran aktif, sebab server menolak pembuatan transaksi dengan `401` walau bentuk kunci benar.
+Data server yang menyetel `pg_active=midtrans` tetapi belum menyimpan kunci otomatis menyembunyikan
+opsi Midtrans di aplikasi pelanggan sampai kuncinya diisi.
+
+---
+
 ## 2026-10-12 — v2.2.3 — Template impor berpenghuni baru (koordinat + contoh tidak aktif), MAC pelanggan diambil dari router
 
 **Gejala user**
