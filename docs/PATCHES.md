@@ -4,6 +4,83 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-12 — v2.2.1 — Impor pelanggan tidak lagi mati karena bahasa kolom Status
+
+**Gejala user**
+
+"cek di Download file excel untuk import data pelanggan yang tidak aktif atau sudah
+tidak berlangganan `template-pelanggan-tidakaktif.xlsx` namun gagal saat di import,
+mohon untuk di import kamu saja"
+
+**Apa yang sebenarnya terjadi (diperiksa dulu, bukan ditebak)**
+
+1. **Akar kegagalan pertama: kolom Status.** Semua 27 baris ditolak
+   (`audit_log` #438 = `0/27 baris OK`) dengan pesan yang sama: isi berkas menulis
+   `tidak aktif`, padahal `STATUS` enum importer hanya mengenal
+   `baru, aktif, isolir, nonaktif`. Satu kata manusia → nol baris masuk.
+2. **Akar kegagalan kedua: tanggal hasil drag-fill.** Setelah toleransi dipasang,
+   23 baris masuk dan 4 baris terakhir tetap ditolak `Tanggal tidak valid`. Sel
+   `Tanggal Masuk` di isi dengan drag dari Excel sehingga deretnya
+   `2026-10-09 … 2026-10-31` lalu **meluber** ke `2026-10-32`, `-33`, `-34`, `-35` —
+   tanggal yang tidak pernah ada, jadi `v.tgl()` benar menolak.
+
+**Diubah — `src/util/validate.js`**
+
+`normalStatus(nilai)` baru (diekspor): menormalkan spasi/underscore/strip lalu
+mencari padanan di `STATUS_SINONIM` — `tidak aktif`/`non aktif`/`non-aktif`/`tdak aktif`/
+`tidak berlangganan`/`sudah tidak berlangganan`/`putus`/`mati`/`off`/`inactive`/`inaktif`
+→ `nonaktif`; `belum aktif`/`belum dipasang`/`pending`/`proses` → `baru`;
+`sudah bayar`/`normal`/`on`/`online` → `aktif`; `ditangguhkan`/`ditunda` → `isolir`.
+Nilai yang memang valid (atau yang tidak dikenal) dikembalikan apa adanya supaya
+pesan error tetap menyebut nilai asli.
+
+**Diubah — `src/routes/pelanggan.js`**
+
+* Baris importer: `v.enumOf(v.normalStatus(amb(r, 'status')), STATUS, 'baru')`.
+* `PUT /pelanggan/:id`: sama, jadi mengedit status dari panel lewat nilai bahasa
+  manusia juga tidak ditolak.
+* Lembar `Petunjuk` di template kini menulis daftar status **plus** catatan bahwa
+  `tidak aktif`/`mati`/`off`/`sudah tidak berlangganan` ikut diterima sebagai `nonaktif`.
+
+Perubahan hanya di lapisan penerimaan nilai — `v.enumOf` tetap memaksa hasilnya salah
+satu dari `STATUS`, jadi tidak ada status baru yang masuk ke DB.
+
+**Verifikasi lewat jalur asli (panel, bukan uji sintetis)**
+
+Impor dijalankan dua kali dari menu **Pelanggan → Import** pada tenant `IVVINET-CBD`:
+
+* Berkas asli user apa adanya → `23 dari 27 baris berhasil ditambahkan, 4 gagal`
+  (seluruhnya `Tanggal tidak valid`).
+* Salinan terkoreksi (`tidakaktif-sisa.xlsx`, kolom tanggal dilanjutkan ke November
+  sesuai rollover Excel) → `3 dari 4 baris berhasil, 1 gagal` karena username PPPoe-nya
+  sudah dipakai pelanggan aktif lain (penulisan nama berbeda, username sama) — keputusan
+  user: **lewati baris itu**.
+
+Hasil akhir: **26 pelanggan `nonaktif`** masuk, header panel `197 pelanggan`
+(171 + 26), `profil_tagihan` tenant, `hari_tagihan` 10, nomor WA dinormalkan ke `62…`,
+paket 10-Mbps. Tidak ada tagihan yang dibuat (status `nonaktif` tidak ikut siklus)
+dan impor memang tidak mengirim WA.
+
+**Sekalian dibereskan di router (lewat `mon.setSecret()` milik app)**
+
+Empat pelanggan yang tercatat `nonaktif` tapi secret PPPoE-nya masih hidup dimatikan;
+**dua di antaranya sedang punya sesi dan sesi itu dibuang** (internetnya benar-benar
+putus). Setelah itu 23 dari 26 username punya secret dan semuanya `disabled=true`.
+
+**Temuan yang masih terbuka (bukan bug kode)**
+
+* 3 username di berkas tidak punya secret sama sekali di router, jadi tidak bisa
+  "dimatikan" — hanya tercatat di panel.
+* 19 pelanggan hasil impor membawa `tanggal_masuk` di masa depan (`2026-10-13 … 10-31`)
+  karena deret drag-fill itu — keputusan user: **dibiarkan**.
+* 2 pelanggan `nonaktif` **masih punya sesi PPPoE hidup** (uptime ±1 hari dan ±4 hari)
+  padahal secret-nya `disabled=true` — sesi lama tidak putus sampai reconnect, jadi
+  membuang sesi itu perlu keputusan terpisah.
+* Kolom `Tanggal Masuk` di Excel sebaiknya diisi tanggal nyata, bukan hasil drag
+  melewati akhir bulan.
+
+---
+
 ## 2026-10-12 — v2.2.0 — Teknisi bisa mendaftar & Remote ONU, aktivasi tetap di tangan admin data server
 
 **Gejala user**

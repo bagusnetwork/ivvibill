@@ -45,6 +45,29 @@ function enumOf(v, allowed, def = undefined) {
   return s;
 }
 
+/**
+ * Status pelanggan sering ditulis dengan bahasa spreadsheet, bukan kode enum:
+ * "tidak aktif", "tdak aktif", "mati", "off", "sudah tidak berlangganan".
+ * Yang dipetakan hanya sinonim yang maksudnya yakin benar — tulisan lain
+ * dilewatkan apa adanya supaya enumOf memberi pesan error yang jujur
+ * (dan `def` tetap jalan untuk sel kosong).
+ */
+const STATUS_SINONIM = {
+  'tidak aktif': 'nonaktif', 'tidakaktif': 'nonaktif', 'non aktif': 'nonaktif',
+  'non-aktif': 'nonaktif', 'tdak aktif': 'nonaktif', 'tidak berlangganan': 'nonaktif',
+  'sudah tidak berlangganan': 'nonaktif', 'putus': 'nonaktif', 'mati': 'nonaktif',
+  'off': 'nonaktif', 'inactive': 'nonaktif', 'inaktif': 'nonaktif',
+  'belum aktif': 'baru', 'belum dipasang': 'baru', 'pending': 'baru', 'proses': 'baru',
+  'sudah bayar': 'aktif', 'normal': 'aktif', 'on': 'aktif', 'online': 'aktif',
+  'ditangguhkan': 'isolir', 'ditunda': 'isolir'
+};
+
+function normalStatus(v) {
+  if (v === undefined || v === null) return v;
+  const s = String(v).trim().toLowerCase().replace(/[\s_]+/g, ' ');
+  return STATUS_SINONIM[s] !== undefined ? STATUS_SINONIM[s] : String(v).trim();
+}
+
 function phone(v) {
   if (v === undefined || v === null || v === '') return null;
   let s = String(v).replace(/[^0-9]/g, '');
@@ -86,4 +109,4 @@ function password(v) {
   return s;
 }
 
-module.exports = { str, num, enumOf, phone, email, tgl, username, password };
+module.exports = { str, num, enumOf, normalStatus, phone, email, tgl, username, password };

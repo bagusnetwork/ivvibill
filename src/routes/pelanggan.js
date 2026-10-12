@@ -403,7 +403,7 @@ const PETUNJUK = [
   'Yang dibaca hanya sheet "Pelanggan" (atau berkas CSV ini). Sheet "Petunjuk" tidak dibaca.',
   'Kolom wajib hanya NAMA. Kolom lain boleh dikosongkan dan akan diisi otomatis.',
   'Tipe: pppoe atau hotspot (kosong = pppoe)',
-  'Status: baru, aktif, isolir, nonaktif (kosong = baru)',
+  'Status: baru, aktif, isolir, nonaktif (kosong = baru). "tidak aktif"/"mati"/"off"/"sudah tidak berlangganan" ikut diterima sebagai nonaktif.',
   'Paket dan Agen diisi NAMANYA persis seperti di aplikasi, bukan nomor ID. Kosongkan bila tidak ada.',
   'Username dan Password PPPoE boleh dikosongkan; bila diisi username dan sudah dipakai pelanggan lain, baris itu ditolak.',
   'Nomor WhatsApp tanpa tanda +, contoh 081234567890',
@@ -592,7 +592,7 @@ router.post('/pelanggan/import', requirePJ(),
         const pass = v.str(amb(r, 'password_pppoe') || null, { max: 50, def: null });
         const ip = v.str(amb(r, 'ip_address') || null, { max: 40, def: null });
         const mac = v.str(amb(r, 'mac_address') || null, { max: 40, def: null });
-        const status = v.enumOf(amb(r, 'status') || null, STATUS, 'baru');
+        const status = v.enumOf(v.normalStatus(amb(r, 'status')), STATUS, 'baru');
         const tglMasuk = v.tgl(amb(r, 'tanggal_masuk') || null, hariIni);
         // v2.0: Profile Tagihan adalah sumber jadwal. Kalau terisi, hari_tagihan
         // mengikuti tanggal_isolir profil; kalau kosong, kolom Hari Tagihan lama
@@ -943,7 +943,7 @@ router.put('/pelanggan/:id', requireRole('superadmin', 'master', 'teknisi', 'age
     const username = v.str(req.body.username_pppoe, { max: 50, def: p.username_pppoe });
     const passPppoe = v.str(req.body.password_pppoe, { max: 50, def: p.password_pppoe });
     const ip = v.str(req.body.ip_address, { max: 40, def: p.ip_address });
-    const status = v.enumOf(req.body.status, ['baru', 'aktif', 'isolir', 'nonaktif'], p.status);
+    const status = v.enumOf(v.normalStatus(req.body.status), ['baru', 'aktif', 'isolir', 'nonaktif'], p.status);
     const catatan = v.str(req.body.catatan, { max: 5000, def: p.catatan });
     // dikirim kosong = sengaja dihapus (isolir kembali ke perilaku matikan secret)
     const profilIsolir = Object.prototype.hasOwnProperty.call(req.body, 'profile_isolir')
