@@ -11,7 +11,8 @@ const JUDUL = {
   tenant: 'Data Server (ISP)', group: 'Group Akses',
   topologi: 'Master Topologi (ODP)', desa: 'Master Desa',
   noc: 'NOC — Ping Test Internet', keuangan: 'Keuangan (Kas)', tiket: 'Tiket Gangguan',
-  peta: 'Peta Sebaran', absen: 'Absensi Teknisi'
+  peta: 'Peta Sebaran', absen: 'Absensi Teknisi',
+  'profil-tagihan': 'Profile Tagihan'
 };
 
 const LABEL_MENU = {
@@ -22,7 +23,7 @@ const LABEL_MENU = {
   pengguna: 'Pengguna', wa: 'WhatsApp', setting: 'Pengaturan',
   data_server: 'Data Server', group_akses: 'Group Akses',
   topologi: 'Topologi', desa: 'Desa', noc: 'NOC', keuangan: 'Keuangan', tiket: 'Tiket',
-  peta: 'Peta Sebaran', absen: 'Absensi Teknisi'
+  peta: 'Peta Sebaran', absen: 'Absensi Teknisi', profil_tagihan: 'Profile Tagihan'
 };
 
 /** Hanya pemilik platform (superadmin) yang boleh memindah grup/pengguna antar tenant. */
@@ -32,6 +33,7 @@ function bolehTenantLain() {
 }
 
 let PAKET_LIST = [], AGEN_LIST = [], TOPO_LIST = [], DESA_LIST = [];
+let PROFIL_TAGIHAN_LIST = [];
 let GRAFIK = null;
 let PLG_ROWS = [], PLG_TOTAL = 0, PLG_OFFSET = 0, PLG_TAB = '', PLG_WAKTU = null;
 const PLG_LIMIT = 50;
@@ -152,7 +154,8 @@ async function loadPelanggan() {
         <td>${esc(p.kode)}</td>
         <td><b>${esc(p.nama)}</b><div class="hint">${koor(p)}</div></td>
         <td><span class="badge ${p.tipe === 'pppoe' ? 'info' : 'warn'}">${esc(p.tipe)}</span>
-          <div class="hint">${esc(p.nama_paket || '-')}</div></td>
+          <div class="hint">${esc(p.nama_paket || '-')}</div>
+          <div class="hint">🗓️ ${p.profil_tagihan ? esc(p.profil_tagihan) : '<i>tanpa profil</i>'} · tempo tgl ${esc(p.hari_tagihan)}</div></td>
         <td>${esc(p.nama_topologi || '-')}${p.port_odp ? ' · port ' + esc(p.port_odp) : ''}
           <div class="hint">${esc(p.nama_desa || '')}</div></td>
         <td>${esc(p.username_pppoe || '-')}</td>
@@ -164,7 +167,8 @@ async function loadPelanggan() {
           ? `<span class="badge ${badgeRedaman(p.status_redaman)}">${esc(p.redaman_db)} dB</span>`
           : '<span class="badge mute">-</span>'}</td>
         <td><span class="badge ${p.status === 'aktif' ? 'ok' : p.status === 'isolir' ? 'bad' : 'mute'}">${esc(p.status)}</span>
-          ${p.tipe === 'pppoe' ? `<div class="hint">${p.pppoe_online ? '🟢 online' : '⚪ offline'}</div>` : ''}</td>
+          ${p.tipe === 'pppoe' ? `<div class="hint">${p.pppoe_online ? '🟢 online' : '⚪ offline'}</div>` : ''}
+          ${p.status === 'isolir' && p.profile_isolir ? `<div class="hint">🔒 ${esc(p.profile_isolir)}</div>` : ''}</td>
         <td class="t-actions">
           <button class="btn sm" onclick="remoteOnu(${p.id})" title="Auto-generate NAT MikroTik → web ONU">Remote ONU</button>
           <button class="btn sm secondary" onclick="formPelanggan(${esc(JSON.stringify(p))})">Ubah</button>
@@ -260,10 +264,16 @@ async function plgStatus(id, status) {
     const r = await API.post(`/api/pelanggan/${id}/status`, { status });
     const g = (r.diubah || [])[0] || {};
     const rb = g.router;
+    // isolir manual = efek yang sama dengan siklus otomatis, termasuk WA
+    const waTxt = status !== 'isolir' ? ''
+      : (g.wa_terkirim ? ' · WA isolir dikirim' : ' · WA tidak dikirim (nomor WhatsApp pelanggan kosong)');
     if (rb && rb.gagal && rb.gagal.length) toast(`Status diubah, tapi router gagal: ${rb.gagal[0]}`, true);
     else if (rb && !rb.router) toast(`Status -> ${status} (username PPPoE tidak ditemukan di router)`, true);
-    else if (rb) toast(`${status === 'aktif' ? 'Secret diaktifkan' : 'Secret dimatikan'}${rb.sesi_dibuang ? ` · ${rb.sesi_dibuang} sesi putus` : ''}`);
-    else toast(`Status -> ${status} (pelanggan ini tidak punya secret PPPoE)`);
+    else if (rb && rb.cara === 'profil') toast(`${status === 'isolir'
+      ? `Isolir ${rb.profil} diterapkan — koneksi tetap naik, hanya dibatasi`
+      : `Profil asal ${rb.profil} dikembalikan — layanan normal lagi`}${rb.sesi_dibuang ? ` · ${rb.sesi_dibuang} sesi putus` : ''}${waTxt}`);
+    else if (rb) toast(`${status === 'aktif' ? 'Secret diaktifkan' : 'Secret dimatikan'}${rb.sesi_dibuang ? ` · ${rb.sesi_dibuang} sesi putus` : ''}${waTxt}`);
+    else toast(`Status -> ${status} (pelanggan ini tidak punya secret PPPoE)${waTxt}`);
     (r.gagal || []).slice(0, 3).forEach(x => toast(`#${x.id}: ${x.alasan}`, true));
   } catch (e) { toast(e.message, true); }
   loadPelanggan();
@@ -313,27 +323,70 @@ async function muatUnmanage() {
 
 async function muatOpsi() {
   try {
-    const [pk, ag, tp, ds] = await Promise.all([
+    const [pk, ag, tp, ds, pt] = await Promise.all([
       API.get('/api/paket'), API.get('/api/agen'),
-      API.get('/api/master/topologi'), API.get('/api/master/desa')
+      API.get('/api/master/topologi'), API.get('/api/master/desa'),
+      // bila tabel profil_tagihan belum ada (mis. migrasi v19 belum dijalankan),
+      // dropdown paket/agen/topologi/desa tidak boleh ikut mati
+      API.get('/api/profil-tagihan').catch(() => ({ data: [] }))
     ]);
     PAKET_LIST = pk.data || []; AGEN_LIST = ag.data || [];
     TOPO_LIST = tp.data || []; DESA_LIST = ds.data || [];
+    PROFIL_TAGIHAN_LIST = (pt.data || []).filter(x => x.status === 'aktif');
     const oPaket = PAKET_LIST.map(p => `<option value="${p.id}">${esc(p.nama_paket)} (${esc(p.jenis)})</option>`).join('');
     const oAgen = '<option value="">— tanpa agen —</option>' + AGEN_LIST.map(a => `<option value="${a.id}">${esc(a.nama)}</option>`).join('');
     const kosong = (t) => `<option value="">— ${t} —</option>`;
     const oTopo = kosong('tanpa topologi') + TOPO_LIST.map(t =>
       `<option value="${t.id}">${esc(t.nama)} (${t.jumlah_terpakai}/${t.jumlah_port} port)</option>`).join('');
     const oDesa = kosong('tanpa desa') + DESA_LIST.map(x => `<option value="${x.id}">${esc(x.nama)}</option>`).join('');
+    // Profil tagihan memakai NAMAnya sebagai label + tanggal pentingnya, karena
+    // nama itulah yang ditulis di kolom "Profile Tagihan" pada berkas import.
+    const oProfilTagihan = '<option value="">— tanpa profil (ikut jadwal server) —</option>'
+      + PROFIL_TAGIHAN_LIST.map(x =>
+        `<option value="${x.id}">${esc(x.nama)} · tempo tgl ${esc(x.tanggal_isolir)}</option>`).join('');
     ['fPaket', 'vPaket'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = oPaket; });
     const fA = document.getElementById('fAgen'); if (fA) fA.innerHTML = oAgen;
     const fT = document.getElementById('fTopo'); if (fT) fT.innerHTML = oTopo;
     const fD = document.getElementById('fDesa'); if (fD) fD.innerHTML = oDesa;
+    const fPT = document.getElementById('fProfilTagihan');
+    if (fPT) { fPT.innerHTML = oProfilTagihan; terapkanOpsiProfil(); }
+    const bPT = document.getElementById('plgBulkProfil');
+    if (bPT) bPT.innerHTML = '<option value="">pindahkan ke profil…</option>'
+      + PROFIL_TAGIHAN_LIST.map(x => `<option value="${x.id}">${esc(x.nama)}</option>`).join('');
   } catch (_) {}
+}
+
+/** Nilai profil yang sedang dipilih form pelanggan (opsi dropdown bisa datang terlambat). */
+let PLG_PROFIL_TERPILIH = '';
+
+/** Setelah dropdown profil terisi, pasang lagi pilihan yang sedang aktif. */
+function terapkanOpsiProfil() {
+  const el = document.getElementById('fProfilTagihan');
+  if (!el) return;
+  el.value = PLG_PROFIL_TERPILIH || '';
+  fProfilTagihanInfo();
+}
+
+/** Ringkasan jadwal profil terpilih, supaya operator melihat "tempo tgl X" sebelum menyimpan. */
+function fProfilTagihanInfo() {
+  const el = document.getElementById('fProfilTagihanInfo');
+  if (!el) return;
+  const id = document.getElementById('fProfilTagihan').value;
+  PLG_PROFIL_TERPILIH = id;
+  const x = PROFIL_TAGIHAN_LIST.find(p => String(p.id) === String(id));
+  if (!x) {
+    el.textContent = 'belum dipilih — pelanggan ikut jadwal data server dan memakai Hari Tagihan lama';
+    return;
+  }
+  el.textContent = `buat tgl ${x.tanggal_buat} · kirim WA tgl ${x.tanggal_kirim}`
+    + ` · jatuh tempo & isolir tgl ${x.tanggal_isolir}`
+    + ` · PPN ${x.ppn_mode}${Number(x.kirim_peringatan) ? '' : ' · TANPA pengingat H-3'}`
+    + ` — Hari Tagihan otomatis menjadi ${x.tanggal_isolir}`;
 }
 
 function formPelanggan(p) {
   muatOpsi();
+  PLG_PROFIL_TERPILIH = p && p.id_profil_tagihan ? String(p.id_profil_tagihan) : '';
   document.getElementById('mPelangganTitle').textContent = p ? 'Ubah Pelanggan' : 'Tambah Pelanggan';
   document.getElementById('fPid').value = p ? p.id : '';
   document.getElementById('fNama').value = p ? p.nama : '';
@@ -350,8 +403,25 @@ function formPelanggan(p) {
   document.getElementById('fPortOdp').value = p ? (p.port_odp || '') : '';
   document.getElementById('fLat').value = p ? (p.latitude || '') : '';
   document.getElementById('fLong').value = p ? (p.longitude || '') : '';
+  document.getElementById('fIsolir').value = p ? (p.profile_isolir || '') : '';
+  const catatan = p && p.profil_sebelum_isolir
+    ? ` — sedang diisolir lewat profil, profile asal tersimpan: ${p.profil_sebelum_isolir}` : '';
+  document.getElementById('isolirHint').textContent = catatan;
+  muatProfilIsolir();
+  terapkanOpsiProfil();
   modalOpen('mPelanggan');
   setTimeout(() => { petaPilih('fPeta', cfgPetaPelanggan()); petaPilihSinkron('fPeta'); }, 60);
+}
+
+/** Profile di /ppp/profile — dipakai dropdown profil isolir pelanggan. */
+async function muatProfilIsolir() {
+  const dl = document.getElementById('dlIsolir');
+  dl.innerHTML = '<option value=""></option>';
+  try {
+    const d = await API.get('/api/profil-mikrotik?jenis=pppoe');
+    dl.innerHTML = [...new Set((d.data || []).map(x => x.nama))]
+      .map(n => `<option value="${esc(n)}"></option>`).join('');
+  } catch (_) { /* boleh ketik manual kalau router sedang tidak menjawab */ }
 }
 
 async function simpanPelanggan() {
@@ -360,6 +430,9 @@ async function simpanPelanggan() {
     nama: document.getElementById('fNama').value,
     tipe: document.getElementById('fTipe').value,
     id_paket: document.getElementById('fPaket').value || null,
+    // v2.0: jadwal penagihan diambil dari profil; backend ikut menulis
+    // hari_tagihan = tanggal_isolir profil supaya nilai turunan tidak tertinggal
+    id_profil_tagihan: (document.getElementById('fProfilTagihan') || {}).value || null,
     nomor_whatsapp: document.getElementById('fWa').value,
     username_pppoe: document.getElementById('fUser').value,
     password_pppoe: document.getElementById('fPass').value,
@@ -370,7 +443,8 @@ async function simpanPelanggan() {
     id_master_desa: document.getElementById('fDesa').value || null,
     port_odp: document.getElementById('fPortOdp').value || null,
     latitude: document.getElementById('fLat').value || null,
-    longitude: document.getElementById('fLong').value || null
+    longitude: document.getElementById('fLong').value || null,
+    profile_isolir: document.getElementById('fIsolir').value.trim()
   };
   try {
     if (id) await API.put(`/api/pelanggan/${id}`, body);
@@ -431,29 +505,111 @@ async function loadTagihan() {
         <td class="t-actions">
           <button class="btn sm ghost" onclick="cetakInvoice('${esc(t.nomor_invoice)}')" title="Cetak / simpan PDF invoice">Cetak</button>
           ${t.status !== 'lunas' && t.status !== 'batal'
-            ? `<button class="btn sm" onclick="bayarTagihan(${t.id})">Bayar</button>
+            ? `<button class="btn sm ghost" onclick="kirimWaTagihan(${t.id})" title="Kirim / kirim ulang tagihan ini ke WhatsApp pelanggan">📤 WA</button>
+               <button class="btn sm ghost" onclick="isolirTagihan(${t.id_pelanggan})" title="Isolir pelanggan ini sekarang: secret/profil di router + kirim WA isolir">🔒 Isolir</button>
+               <button class="btn sm" onclick="bayarTagihan(${t.id})">Bayar</button>
                <button class="btn sm ghost" onclick="formKeteranganTagihan(${TQ_ROWS.indexOf(t)})">Keterangan</button>
                <button class="btn sm ghost" onclick="batalTagihan(${t.id})">Batal</button>`
             : t.status === 'lunas'
               ? `<button class="btn sm ghost" onclick="kirimKwitansi(${t.id})" title="Kirim bukti lunas (gambar) ke WA">Kwitansi WA</button>` : ''}
         </td>
       </tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada tagihan</td></tr>';
+    muatJadwalTagihan();
   } catch (e) { toast(e.message, true); }
 }
 
+/** Jalankan / buat tagihan itu otomatis — operator perlu tahu kapan. */
+async function muatJadwalTagihan() {
+  const el = document.getElementById('tJadwal');
+  if (!el) return;
+  try {
+    const j = await API.get('/api/tagihan/jadwal');
+    el.innerHTML = `Siklus otomatis <b>${esc(j.zona)}</b> (sekarang ${esc(j.sekarang)}): `
+      + `tagihan dibuat <b>tgl ${esc(j.buat.hari)}</b> (${esc(tgl(j.buat.berikutnya))}) · `
+      + `dikirim WA <b>tgl ${esc(j.kirim.hari)} jam ${esc(j.kirim.jam)}</b> (${esc(tgl(j.kirim.berikutnya))}) · `
+      + `isolir otomatis tiap hari mulai <b>${esc(j.isolir.mulai_jam)}</b> untuk yang lewat tempo.`
+      + ` Belum terkirim: <b>${esc(j.belum_terkirim)}</b> · lewat tempo belum lunas: <b>${esc(j.lewat_tempo)}</b>`
+      + ` (yang masih aktif dan akan diisolir: <b>${esc(j.akan_isolir)}</b>).`
+      + ' Pengingat H-3 dikirim satu kali per hari, dan WA pelanggan tanpa nomor tidak memblokir siklus.'
+      // v2.0: hari siklus bukan lagi satu angka per tenant — tampilkan per profil
+      + (((j.profil && j.profil.data) || []).length
+        ? `<br>Per profile tagihan: ` + j.profil.data
+            .filter(x => Number(x.jumlah_aktif))
+            .map(x => `<b>${esc(x.nama)}</b> (${esc(x.jumlah_aktif)} aktif): buat tgl ${esc(x.tanggal_buat)}, `
+              + `kirim tgl ${esc(x.tanggal_kirim)}, tempo/isolir tgl ${esc(x.tanggal_isolir)}`).join(' · ')
+            + (j.profil.tanpa_profil
+              ? ` · ${esc(j.profil.tanpa_profil)} pelanggan tanpa profil ikut jadwal di atas` : '')
+        : '');
+  } catch (e) { el.textContent = ''; }
+}
+
+async function kirimWaTagihan(id) {
+  try {
+    const r = await API.post(`/api/tagihan/${id}/kirim`, {});
+    toast(r.ok ? `Tagihan ${r.invoice} masuk antrean WA ke ${r.tujuan}` : `Tidak dikirim: ${r.alasan}`, !r.ok);
+  } catch (e) { toast(e.message, true); }
+  loadTagihan();
+}
+
+async function isolirTagihan(idPelanggan) {
+  if (!confirm('Isolir pelanggan ini sekarang? Bandwidth/secret di router dibereskan dan WA isolir dikirim.')) return;
+  await plgStatus(idPelanggan, 'isolir');
+}
+
+async function jalankanSiklus() {
+  if (!confirm('Jalankan siklus sesuai JADWAL PROFIL TAGIHAN hari ini?\n\n'
+    + 'Hanya golongan yang tanggal buat/kirimnya jatuh hari ini yang ditagih dan dikirim WA; '
+    + 'pengingat dan isolir hanya untuk tagihan yang memang sudah lewat tempo. '
+    + 'Tidak ada tagihan yang dibuat lebih awal.')) return;
+  try {
+    const r = await API.post('/api/tagihan/siklus', {});
+    const l = r.langkah || {};
+    const b = l.buat || {}, k = l.kirim || {}, p = l.peringatan || {}, i = l.isolir || {};
+    const ringkas = [
+      `${b.dibuat || 0} tagihan dibuat`,
+      `${k.dikirim || 0} dikirim WA`,
+      `${p.diperingat || 0} pengingat`,
+      `${i.isolir || 0} diisolir`
+    ].join(' · ');
+    const dilewati = [
+      b.bukan_hari ? `buat: ${b.bukan_hari} pelanggan bukan harinya` : '',
+      !b.jalan && b.alasan ? `buat: ${b.alasan}` : '',
+      !k.jalan && k.alasan ? `kirim: ${k.alasan}` : '',
+      !p.jalan && p.alasan ? `pengingat: ${p.alasan}` : '',
+      !i.jalan && i.alasan ? `isolir: ${i.alasan}` : ''
+    ].filter(Boolean);
+    toast(`Siklus ${r.tanggal || ''} — ${ringkas}`);
+    // langkah yang tidak jalan bukan error: memang bukan harinya, jadi
+    // alasannya ditampilkan sebagai info terpisah
+    if (dilewati.length) toast('Dilewati sesuai jadwal — ' + dilewati.join(' | '));
+    (i.router_gagal || []).slice(0, 3).forEach(x => toast(x, true));
+  } catch (e) { toast(e.message, true); }
+  loadTagihan();
+}
+
 async function buatTagihan() {
-  if (!confirm('Buat tagihan bulanan untuk semua pelanggan aktif periode berjalan?')) return;
+  if (!confirm('Buat tagihan SEMUA pelanggan aktif periode berjalan sekarang juga?\n\n'
+    + 'Tombol ini MENGABAIKAN tanggal buat pada profil tagihan (menagih semua golongan '
+    + 'sekaligus). Kalau hari ini bukan tanggal jatuh temponya, tagihan langsung berstatus '
+    + 'lewat tempo dan pengingat/isolir bisa ikut jalan. Pakai "Jalankan Siklus" untuk '
+    + 'menagih sesuai jadwal profil.')) return;
   try {
     const r = await API.post('/api/tagihan/buat', { force: true });
-    toast(r.skipped ? `Dilewati: ${r.reason}` : `Tagihan dibuat: ${r.dibuat || 0}`);
+    toast(r.skipped ? `Dilewati: ${r.reason}`
+      : `Tagihan dibuat: ${r.dibuat || 0}${r.dilewati ? ` · ${r.dilewati} sudah ada` : ''} · periode ${r.periode || ''}`);
     loadTagihan();
   } catch (e) { toast(e.message, true); }
 }
 
 async function kirimTagihanWA() {
+  if (!confirm('Kirim WA SEMUA tagihan yang masih berstatus "buat" sekarang?\n\n'
+    + 'Tombol ini mengabaikan tanggal kirim pada profil tagihan — semua tagihan mengantung '
+    + 'langsung masuk antrean WhatsApp pelanggan.')) return;
   try {
     const r = await API.post('/api/tagihan/kirim-wa', {});
-    toast(`Tagihan dikirim ke antrean WA: ${r.dikirim || 0}`);
+    const tanpa = (r.tanpa_nomor_wa || []).length;
+    toast(`${r.dikirim || 0} tagihan masuk antrean WA`
+      + (tanpa ? ` · ${tanpa} pelanggan tanpa nomor WA (status ditandai terkirim, tidak ada pesan)` : ''), !!tanpa);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -757,23 +913,32 @@ async function hapusRek(id) {
 }
 
 // ============================================================ PAKET
+/** Profil router yang dipakai sebuah paket, sesuai jenisnya. */
+function paketProfil(p) {
+  if (p.jenis === 'hotspot') return { nama: p.profile_hotspot || '', fallback: false };
+  const eksplisit = p.profile_pppoe || p.profile_hotspot || '';
+  return { nama: eksplisit || p.nama_paket || '', fallback: !eksplisit };
+}
+
 async function loadPaket() {
   try {
     const d = await API.get('/api/paket');
-    document.getElementById('tbPaket').innerHTML = (d.data || []).map(p => `
+    document.getElementById('tbPaket').innerHTML = (d.data || []).map(p => {
+      const pr = paketProfil(p);
+      const sel = pr.nama
+        ? `<div class="hint">${esc(pr.nama)}${pr.fallback ? ' · ikut nama paket' : ''}</div>`
+        : '<div class="hint"><span class="badge bad">tanpa profile — voucher tidak bisa dibuat</span></div>';
+      return `
       <tr><td><b>${esc(p.nama_paket)}</b></td>
         <td><span class="badge ${p.jenis === 'pppoe' ? 'info' : 'warn'}">${esc(p.jenis)}</span></td>
         <td class="t-num">${rupiah(p.harga)}</td>
         <td class="t-num">${rupiah(p.harga_agen)}</td>
         <td>${esc(p.kecepatan || '-')}</td>
-        <td>${p.masa_aktif} ${esc(p.satuan || 'hari')}
-          ${p.jenis === 'hotspot'
-            ? (p.profile_hotspot
-                ? `<div class="hint">${esc(p.profile_hotspot)}</div>`
-                : '<div class="hint"><span class="badge bad">tanpa profile — voucher tidak bisa dibuat</span></div>')
-            : `<div class="hint">${esc(p.status)}</div>`}</td>
+        <td>${p.masa_aktif} ${esc(p.satuan || 'hari')} ${sel}
+          ${p.status === 'nonaktif' ? '<div class="hint"><span class="badge mute">nonaktif</span></div>' : ''}</td>
         <td class="t-actions"><button class="btn sm secondary" onclick="formPaket(${esc(JSON.stringify(p))})">Ubah</button></td>
-      </tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada paket</td></tr>';
+      </tr>`;
+    }).join('') || '<tr><td colspan="7" class="empty">Belum ada paket</td></tr>';
   } catch (e) { toast(e.message, true); }
 }
 function formPaket(p) {
@@ -785,27 +950,38 @@ function formPaket(p) {
   document.getElementById('kSpeed').value = p ? (p.kecepatan || '') : '';
   document.getElementById('kAktif').value = p ? p.masa_aktif : 30;
   document.getElementById('kSatuan').value = p ? (p.satuan || 'hari') : 'hari';
-  document.getElementById('kProfil').value = p ? (p.profile_hotspot || '') : '';
+  document.getElementById('kProfil').value = p ? paketProfil(p).nama : '';
   document.getElementById('kStatus').value = p ? p.status : 'aktif';
-  muatProfilHotspot();
+  muatProfilRouter(document.getElementById('kJenis').value);
   modalOpen('mPaket');
 }
 
 /**
- * Daftar profile hotspot benar-benar ada di router (bukan ketik buta):
- * voucher dengan profile yang salah ditolak RouterOS saat login.
+ * Daftar profile yang benar-benar ada di router, per jenis layanan:
+ * hotspot → /ip/hotspot/user/profile (voucher dengan profile salah ditolak
+ * RouterOS saat login), pppoe → /ppp/profile (bandwidth secret pelanggan).
+ * Dulu keduanya memakai daftar hotspot — itulah sumber kekeliruan di form paket.
  */
-async function muatProfilHotspot() {
+async function muatProfilRouter(jenis) {
   const dl = document.getElementById('dlProfil');
   const hint = document.getElementById('profilHint');
+  const label = document.getElementById('kProfilLabel');
+  const input = document.getElementById('kProfil');
+  const pppoe = jenis === 'pppoe';
+  const jalur = pppoe ? '/ppp/profile' : '/ip/hotspot/user/profile';
   dl.innerHTML = ''; hint.textContent = '';
+  label.textContent = pppoe ? 'Profile PPPoE (MikroTik)' : 'Profile hotspot (MikroTik)';
+  input.placeholder = pppoe ? 'mis. 10-Mbps' : 'mis. hotspot-3jam';
+  document.getElementById('kProfilKet').textContent = pppoe
+    ? `Nama profile di ${jalur} — secret PPPoE pelanggan memakai profil ini; kosong berarti ikut nama paket`
+    : `Nama profile di ${jalur} — wajib agar voucher terkirim ke router`;
   try {
-    const d = await API.get('/api/hotspot/profil');
+    const d = await API.get('/api/profil-mikrotik?jenis=' + jenis);
     const nama = [...new Set((d.data || []).map(p => p.nama))];
     dl.innerHTML = nama.map(n => `<option value="${esc(n)}"></option>`).join('');
     hint.textContent = nama.length
       ? ` — di router: ${nama.slice(0, 8).join(', ')}${nama.length > 8 ? ' …' : ''}`
-      : ' — router tidak membalas daftar profile';
+      : ` — router tidak membalas daftar profile ${jalur}`;
   } catch (e) { hint.textContent = ` — gagal membaca router: ${e.message}`; }
 }
 
@@ -862,15 +1038,20 @@ async function simpanSinkron() {
 
 async function simpanPaket() {
   const id = document.getElementById('kPid').value;
+  const jenis = document.getElementById('kJenis').value;
+  const profil = document.getElementById('kProfil').value.trim();
   const body = {
     nama_paket: document.getElementById('kNama').value,
-    jenis: document.getElementById('kJenis').value,
+    jenis,
     harga: document.getElementById('kHarga').value,
     harga_agen: document.getElementById('kAgen').value,
     kecepatan: document.getElementById('kSpeed').value,
     masa_aktif: document.getElementById('kAktif').value,
     satuan: document.getElementById('kSatuan').value,
-    profile_hotspot: document.getElementById('kProfil').value,
+    // satu profil per jenis: yang tidak cocok dikirim kosong agar kolom lain
+    // dibersihkan (backend juga menolaknya)
+    profile_hotspot: jenis === 'hotspot' ? profil : '',
+    profile_pppoe: jenis === 'pppoe' ? profil : '',
     status: document.getElementById('kStatus').value
   };
   try {
@@ -1164,7 +1345,8 @@ async function loadPerangkat() {
         <td><span class="badge ${p.status === 'aktif' ? 'ok' : 'mute'}">${esc(p.status)}</span>
           ${p.tipe === 'router' ? `<div class="hint">${p.push_terpasang
             ? `push ${p.push_sesi || 0} sesi${p.push_lihat ? ' · ' + esc(String(p.push_lihat).slice(5, 16)) : ' · belum lapor'}`
-            : 'push belum dipasang'}</div>` : ''}</td>
+            : 'push belum dipasang'}</div>
+             <div class="hint">remote ONU : ${p.port_remote ? esc(p.port_remote) : '8080 (bawaan)'}</div>` : ''}</td>
         <td class="t-actions">
           <button class="btn sm ghost" onclick="testPerangkat(${p.id})">Tes</button>
           <button class="btn sm ghost" onclick="bukaWebfig(${esc(JSON.stringify(p))})" title="Buka halaman web perangkat (WebFig/GUI)">WebFig</button>
@@ -1184,6 +1366,7 @@ function formPerangkat(p) {
   document.getElementById('dBrand').value = p ? p.brand : 'mikrotik';
   document.getElementById('dAlamat').value = p ? p.alamat : '';
   document.getElementById('dPort').value = p && p.port ? p.port : '';
+  document.getElementById('dPortRemote').value = p && p.port_remote ? p.port_remote : '';
   document.getElementById('dUser').value = p ? (p.username || '') : '';
   document.getElementById('dPass').value = '';
   document.getElementById('dLokasi').value = p ? (p.lokasi || '') : '';
@@ -1200,7 +1383,8 @@ async function simpanPerangkat() {
     username: document.getElementById('dUser').value,
     password: document.getElementById('dPass').value,
     lokasi: document.getElementById('dLokasi').value,
-    use_https: document.getElementById('dHttps').value === '1'
+    use_https: document.getElementById('dHttps').value === '1',
+    port_remote: document.getElementById('dPortRemote').value || null
   };
   if (!body.password) delete body.password;
   try {
@@ -1541,6 +1725,13 @@ async function loadWa() {
       <tr><td>${esc(w.tujuan)}</td><td>${esc(w.jenis)}</td>
         <td>${esc(String(w.pesan).slice(0, 70))}</td><td>${esc(w.percobaan)}</td></tr>`).join('')
       || '<tr><td colspan="4" class="empty">Antrean kosong</td></tr>';
+    const g = document.getElementById('tbWaGagal');
+    if (g) g.innerHTML = (d.gagal || []).map(w => `
+      <tr><td>${esc(w.tujuan)}</td><td>${esc(w.jenis)}</td>
+        <td>${esc(String(w.pesan || '').slice(0, 50))}${w.media ? ' 📎' : ''}</td>
+        <td>${esc(w.percobaan)}</td>
+        <td class="hint">${esc(String(w.error || '').slice(0, 90))}</td></tr>`).join('')
+      || '<tr><td colspan="5" class="empty">Tidak ada pesan gagal</td></tr>';
     document.getElementById('tbWaLog').innerHTML = (d.data || []).slice(0, 40).map(w => `
       <tr><td>${esc(String(w.created_at).slice(0, 16))}</td><td>${esc(w.tujuan)}</td>
         <td><span class="badge ${w.status === 'terkirim' ? 'ok' : 'bad'}">${esc(w.status)}</span></td>
@@ -1561,6 +1752,13 @@ async function waProses() {
   try { const r = await API.post('/api/wa/proses', {}); toast(`terkirim:${r.sent} gagal:${r.failed}`); loadWa(); }
   catch (e) { toast(e.message, true); }
 }
+async function waUlangi() {
+  try {
+    const r = await API.post('/api/wa/ulangi', {});
+    toast(`Coba ulang: terkirim ${r.sent || 0}, masih gagal ${r.failed || 0}`, !!r.failed);
+    loadWa();
+  } catch (e) { toast(e.message, true); }
+}
 
 // ============================================================ SETTING
 async function loadSetting() {
@@ -1574,6 +1772,8 @@ async function loadSetting() {
     document.getElementById('sKirim').value = s.jadwal_kirim_hari || 2;
     document.getElementById('sLimit').value = s.jadwal_limit_hari || 10;
     document.getElementById('sJam').value = s.jam_kirim || '07:00';
+    document.getElementById('sJamPeri').value = s.jam_peringatan || '08:00';
+    document.getElementById('sJamIso').value = s.jam_isolir || '09:00';
     document.getElementById('sPpn').value = Number(s.ppn_persen || 0);
 
     const g = await API.get('/api/gateway');
@@ -1604,6 +1804,10 @@ async function simpanSetting() {
       jadwal_kirim_hari: document.getElementById('sKirim').value,
       jadwal_limit_hari: document.getElementById('sLimit').value,
       jam_kirim: document.getElementById('sJam').value,
+      // jam pengingat & isolir ikut dikirim — tanpa ini nilainya tidak pernah
+      // tersimpan walau field-nya terlihat bisa diisi di form
+      jam_peringatan: (document.getElementById('sJamPeri') || {}).value,
+      jam_isolir: (document.getElementById('sJamIso') || {}).value,
       ppn_persen: document.getElementById('sPpn').value
     });
     toast('Pengaturan tersimpan');
@@ -1766,6 +1970,120 @@ async function hapusDesa(id) {
   if (!confirm('Hapus desa ini?')) return;
   try { await API.del(`/api/master/desa/${id}`); toast('Dihapus'); loadDesa(); muatOpsi(); }
   catch (e) { toast(e.message, true); }
+}
+
+// ============================================================ PROFILE TAGIHAN (v2.0)
+// Pengganti "Hari Tagihan": satu profil = satu kebijakan penagihan untuk
+// sekumpulan warga. Menambah profil tidak mengubah pelanggan yang belum
+// ditautkan (mereka tetap ikut jadwal data server).
+let PT_ROWS = [];
+
+async function loadProfilTagihan() {
+  try {
+    const d = await API.get('/api/profil-tagihan');
+    PT_ROWS = d.data || [];
+    document.getElementById('tbProfilTagihan').innerHTML = PT_ROWS.map((x, i) => `
+      <tr><td><b>${esc(x.nama)}</b>${Number(x.kompensasi_desimal)
+          ? `<div class="hint">kompensasi ${esc(x.kompensasi_desimal)}%/hari</div>` : ''}</td>
+        <td class="t-num">tgl ${esc(x.tanggal_buat)}</td>
+        <td class="t-num">tgl ${esc(x.tanggal_kirim)}</td>
+        <td class="t-num"><b>tgl ${esc(x.tanggal_isolir)}</b></td>
+        <td>${esc(x.ppn_mode)}</td>
+        <td>${Number(x.kirim_peringatan) ? 'ya (H-3)' : 'tidak'}</td>
+        <td class="t-num">${Number(x.kompensasi_desimal || 0) ? esc(x.kompensasi_desimal) + '%' : '-'}</td>
+        <td class="t-num">${Number(x.jumlah_pelanggan || 0)}</td>
+        <td><span class="badge ${x.status === 'aktif' ? 'ok' : 'mute'}">${esc(x.status)}</span></td>
+        <td class="t-actions">
+          <button class="btn sm secondary" onclick="formProfilTagihan(${i})">Ubah</button>
+          <button class="btn sm danger" onclick="hapusProfilTagihan(${x.id})">Hapus</button>
+        </td></tr>`).join('')
+      || '<tr><td colspan="10" class="empty">Belum ada profil — pelanggan masih ikut jadwal data server</td></tr>';
+    muatJadwalProfil();
+    muatOpsi();
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Ringkasan "kapan apa terjadi" per profil — pertanyaan pertama pemilik ISP. */
+async function muatJadwalProfil() {
+  const el = document.getElementById('ptJadwal');
+  if (!el) return;
+  try {
+    const j = await API.get('/api/tagihan/jadwal');
+    const p = (j.profil && j.profil.data) || [];
+    el.innerHTML = `Zona <b>${esc(j.zona)}</b>, sekarang ${esc(j.sekarang)}. `
+      + (p.length
+        ? p.map(x => Number(x.jumlah_aktif) ? `<b>${esc(x.nama)}</b>: buat tgl ${esc(x.tanggal_buat)} (${esc(tgl(x.berikutnya_buat))}), `
+            + `kirim tgl ${esc(x.tanggal_kirim)} (${esc(tgl(x.berikutnya_kirim))}), tempo/isolir tgl ${esc(x.tanggal_isolir)} `
+            + `(${esc(tgl(x.berikutnya_isolir))}) — ${esc(x.jumlah_aktif)} pelanggan aktif` : '').join(' · ')
+        : 'belum ada profil aktif')
+      + ((j.profil && j.profil.tanpa_profil) ? ` · <b>${esc(j.profil.tanpa_profil)}</b> pelanggan tanpa profil ikut jadwal server` : '')
+      + `. Isolir dijalankan tiap hari mulai ${esc(j.isolir.mulai_jam)}, pengingat ${esc(j.isolir.peringatan_jam)}.`;
+  } catch (e) { el.textContent = ''; }
+}
+
+function formProfilTagihan(i) {
+  const x = typeof i === 'number' ? PT_ROWS[i] : null;
+  document.getElementById('mProfilTagihanTitle').textContent = x ? 'Ubah Profile Tagihan' : 'Tambah Profile Tagihan';
+  document.getElementById('ptId').value = x ? x.id : '';
+  document.getElementById('ptNama').value = x ? x.nama : '';
+  document.getElementById('ptBuat').value = x ? x.tanggal_buat : 1;
+  document.getElementById('ptKirim').value = x ? x.tanggal_kirim : 2;
+  document.getElementById('ptIsolir').value = x ? x.tanggal_isolir : 10;
+  document.getElementById('ptPpn').value = x ? x.ppn_mode : 'tanpa';
+  document.getElementById('ptPeringatan').value = x ? String(Number(x.kirim_peringatan)) : '1';
+  document.getElementById('ptKomp').value = x ? Number(x.kompensasi_desimal || 0) : 0;
+  document.getElementById('ptStatus').value = x ? x.status : 'aktif';
+  ptRingkas();
+  modalOpen('mProfilTagihan');
+}
+
+/** Pengingat singkat di dalam modal: tanggal isolir = jatuh tempo = Hari Tagihan. */
+function ptRingkas() {
+  const b = document.getElementById('ptBuat').value, k = document.getElementById('ptKirim').value,
+    i = document.getElementById('ptIsolir').value;
+  document.getElementById('ptInfo').innerHTML =
+    `Invoice golongan ini dibuat tiap <b>tanggal ${esc(b)}</b>, dikirim ke WhatsApp <b>tanggal ${esc(k)}</b>, `
+    + `dan diisolir bila belum lunas lewat <b>tanggal ${esc(i)}</b> (Hari Tagihan pelanggan ikut ${esc(i)}).`;
+}
+
+async function simpanProfilTagihan() {
+  const id = document.getElementById('ptId').value;
+  const body = {
+    nama: document.getElementById('ptNama').value,
+    tanggal_buat: document.getElementById('ptBuat').value,
+    tanggal_kirim: document.getElementById('ptKirim').value,
+    tanggal_isolir: document.getElementById('ptIsolir').value,
+    ppn_mode: document.getElementById('ptPpn').value,
+    kirim_peringatan: document.getElementById('ptPeringatan').value,
+    kompensasi_desimal: document.getElementById('ptKomp').value,
+    status: document.getElementById('ptStatus').value
+  };
+  try {
+    if (id) await API.put(`/api/profil-tagihan/${id}`, body);
+    else await API.post('/api/profil-tagihan', body);
+    modalClose('mProfilTagihan'); toast('Tersimpan'); loadProfilTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function hapusProfilTagihan(id) {
+  const x = PT_ROWS.find(r => Number(r.id) === Number(id)) || {};
+  if (!confirm(`Hapus profile tagihan "${x.nama || id}"?`)) return;
+  try { await API.del(`/api/profil-tagihan/${id}`); toast('Dihapus'); loadProfilTagihan(); }
+  catch (e) { toast(e.message, true); }
+}
+
+/** Pindahkan pelanggan terpilih ke satu profil (aksi massal di daftar Pelanggan). */
+async function plgBulkProfilTerapkan() {
+  const ids = plgTerpilih();
+  if (!ids.length) return toast('Belum ada pelanggan dipilih', true);
+  const sel = document.getElementById('plgBulkProfil');
+  if (!sel.value) return toast('Pilih profile tagihan tujuannya lebih dulu', true);
+  try {
+    const r = await API.post('/api/profil-tagihan/terapkan', { id_profil_tagihan: sel.value, ids });
+    toast(`${r.ditautkan} pelanggan -> profil ${r.profil} (Hari Tagihan ikut tanggal isolir profil)`);
+    plgBulkBersihkan();
+    loadPelanggan();
+  } catch (e) { toast(e.message, true); }
 }
 
 // ============================================================ NOC — PING TEST
@@ -1997,7 +2315,55 @@ async function simpanTiket() {
 // ============================================================ REMOTE ONU
 // Auto-generate/update rule dst-nat MikroTik → web ONU pelanggan
 // (port_remote di Setting MikroTik), dengan kunci 180 detik antar teknisi.
+//
+// Tab baru wajib dibuka dari gestur klik, yani window.open dipanggil
+// SINKRON sebelum await pertama. Sesudah await, aktivasi pengguna dianggap
+// lewat sehingga Chrome/Android menolak popup dan tab diam-diam hilang.
+// Tab sementara itu lalu diarahkan ke link ONU; kalau browser tetap
+// memblokir, modal berisi tombol "Buka" menjadi jalan pintas.
+function tabSementara() {
+  const w = window.open('', '_blank');
+  if (!w) return null;
+  try {
+    w.document.write('<title>Remote ONU…</title>'
+      + '<body style="font:14px/1.6 system-ui,sans-serif;padding:28px;color:#333">'
+      + 'Mengubah rule NAT MikroTik, lalu membuka web ONU pelanggan…'
+      + '</body>');
+    w.document.close();
+  } catch (_) { /* tab kosong juga tetap bisa diarahkan */ }
+  return w;
+}
+
+/** Pindahkan tab sementara ke link ONU. false = popup diblokir / tab mati. */
+function arahkanTab(w, link) {
+  if (!w) return false;
+  try {
+    if (w.closed) return false;
+    w.location.href = link;
+    w.focus();
+    return true;
+  } catch (_) {
+    tutupTab(w);
+    return false;
+  }
+}
+
+function tutupTab(w) {
+  try { if (w && !w.closed) w.close(); } catch (_) {}
+}
+
+/** Tombol "Buka" di modal — cadangan bila tab baru diblokir browser. */
+function tautanRemoteOnu(link) {
+  const a = document.getElementById('roBuka');
+  a.href = link;
+  a.textContent = `🌐 Buka ${link}`;
+  a.hidden = false;
+  a.style.display = '';        // versi lama memakai style="display:none" inline
+  return a;
+}
+
 async function remoteOnu(id) {
+  const w = tabSementara();
   toast('Menyiapkan remote ONU…');
   try {
     const r = await API.post(`/api/pelanggan/${id}/remote-onu`, {});
@@ -2010,14 +2376,16 @@ async function remoteOnu(id) {
         <div><div class="hint">NAT rule</div><b>${r.nat === 'update' ? 'to-addresses diupdate' : 'rule baru dibuat'}</b></div>
         <div><div class="hint">IP dari</div><b>${esc(r.via)}</b></div>
       </div>`;
-    const a = document.getElementById('roBuka');
-    a.href = r.link; a.textContent = `🌐 Buka ${r.link}`;
+    const a = tautanRemoteOnu(r.link);
+    if (!arahkanTab(w, r.link)) toast('Popup diblokir browser — tekan tombol Buka di jendela ini.', true);
     modalOpen('mRemoteOnu');
-  } catch (e) { toast(e.message, true); }
+    a.focus();
+  } catch (e) { tutupTab(w); toast(e.message, true); }
 }
 
 /** Versi tab Unmanage: IP sudah dikenal dari sesi PPPoE, tidak ada baris pelanggan. */
 async function remoteOnuIp(ip, akun) {
+  const w = tabSementara();
   toast('Menyiapkan remote ONU…');
   try {
     const r = await API.post('/api/remote-onu', { ip, akun });
@@ -2028,10 +2396,11 @@ async function remoteOnuIp(ip, akun) {
         <div><div class="hint">Router · port remote</div><b>${esc(r.router)} · ${r.port_remote}</b></div>
         <div><div class="hint">NAT rule</div><b>${r.nat === 'update' ? 'to-addresses diupdate' : 'rule baru dibuat'}</b></div>
       </div>`;
-    const a = document.getElementById('roBuka');
-    a.href = r.link; a.textContent = `🌐 Buka ${r.link}`;
+    const a = tautanRemoteOnu(r.link);
+    if (!arahkanTab(w, r.link)) toast('Popup diblokir browser — tekan tombol Buka di jendela ini.', true);
     modalOpen('mRemoteOnu');
-  } catch (e) { toast(e.message, true); }
+    a.focus();
+  } catch (e) { tutupTab(w); toast(e.message, true); }
 }
 
 // cache pelanggan sederhana untuk dropdown tiket

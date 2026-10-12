@@ -3,6 +3,7 @@
 // WhatsApp gateway — antrean, pengiriman, dan pairing (WHAPI-style:
 //   GET  {wa_gateway_url}/getState|getQR|serviceStart?apiKey=...
 //   POST {wa_gateway_url}/sendMessage  apiKey, phone, message)
+//   POST {wa_gateway_url}/sendMediaFromUrl  apiKey, phone, url_file, caption)
 // Template memakai placeholder: #usr #ppp #add #lyn #tot #ket
 // #lmt #jum #ppn #unk #hly #jly #lnk #inv #prd #srv #jam #judul
 // ============================================================
@@ -10,6 +11,9 @@ const db = require('../db');
 const cfgUtil = require('./configData');
 const crypto = require('../util/crypto');
 const http = require('../util/http');
+
+/** Batas percobaan ulang satu pesan yang pernah gagal (termasuk percobaan pertama). */
+const MAX_PERCOBAAN = 4;
 
 function normalizePhone(p) {
   let s = String(p || '').replace(/[^0-9]/g, '');
@@ -98,8 +102,13 @@ async function kirimSatu(item, server) {
   const key = crypto.decrypt(server.wa_gateway_key) || '';
   const media = item.media ? String(item.media) : '';
   const metode = media ? 'sendMediaFromUrl' : 'sendMessage';
+  // Gateway WHAPI membaca berkas dari body 'url_file' — kirim 'url' saja
+  // ditolak dengan "Invalid value: url_file". Nilai 'url' tetap disertakan
+  // supaya build WHAPI lain yang memakai nama itu tetap jalan (field asing
+  // diabaikan server).
   const body = media
-    ? { apiKey: key, phone: item.tujuan, url: media, as_document: 0, caption: item.pesan }
+    ? { apiKey: key, phone: item.tujuan, url_file: media, url: media,
+        as_document: 0, caption: item.pesan }
     : { apiKey: key, phone: item.tujuan, message: item.pesan };
   const res = await http.post(`${url}/${metode}`, new URLSearchParams(body).toString(), {
     timeout: 20000,
@@ -110,14 +119,20 @@ async function kirimSatu(item, server) {
 }
 
 /**
- * Proses antrean: kirim semua pesan pending (maks `limit`).
- * Dipanggil cron tiap menit.
+ * Proses antrean: kirim pesan ber-status `status` (maks `limit`).
+ * 'pending' → langkah biasa tiap menit; 'gagal' → percobaan ulang otomatis,
+ * dibatasi MAX_PERCOBAAN supaya pesan yang memang tidak bisa terkirim (nomor
+ * mati, gateway down berkepanjangan) tidak diulang selamanya.
  */
-async function prosesAntrean(limit = 30, idDataServer = null) {
-  const filter = idDataServer ? ' AND id_data_server = ?' : '';
-  const params = idDataServer ? ['pending', Number(idDataServer), Number(limit)] : ['pending', Number(limit)];
+async function prosesAntrean(limit = 30, idDataServer = null, status = 'pending') {
+  const where = [`status = ?`];
+  const params = [status];
+  if (status !== 'pending') where.push('percobaan < ?');
+  if (status !== 'pending') params.push(MAX_PERCOBAAN);
+  if (idDataServer) { where.push('id_data_server = ?'); params.push(Number(idDataServer)); }
+  params.push(Number(limit));
   const rows = await db.q(
-    `SELECT * FROM wa_queue WHERE status = ?${filter} ORDER BY id ASC LIMIT ?`, params
+    `SELECT * FROM wa_queue WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`, params
   );
   if (!rows.length) return { sent: 0, failed: 0 };
 

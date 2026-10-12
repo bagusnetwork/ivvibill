@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS data_server (
   jadwal_kirim_hari TINYINT NOT NULL DEFAULT 2,     -- tgl kirim tagihan WA
   jadwal_limit_hari TINYINT NOT NULL DEFAULT 10,    -- tgl jatuh tempo
   jam_kirim         VARCHAR(5)  NOT NULL DEFAULT '07:00',
+  jam_peringatan    VARCHAR(5)  NOT NULL DEFAULT '08:00',  -- mulai jam pengingat H-3
+  jam_isolir        VARCHAR(5)  NOT NULL DEFAULT '09:00',  -- mulai jam isolir otomatis
   ppn_persen        DECIMAL(5,2) NOT NULL DEFAULT 0,
   -- akun master ISP ini (model gratisinaja: login master ada di baris tenant)
   username          VARCHAR(50)  DEFAULT NULL,
@@ -125,6 +127,7 @@ CREATE TABLE IF NOT EXISTS paket (
   satuan        ENUM('hari','jam') NOT NULL DEFAULT 'hari',
   harga_agen    DECIMAL(15,2) NOT NULL DEFAULT 0,  -- harga jual agen (voucher)
   profile_hotspot VARCHAR(64) DEFAULT NULL,        -- nama /ip/hotspot/user/profile di router
+  profile_pppoe VARCHAR(64) DEFAULT NULL,          -- nama /ppp/profile di router (paket pppoe)
   deskripsi     VARCHAR(255) DEFAULT NULL,
   status        ENUM('aktif','nonaktif') NOT NULL DEFAULT 'aktif',
   created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -145,19 +148,22 @@ CREATE TABLE IF NOT EXISTS pelanggan (
   email          VARCHAR(100) DEFAULT NULL,
   tipe           ENUM('pppoe','hotspot') NOT NULL DEFAULT 'pppoe',
   id_paket       INT DEFAULT NULL,
+  id_profil_tagihan INT DEFAULT NULL,              -- profil_tagihan: jadwal buat/kirim/isolir + PPN; NULL = ikut jadwal data_server
   id_agen        INT DEFAULT NULL,               -- pemilik (hotspot via agen)
   username_pppoe VARCHAR(50) DEFAULT NULL,
   password_pppoe VARCHAR(50) DEFAULT NULL,
   ip_address     VARCHAR(40) DEFAULT NULL,
   mac_address    VARCHAR(40) DEFAULT NULL,
   tanggal_masuk  DATE DEFAULT NULL,
-  hari_tagihan   TINYINT NOT NULL DEFAULT 1,      -- tanggal jatuh tempo bulanan
+  hari_tagihan   TINYINT NOT NULL DEFAULT 1,      -- TURUNAN dari profil_tagihan.tanggal_isolir; tetap dibaca bila profil kosong
   id_master_topologi INT DEFAULT NULL,            -- ODP / topologi (master_topologi)
   id_master_desa     INT DEFAULT NULL,            -- desa (master_desa)
   port_odp           VARCHAR(20) DEFAULT NULL,    -- port ODP yang dipakai pelanggan
   latitude           VARCHAR(30) DEFAULT NULL,    -- koordinat lokasi pelanggan
   longitude          VARCHAR(30) DEFAULT NULL,
   status         ENUM('baru','aktif','isolir','nonaktif') NOT NULL DEFAULT 'baru',
+  profile_isolir VARCHAR(64) DEFAULT NULL,         -- /ppp/profile saat isolir; kosong = secret dimatikan
+  profil_sebelum_isolir VARCHAR(64) DEFAULT NULL,  -- profil asal, diisi otomatis saat isolir lewat profil
   catatan        TEXT,
   created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -187,6 +193,7 @@ CREATE TABLE IF NOT EXISTS tagihan (
   tanggal_buat  DATE NOT NULL,
   jatuh_tempo   DATE NOT NULL,
   status        ENUM('buat','terkirim','menunggu','lunas','jatuh_tempo','batal') NOT NULL DEFAULT 'buat',
+  ingatkan_terakhir DATE DEFAULT NULL,        -- penanda pengingat H-3 (maks 1x/hari per tagihan)
   metode_bayar  VARCHAR(30) DEFAULT NULL,
   paid_at       DATETIME DEFAULT NULL,
   img_invoice   VARCHAR(150) DEFAULT NULL,   -- berkas kwitansi PNG (dikirim ke WA)
@@ -648,6 +655,32 @@ CREATE TABLE IF NOT EXISTS kas (
   created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_kas_server (id_data_server, tipe, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- v2.0: profil tagihan — satu paket kebijakan penagihan yang bisa dipakai
+-- banyak pelanggan. Menggantikan "satu angka hari_tagihan per pelanggan":
+-- tanggal_buat = hari tagihan dibuat, tanggal_kirim = hari WA tagihan dikirim,
+-- tanggal_isolir = hari jatuh tempo (sekaligus nilai turunan hari_tagihan),
+-- ppn_mode = cara PPN data_server dihitung, kirim_peringatan = H-3 on/off.
+-- kompensasi_desimal baru disimpan, belum memotong tagihan.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS profil_tagihan (
+  id             INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL DEFAULT 1,
+  nama           VARCHAR(60) NOT NULL,             -- contoh: IVV-10, IVV-25, Instansi
+  tanggal_buat   TINYINT NOT NULL DEFAULT 1,       -- 1..28
+  tanggal_kirim  TINYINT NOT NULL DEFAULT 2,       -- 1..28
+  tanggal_isolir TINYINT NOT NULL DEFAULT 10,      -- 1..28 = jatuh tempo
+  kompensasi_desimal DECIMAL(6,3) NOT NULL DEFAULT 0.000,  -- % potongan/hari (belum dipakai)
+  ppn_mode       ENUM('tanpa','ditambah','termasuk') NOT NULL DEFAULT 'tanpa',
+  kirim_peringatan TINYINT(1) NOT NULL DEFAULT 1,
+  status         ENUM('aktif','nonaktif') NOT NULL DEFAULT 'aktif',
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_profil_tagihan (id_data_server, nama),
+  KEY idx_profil_ds (id_data_server)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;

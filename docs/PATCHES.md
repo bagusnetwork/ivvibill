@@ -4,6 +4,508 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-11 — v2.0.1 — tombol "Jalankan Siklus" berhenti menagih paksa: gerbang harinya kini dipinjam dari scheduler
+
+**Masalah**
+
+`POST /api/tagihan/siklus` masih meneruskan `force=true` ke `buatTagihanBulanan()` warisan
+v1.9.0. Setelah v2.0.0, artinya sekali klik membuat tagihan untuk **seluruh** pelanggan aktif
+tanpa memandang `tanggal_buat` profilnya, dengan `tanggal_buat` = tanggal hari ini dan
+`jatuh_tempo` = tanggal_isolir profil. Ditekan tanggal 11 oleh tenant yang temponya tanggal 10,
+hasilnya tagihan yang **sudah lewat tempo saat dilahirkan** — dan karena siklus berjalan tiap
+menit, dua langkah berikutnya langsung ikut: kirim WA massal lalu isolir.
+
+Itu bukan skenario hipotetis. Pada 2026-10-11 pukul **18:03 WIB** tombol ini ditekan di produksi
+(sebelum perbaikan ini terpasang): 171 tagihan periode 2026-10 dibuat dengan jatuh tempo
+2026-10-10, 100 WA `tagihan` terkirim pada 18:03, lalu `Isolir [2 IVVINET-CBD]` mencatat
+50 + 50 + 21 pelanggan dengan **107 sesi PPPoE benar-benar diputus** (44+45+18) pada 18:03–18:05,
+disusul 171 WA `isolir`. Pukul 19:02–19:04 seluruhnya ditandai `bayar_manual` (171 baris
+`pembayaran`) dan 176 WA `lunas`/kwitansi terkirim. Efek yang masih tertinggal di pembukuan:
+"pemasukan bulan ini" kini menghitung **Rp 26.215.000** (171 baris `pembayaran` `metode='manual'`) yang bukan
+uang masuk.
+
+**Diubah**
+
+*`src/services/billing.js`* — fungsi baru `jalankanSiklusTenant(srv, w, limit)`: satu putaran
+siklus untuk satu tenant dengan keempat gerbangnya (buat / kirim WA / pengingat H-3 / isolir),
+mengembalikan `{tanggal, hari, jam, periode, langkah:{buat,kirim,peringatan,isolir}}` di mana tiap
+langkah berisi hasil aslinya plus `jalan: true|false` dan `alasan` bila tidak jalan
+("tidak ada profil tagihan dengan tanggal buat 11 (jadwal server: 1)", "belum jam kirim 07:00",
+dst). `normJam`/`lewatJam` ikut diimpor supaya ambang jamnya identik dengan scheduler.
+
+*`src/scheduler.js`* — `tugasBilling()` tinggal memanggil fungsi itu per tenant lalu menulis log
+dari hasilnya (per_profil, jumlah sesi dibuang, `router_gagal`, `tanpa_nomor_wa` tetap dicetak).
+Tidak ada lagi dua jalur berbeda: tombol panel dan cron internal tidak bisa saling menjauh.
+
+*`src/routes/tagihan.js`* — `/tagihan/siklus` memakai `jalankanSiklusTenant()`; `force` hilang
+dari jalur normal. `paksa: true` tetap diterima **hanya lewat API** (pergi ke perilaku lama) untuk
+kebutuhan sah seperti menagih semua golongan setelah server mati berhari-hari — panel tidak pernah
+mengirimkannya. `audit_log` kini mencatat `{paksa, dibuat, dikirim, diperingat, isolir}`.
+
+*Panel* — `jalankanSiklus()` membaca bentuk `r.langkah` yang baru (bug lama: ia membaca
+`r.kirim` yang tidak pernah ada sehingga angka "dikirim WA" selalu 0), konfirmasi tombol menjelaskan
+bahwa yang jalan hanya golongan yang harinya jatuh hari ini, dan toast kedua menampilkan alasan tiap
+langkah yang dilewati. Dua tombol berisiko di sebelahnya ikut diberi pagar: konfirmasi `Buat Tagihan`
+sekarang menyebut tegas bahwa ia **mengabaikan tanggal profil**, dan `Kirim WA semua` yang sebelumnya
+tanpa konfirmasi (sekali klik langsung mengantrekan WA ke semua tagihan `buat`) kini bertanya dulu.
+
+**Verifikasi (2026-10-11, produksi, dipasang 23:03 WIB)**
+
+- **regresi utama terbalikkan:** tombol ditekan pada tanggal 11 di tenant yang 171 pelanggannya
+  memakai profil `IVV-10` (buat tgl 1) → `buat.jalan:false`, `alasan:"tidak ada profil tagihan
+  dengan tanggal buat 11 (jadwal server: 1)"`, **0 tagihan baru**. Perilaku lama membuat 171.
+- **bukan sekadar dimatikan:** profil uji `UJI-SIKLUS-11` (buat 11 / kirim 12 / isolir 12) +
+  satu pelanggan uji → tombol yang sama membuat **tepat 1** tagihan
+  (`IVV-202610-11149`, `tanggal_buat 2026-10-11`, `jatuh_tempo 2026-10-12` dari profil, status
+  `buat`) dengan laporan `bukan_hari: 171` dan `per_profil: {"UJI-SIKLUS-11":1}`; langkah kirim
+  menjawab `tidak ada profil tagihan dengan tanggal kirim 11`.
+- **idempoten:** ditekan lagi → `dibuat: 0, dilewati: 1`.
+- **jalur scheduler tetap hidup setelah refactor:** pelanggan uji kedua (`UJI-SIKLUS2-11`) dibuat
+  tanpa menekan tombol sama sekali; tick berikutnya menulis
+  `[siklus 2026-10-11 23:05 Asia/Jakarta] Tagihan dibuat [2 IVVINET-CBD]: 1 {"UJI-SIKLUS2-11":1}`.
+  Tidak ada pesan WA keluar dari keduanya (nomor kosong, `kirim_peringatan: 0`, tempo besok).
+- **pulih:** 2 tagihan uji dihapus, pelanggan uji #174/#175 dan profil #5/#6 dihapus lewat API →
+  `pelanggan=171`, `sisa_uji=0`, `profil_tagihan = 1:IVV-10, 2:IVV-10`, `hari_tagihan=10`.
+  Yang tersisa hanyalah 171 tagihan `lunas` hasil kejadian 18:03 (bukan dari pengujian ini).
+- `node --check` lolos untuk keempat berkas, `systemctl restart ivvibill` → `active`, log bersih.
+
+**Catatan**
+
+- Snapshot kelima berkas versi ini ada di `/root/bak-v201/` (dibuat **setelah** pasang — backup
+  pra-deploy versi ini terlewat karena direktori subfolder belum dibuat; sumber acuan tetap
+  mirror lokal `C:\Users\new\ivvi\`).
+- Butuh keputusan user: 171 tagihan + baris `pembayaran` hasil insiden 18:03 membuat laporan
+  pemasukan bulan ini tidak mencerminkan uang sungguhan. Pilihan: hapus baris itu (kembali ke
+  kondisi sebelum 18:03) atau biarkan sebagai jejak dan koreksi manual. Tidak ada yang diubah
+  sepihak.
+
+
+## 2026-10-11 — v2.0.0 — "Hari Tagihan" per pelanggan diganti Profile Tagihan (7 kebijakan, tempo jadi nilai turunan)
+
+**Masalah**
+
+Penjadwalan tagihan dipegang oleh dua hal yang berbeda tempat: satu angka per pelanggan
+(`pelanggan.hari_tagihan` = tanggal isolir/jatuh tempo) dan empat angka per data server
+(`jadwal_buat_hari`, `jadwal_kirim_hari`, `jam_kirim`, `jadwal_limit_hari`). Akibatnya satu ISP
+tidak bisa punya beberapa golongan: warga yang digaji tanggal 10 dan yang digaji tanggal 25
+dipaksa memakai tanggal buat, tanggal kirim WA, mode PPN dan boleh/tidaknya pengingat H-3 yang
+sama. Menggeser satu pelanggan berarti menggeser seluruh tenant.
+
+**Diubah**
+
+*Skema* — `sql/schema.sql` + `scripts/migrate-v19.js` (idempoten, sudah dijalankan di produksi):
+tabel baru `profil_tagihan (id, id_data_server, nama, tanggal_buat, tanggal_kirim,
+tanggal_isolir, kompensasi_desimal, ppn_mode ENUM('tanpa','ditambah','termasuk'),
+kirim_peringatan, status)` dengan `UNIQUE (id_data_server, nama)`, dan kolom
+`pelanggan.id_profil_tagihan`. `hari_tagihan` TETAP ADA tetapi menjadi **turunan**: setiap kali
+pelanggan ditautkan/dipindah/diubah profilnya, `hari_tagihan` ditulis ulang sama dengan
+`tanggal_isolir` profil itu — sehingga invoice, ekspor dan berkas impor lama tidak berubah makna.
+Migrasi membuat profil default `PREFIX-<hari>` **dari jadwal tenant yang ada**, lalu menautkan
+pelanggan per kelompok `hari_tagihan` yang sudah mereka pegang, jadi tidak ada satu pun tempo
+pelanggan yang bergeser saat naik versi.
+
+*`src/services/billing.js`* — kebijakan satu pelanggan dibaca dari satu tempat:
+`kebijakan(p, srv)` → `{profil, buat, kirim, isolir, ppnMode, peringatan, kompensasi}`,
+`hitungPpn(jumlah, persen, mode)`, `KOLOM_PROFIL` + `GABUNG_PROFIL`
+(`LEFT JOIN profil_tagihan pt … AND pt.status='aktif' AND pt.id_data_server = p.id_data_server`,
+lalu `COALESCE(pt.<kolom>, jadwal tenant)` di tiap pemakaian). `buatTagihanBulanan()` tidak lagi
+berhenti kalau "hari tenant" bukan hari ini — cek harinya pindah ke per pelanggan
+(`if (!force && hariIni !== k.buat) bukanHari++`), dan hasilnya melaporkan `per_profil`.
+`adaProfilPadaHari(ds, kolom, hari, hariTenant)` menjawab "adakah pelanggan yang profilnya jatuh
+hari ini" untuk gerbang scheduler; `kirimTagihanWajib`, `peringatanTagihan` dan `buatTagihanSatuan`
+mengikuti profil yang sama.
+
+*`src/scheduler.js`* — tiga gerbang hari (`tanggal_buat`, `tanggal_kirim`, isolir) memakai
+`adaProfilPadaHari()` dengan fallback jadwal tenant, sehingga tenant tanpa profil berperilaku
+persis seperti sebelumnya.
+
+*`src/services/profilTagihan.js` (baru)* — CRUD + `tautkan()`. Hapus profil **ditolak** selama
+masih dipakai ("Profil masih dipakai N pelanggan — pindahkan mereka ke profil lain dulu",
+`e.status = 400` supaya tidak dicatat sebagai crash server). `ubah()` merambat ke `hari_tagihan`
+seluruh pelanggan di profil itu.
+
+*`src/routes/tagihan.js`* — `GET/POST/PUT/DELETE /api/profil-tagihan` +
+`POST /api/profil-tagihan/terapkan` (tautkan massal ≤1000 id), masing-masing `requirePJ()` +
+`requireMenu('profil_tagihan', …)` dan tercatat di `audit_log`. `GET /api/tagihan/jadwal`
+menambah blok `profil: {data:[…jumlah_aktif, berikutnya_buat/kirim/isolir], tanpa_profil}`.
+
+*`src/routes/pelanggan.js`* — `kebijakanTagihanPelanggan()` dipakai POST dan PUT; daftar dan
+detail pelanggan mengirim `profil_tagihan` + `profil_tanggal_isolir`; ekspor menambah kolom
+**Profile Tagihan** sebelum Hari Tagihan; template impor dan `HEADER_IMPOR` mengenal nama kolom
+yang sama — nilai di file hanya dipakai bila kolom profil kosong, dan nama profil yang tidak ada
+menjadi error per baris (`Profile Tagihan "x" tidak ditemukan (atau nonaktif) di data server ini`)
+tanpa menggagalkan seluruh file.
+
+*`src/routes/tenant.js`* — `profil_tagihan` didaftarkan sebagai menu sendiri (grant terpisah dari
+Tagihan), jadi grup akses lama otomatis tidak melihatnya.
+
+*Panel* — menu **🗓️ Profile Tagihan** (tabel 10 kolom + baris "Zona Asia/Jakarta, sekarang …"
+yang merangkum jadwal berikutnya tiap profil), form 7 field sesuai contoh aplikasi lain dengan
+ringkasan langsung di bawahnya, dropdown profil di form Pelanggan (berikut keterangan
+"Hari Tagihan otomatis menjadi N"), kolom profil di daftar pelanggan, dan aksi massal
+"Terapkan profil".
+
+**Verifikasi (2026-10-11, produksi `bill.ivvinet.my.id`, tenant IVVINET-CBD)**
+
+- migrasi nyata: `migrate-v19.js --dry-run` lalu asli → "Struktur OK — 2 perubahan diterapkan …
+  tenant 2 IVVINET-CBD: profil default \"IVV-10\" dibuat (id 2, PPN tanpa) … 171 pelanggan
+  (hari_tagihan=10) ditautkan, nilai tetap"; sebelum ALTER: `mysqldump` penuh ke
+  `/root/pre-v20.sql` (1.078.617 byte) + cadangan berkas ke `/root/bak-v20/`
+- **siklus otomatis lewat tick scheduler sungguhan** (bukan fungsi dipanggil manual): pelanggan
+  uji `UJI PROFIL V20` ditautkan ke profil `UJI-V20-11` (buat 11 / kirim 11 / isolir 13) →
+  log `[ivvibill …] [siklus 2026-10-11 11:23 Asia/Jakarta] Tagihan dibuat [2 IVVINET-CBD]: 1
+  {"UJI-V20-11":1}` dan pada tick yang sama `Tagihan dikirim WA [2 IVVINET-CBD]: 1`. Barisnya:
+  `IVV-202610-94623`, periode `2026-10`, jumlah 150000 + kode unik 761, `ppn 0.00` (mode tanpa),
+  `tanggal_buat 2026-10-11` (= tanggal_buat profil, bukan tanggal server), `jatuh_tempo 2026-10-12`
+  (= tanggal_isolir profil saat itu), status `terkirim`. **171 pelanggan nyata tetap 0 tagihan** —
+  gerbang harinya per profil, bukan per tenant lagi
+- nomor WhatsApp pelanggan uji kosong → tidak ada pesan baru di `wa_queue` (tetap 20 baris
+  `koneksi_off` lama), tagihan tidak menggantung di status `buat`
+- validasi API: `tanggal_buat: 30` → `{"error":"Maksimal 28"} 400`; nama duplikat →
+  `Profil "IVV-10" sudah ada di data server ini 400`; hapus profil terpakai →
+  `Profil masih dipakai 1 pelanggan … 400` (sebelum perbaikan `e.status` dulu 500)
+- nilai turunan: `PUT /api/profil-tagihan/3` mengubah `tanggal_isolir 12 → 13` langsung membuat
+  `pelanggan.hari_tagihan = 13`; `POST /terapkan` bolak-balik profil 2↔3 menulis
+  `hari_tagihan` 10↔13 sesuai profil tujuan
+- ekspor xlsx nyata (20.667 byte, dibaca ulang dengan SheetJS): judul
+  `…|Status|Tanggal Masuk|Profile Tagihan|Hari Tagihan`, isi baris `UJI-V20-11` / `13`
+- impor xlsx nyata 2 baris: `{"total":2,"sukses":1,"gagal":1,"detail":[{"baris":3,
+  "error":"Profile Tagihan \"TIDAK-ADA\" tidak ditemukan (atau nonaktif) di data server ini"}]}`;
+  baris yang lolos mendapat `id_profil_tagihan=3` dan `hari_tagihan=13` **mengalahkan** angka 99
+  yang ditulis di file
+- `GET /api/tagihan/jadwal` → `profil.data` per profil (`IVV-10` jumlah_aktif 171,
+  `UJI-V20-11` jumlah_aktif 1, tanggal berikutnya 2026-11-01/02/10 dan 2026-11-11/11/10-13) +
+  `tanpa_profil: 0`. Perbaikan `jumlah_aktif` diperlukan: subquery-nya dulu membandingkan
+  `p.id_data_server = pt.id` (kebetulan benar untuk profil id 1 dan 2, salah untuk id ≥ 3)
+- panel lewat browser: menu Profile Tagihan tampil, tabel + baris ringkasan jadwal benar, form
+  "Ubah Profile Tagihan" terisi 7 field + keterangan turunan, dropdown profil di form Pelanggan
+  terpilih benar (`UJI-V20-11 · tempo tgl 13`) dengan hint "buat tgl 11 · kirim WA tgl 11 · jatuh
+  tempo & isolir tgl 13 · PPN termasuk · TANPA pengingat H-3 — Hari Tagihan otomatis menjadi 13",
+  baris daftar pelanggan menampilkan `🗓️ UJI-V20-11 · tempo tgl 13`, dan kotak "Terapkan profil"
+  ada di bilah aksi massal
+- **pulih total:** tagihan uji dihapus, pelanggan uji #172 dan #173 dihapus lewat API, profil
+  `UJI-V20-11` dihapus lewat API → `pelanggan(id_data_server=2)=171`, `tagihan=0`,
+  `profil_tagihan = 1:ds1:IVV-10, 2:ds2:IVV-10`, seluruh 171 bertaut profil 2 dengan
+  `hari_tagihan=10`, `wa_queue=20` (tidak berubah); dashboard panel kembali 171 aktif / belum
+  lunas Rp 0
+
+**Catatan**
+
+- `kompensasi_desimal` disimpan, divalidasi, dan ditampilkan (mis. `2.500%/hari`) tetapi **belum
+  memotong total tagihan** — sesuai keputusan "disimpan dulu". Pemotongan perlu keputusan terpisah
+  (dasar hitung: per hari atau per bulan, dan apakah memotong PPN).
+- Tombol **⟳ Jalankan Siklus** memakai `force=true`: ia membuat tagihan untuk SEMUA pelanggan
+  tanpa memandang tanggal_buat profil. Setelah v2.0 ini makin terasa — kalau ditekan tanggal 11,
+  seluruh tenant langsung punya tagihan yang jatuh temponya bisa sudah lewat. Sebaiknya hanya
+  dipakai saat menagih manual.
+- `POST /pelanggan` memang selalu menyimpan status `baru` (dropdown Status di form tambah tidak
+  dipakai saat membuat — perilaku lama, tidak diubah di versi ini), sehingga pelanggan baru baru
+  ikut siklus setelah tombol "Aktifkan".
+- Di luar versi ini, jam 10:43–10:44 WIB hari yang sama, detektor issue mengirim 20 pesan
+  `koneksi_off` ke pelanggan nyata (perilaku v1.9.1 yang sudah berjalan sebelumnya, bukan efek
+  v2.0) — dicatat agar tidak dikira tagihan uji.
+- Berkas cadangan: `/root/bak-v20/` (termasuk `tagihan.js.pre-jadwalfix`,
+  `profilTagihan.js.pre-400fix`) dan dump `/root/pre-v20.sql`.
+
+
+## 2026-10-11 — v1.9.1 — pembuangan sesi PPPoE memakai `?name=`, bukan `?user=` (isolir profile langsung terasa)
+
+**Masalah**
+
+`setProfilSecret()` (jalur isolir v1.8.0) dan `setDisabledSecret()` mencari sesi aktif pelanggan dengan
+`['/ppp/active/print', '?user=' + nama]`. Di RO-IVVI (RouterOS 7.19.2) entri `/ppp/active` **tidak punya
+atribut `user`** — print lengkap menghasilkan kunci `.id, name, service, caller-id, address, uptime,
+encoding, session-id, limit-bytes-in, limit-bytes-out, radius`. Where-query pada atribut yang tidak ada
+mengembalikan 0 baris, jadi `sesi_dibuang` selalu 0: profile isolir memang tertulis di secret, tetapi baru
+berlaku saat pelanggan reconnect sendiri. Dengan uptime PPPoe 3 minggu lebih, "isolir" praktis tidak terasa.
+(`pppoeActive()` di `src/services/routeros.js` sudah tahu quirk ini — ia membaca `r.user || r.name` — jadi
+hanya dua where-query itu yang tertinggal.)
+
+**Diubah**
+
+*`src/services/monitoring.js`* — dua tempat, `?user=` → `?name=`:
+di `setDisabledSecret()` (setelah `secret set disabled=yes`) dan di `setProfilSecret()`
+(setelah `secret set profile=... disabled=no`), plus komentar alasan supaya tidak kembali.
+
+**Verifikasi (2026-10-11, probe read-only ke RO-IVVI `ivvinet.my.id:8429`, tanpa `remove`)**
+
+- `/ppp/active/print =.proplist=.id,name` → 198 sesi; nama sesi pertama `mamawacbln`
+- query **lama** `?user=mamawacbln` → `0` baris; query **baru** `?name=mamawacbln` → `1` baris, `.id=*8028D6E5`
+  → bentuk filter yang benar terbukti menemukan sesi yang sama sekali tidak ditemukan sebelumnya
+- `node --check` lolos, `systemctl restart ivvibill` → `active`, log bersih; detektor app menulis
+  `PPPoE offline: 20 / 171` → 151 pelanggan hasil import terhitung online, cocok dengan hitung probe
+- **Belum diuji:** `remove` pada sesi pelanggan nyata (butuh memutus internet pelanggan aktif) —
+  cabang ini baru terbukti sampai "sesinya ketemu dan `.id`-nya dapat".
+
+**Catatan**
+
+- Berkas cadangan sebelum perubahan: `/root/monitoring.js.bak-v191`.
+- Efek lanjutan yang sekarang jadi mungkin: isolir otomatis tanggal 1 bukan lagi sekadar tulis profile,
+  tapi benar-benar memutus dan menyambung ulang sesi dengan rate-limit baru.
+
+---
+
+## 2026-10-11 — v1.9.0 — siklus tagihan otomatis berjalan sungguhan (WIB) + aksi manual setaranya + fix kwitansi WA & pembayaran dobel
+
+**Masalah**
+
+1. **"Buat tagihan / kirim WA / isolir otomatis" tidak pernah jalan.** `tugasBilling()`
+   membandingkan tanggal-jam hasil `new Date().getUTC*()` dengan `jadwal_buat_hari`,
+   `jadwal_kirim_hari` dan `jam_kirim` yang diisi admin dalam jam dinding ISP (server ini
+   WIB = UTC+7). Akibatnya `jam_kirim 07:00` baru tertembak pukul 14:00 WIB dan isolir
+   pukul 16:00 WIB. Lebih parah lagi syaratnya `jam === jam_kirim` (cocok tepat menit):
+   satu menit yang terlewat karena restart/reload membuat seluruh tenant kehilangan
+   kiriman WA bulan itu, dan tidak ada cara untuk mengetahui kapan siklus berikutnya
+   berjalan.
+2. **Tidak ada jalur manual untuk dua hal yang paling sering dibutuhkan.** Operator tidak
+   bisa mengirim tagihan tertentu ke WhatsApp pelanggan, dan tombol Isolir di panel hanya
+   mengganti status DB tanpa efek yang sama dengan siklus otomatis (tanpa WA isolir, tanpa
+   jejak di issue). Kalau cron gagal jalan, tidak ada "jalankan sekarang juga".
+3. **Kwitansi (gambar) tidak pernah sampai.** Antrean WA jenis `lunas` selalu `gagal` dengan
+   `HTTP 400 ... Invalid value: url_file` — `kirimSatu()` mengirim body `url`, sedangkan
+   gateway WHAPI membaca `url_file`. Pesan gagal juga tidak terlihat di mana pun:
+   `prosesAntrean()` hanya mengambil status `pending`, jadi percobaan kedua tidak pernah ada.
+4. **Satu pelunasan tercatat dua kali di `pembayaran`.** Rute `POST /tagihan/:id/bayar` dan
+   `POST /pembayaran/:id/verifikasi` sudah INSERT baris pembayaran sendiri, lalu
+   `billing.lunaskanTagihan(..., {jumlah})` INSERT lagi. `kas` benar (satu entri), tapi
+   laporan yang menjumlah `pembayaran` menghitung pemasukan dobel.
+
+**Diubah**
+
+*Skema — `scripts/migrate-v18.js` **baru** (idempoten, cek `information_schema`)*
+
+- `tagihan.ingatkan_terakhir DATE` — penanda "pengingat hari ini sudah dikirim".
+- `data_server.jam_peringatan VARCHAR(5) DEFAULT '08:00'` dan
+  `data_server.jam_isolir VARCHAR(5) DEFAULT '09:00'` — jam mulai tiap langkah, per ISP.
+- Kolom yang sama ada di `sql/schema.sql` untuk pemasangan baru. Indeks
+  `idx_tagihan_server_status (id_data_server, status, jatuh_tempo)` sudah tersedia, jadi
+  migrasi tidak menambah indeks.
+
+*Waktu siklus — `src/util/tanggal.js`*
+
+- `waktuSiklus()` mengembalikan `{zona, tanggal, periode, hari, jam}` berdasarkan jam dinding
+  ISP (`TZ_TAGIHAN` → `TZ` → `Asia/Jakarta`, dihitung lewat `Intl` en-CA), bukan UTC.
+- `normJam('7:5') → '07:05'`, nilai tak sah jadi `'00:00'`; `lewatJam(sekarang, target)`
+  membandingkan menit.
+
+*Siklus — `src/scheduler.js`*
+
+- Semua langkah memakai `waktuSiklus()` dan ambang `lewatJam()` (bukan cocok tepat menit),
+  sehingga siklus yang terlewat tersusul pada tick berikutnya tanpa kirim dobel (duplikat
+  dicegah status/penanda, bukan jam).
+- Langkah: buat tagihan (tgl `jadwal_buat_hari`) → kirim WA (tgl `jadwal_kirim_hari` sejak
+  `jam_kirim`) → pengingat H-3 (tiap hari sejak `jam_peringatan`) → isolir (tiap hari sejak
+  `jam_isolir`).
+- Log berlabel zona asli: `[siklus 2026-10-11 01:54 Asia/Jakarta] Isolir [2 IVVINET-CBD]: 1
+  (tidak ada sesi aktif)` / `(sesi aktif dibuang: n)` — operator bisa membuktikan layanan
+  benar-benar diputus, bukan cuma status DB.
+- `tugasWa()` kini memproses ulang pesan `gagal` (maks 4 percobaan) setelah antrean `pending`.
+
+*Billing — `src/services/billing.js`*
+
+- `buatTagihanBulanan()` memakai `waktuSiklus()`; jatuh tempo menghormati
+  `pelanggan.hari_tagihan` bila terisi (`tanggalPerPeriode()` mengamankan tgl 29–31 → 28).
+  Periode yang sama tidak dibuat dua kali.
+- `kirimTagihanWajib()` memisahkan pelanggan tanpa nomor WA → `tanpa_nomor_wa`, siklus tetap
+  jalan.
+- `kirimTagihanSatuan(id)` **baru** — kirim/kirim ulang satu tagihan (semua status kecuali
+  lunas; `lunas` punya jalur kwitansi sendiri).
+- `peringatanTagihan()` hanya mengirim satu kali per tagihan per hari
+  (`ingatkan_terakhir`) dan tetap menandai `buat/terkirim` yang lewat jatuh tempo.
+- `isolirJatuhTempo()` membuka dengan self-heal `UPDATE ... status='jatuh_tempo'` untuk tagihan
+  `buat/terkirim` yang tanggalnya sudah lewat, lalu isolir + `sinkronStatus` + WA isolir;
+  mengembalikan `{isolir, router_gagal, tanpa_nomor_wa, daftar[].sesi_dibuang}`.
+- `isolirManual()` / `aktifkanManual()` / `kirimWaIsolirPelanggan()` **baru** — tombol manual
+  memakai efek yang sama dengan cron (router + WA + issue).
+
+*Rute & UI*
+
+- `GET /api/tagihan/jadwal` — zona, sekarang, jadwal buat/kirim/isolir + kapan berikutnya,
+  `belum_terkirim`, `lewat_tempo`, `akan_isolir` (dftar ini didaftarkan sebelum `/tagihan/:id`).
+- `POST /api/tagihan/:id/kirim`, `POST /api/tagihan/siklus` (superadmin/master; buat paksa →
+  kirim → pengingat → isolir, dicatat ke `audit_log`).
+- `POST /api/pelanggan/:id/status` dan aksi massal: isolir ⇒ WA isolir diantrekan +
+  `issue_pelanggan`; aktifkan ⇒ issue menunggak/isolir dibersihkan. Respons membawa
+  `router.cara`, `router.sesi_dibuang`, `wa_terkirim`.
+- Panel Tagihan: baris `📤 WA` dan `🔒 Isolir`, tombol `⟳ Jalankan Siklus`, paragraf jadwal
+  otomatis (`#tJadwal`). Panel Pengaturan: field jam pengingat & jam isolir.
+  Pelanggan: badge profil isolir + toast yang membedakan "diturunkan" dan "dikembalikan".
+- Menu WhatsApp: panel **Pesan gagal** + `POST /api/wa/ulangi`; `GET /api/wa/log` ikut
+  mengembalikan `gagal`.
+
+*Perbaikan*
+
+- `kirimSatu()` mengirim `url_file` (sekaligus `url` untuk build WHAPI lain) sehingga kwitansi
+  gambar terkirim; komentar pemakaian format gateway di kepala `src/services/wa.js` dilengkapi.
+- `prosesAntrean(limit, idDataServer, status)` — status `gagal` dibatasi `MAX_PERCOBAAN = 4`.
+- `lunaskanTagihan(..., {sudahDicatat})` — jalur panel tidak lagi menambah baris `pembayaran`
+  kedua; webhook Midtrans/Flip tetap mencatat sendiri (tidak ada INSERT lain di sana).
+- `simpanSetting()` ternyata tidak mengirim `jam_peringatan`/`jam_isolir` (field terlihat bisa
+  diisi tapi tidak pernah tersimpan) — ikut dikirim sekarang.
+
+**Verifikasi** — dijalankan langsung di VPS produksi dengan pelanggan uji "UJI SIKLUS
+IVVIBILL" (tenant 2 IVVINET-CBD, secret PPPoE `ivviuji1`, WA tujuan nomor pemilik sendiri);
+jadwal tenant 2 dipindah sebentar ke hari/jam berjalan supaya tick sungguhan yang bekerja,
+lalu semuanya dihapus lagi.
+
+- 01:52 tick otomatis `tugasBilling` membuat tagihan periode 2026-10 (`Tagihan dibuat
+  [2 IVVINET-CBD]: 1`, total Rp 100.108, jatuh tempo 2026-10-01 mengikuti `hari_tagihan=1`).
+- 01:54 otomatis: `Tagihan dikirim WA: 1` + `Isolir: 1`; `wa_queue` #1/#2 `terkirim`
+  (`wa_log` response OK), `tagihan.status` jatuh_tempo, `pelanggan.status` isolir,
+  `profil_sebelum_isolir=10-Mbps`, secret di RO-IVVI berubah ke profile `isolir-1M`.
+- 02:04 otomatis: `Peringatan [2 IVVINET-CBD]: 1` untuk tagihan jatuh tempo besok
+  (`wa_queue` `peringatan` terkirim, `ingatkan_terakhir=2026-10-11`) dan siklus manual
+  berikutnya mengembalikan `0 pengingat` — dedup per hari terbukti.
+- Panel (login `adminmaster`, tenant IVVINET-CBD): `📤 WA` → antrean terkirim; `Bayar` →
+  lunas + kwitansi + `pelanggan.aktif` + secret kembali `10-Mbps`; `Isolir`/`Aktifkan` di
+  daftar pelanggan bolak-balik menerapkan `isolir-1M` ↔ `10-Mbps`; `⟳ Jalankan Siklus`
+  membuktikan idempoten (`0/0/0/0`, audit_log #51) lalu isolir (`isolir:1`, #54);
+  `GET /api/tagihan/jadwal` tampil di form sesuai jam dinding ISP.
+- Kwitansi WA: sebelum fix `gagal HTTP 400 url_file`; sesudah deploy, `WA ulang: {sent:1}`
+  dan `wa_queue` #4 menjadi `terkirim` pada percobaan ke-2 — bukti retry + nama field benar.
+- Pembayaran dobel: dua pelunasan pertama (kode lama) meninggalkan 4 baris; pelunasan setelah
+  fix menambah tepat 1 baris (4 → 5) sementara `kas` tetap satu entri per pelunasan.
+- Pengaturan: jam pengingat/isolir kini benar-benar tersimpan; kedua tenant dipulihkan ke
+  1/2/10 + 07:00/08:00/09:00 dan dicek ulang dari `data_server`.
+- Pemulihan: pelanggan/paket/tagihan/pembayaran/kas/issue/`wa_queue`/`wa_log` uji dihapus
+  (semua tabel kembali 0), file kwitansi uji dihapus, secret `ivviuji1` dibuang dari router,
+  dan `scripts/tmp-uji-siklus.js` dihapus dari webroot.
+- **Belum terbukti:** cabang pembuangan sesi aktif (`/ppp/active/remove`) saat isolir, karena
+  secret uji tidak pernah punya sesi PPPoE nyata (tidak ada perangkat yang dial-in). Jalur
+  ganti profile dan `disabled=yes` memakai kode pembuangan sesi yang sama dan telah dibaca
+  ulang; log siklus terbaru kini mencetak `(sesi aktif dibuang: n)` sehingga pelanggan online
+  pertama yang diisolir akan membuktikannya di `/var/log/ivvibill.log`.
+
+**Catatan**
+
+- Perubahan belum di-commit ke GitHub; redeploy dari repo akan menimpanya (lihat daftar
+  berkas di entri ini).
+- `profile_isolir` per pelanggan opsional: kosong ⇒ perilaku lama (secret `disabled=yes`).
+  Profile `isolir-1M` ditinggalkan di RO-IVVI; variant lain (isolir-512k, isolir-2M) belum
+  dibuat.
+- Tenant 2 punya paket hasil impor yang semuanya `nonaktif` dan `harga = 0` — tagihan
+  bulanan untuk ISP itu baru akan terbentuk setelah paket diaktifkan/diisi harga.
+
+---
+
+## 2026-10-11 — v1.8.0 — isolir per pelanggan lewat profile PPPoE + profil Paket dipecah PPPoE/hotspot
+
+**Masalah**
+
+1. **Isolir memukul semua pelanggan dengan cara yang sama.** `sinkronStatus()` lama hanya
+   bisa `disabled=yes/no` di `/ppp/secret`. Padahal operasional ISP membedakan tingkat
+   isolir: pelanggan A boleh tetap online dengan 1M, pelanggan B dibatasi 512k, pelanggan C
+   memang harus putus total. Tidak ada kolom di `pelanggan` untuk menyimpan pilihan per
+   pelanggan, jadi admin harus mengubah profile manual di winbox dan panel kehilangan
+   gambaran atas kondisi router yang sebenarnya.
+2. **Menu Paket mencampur profil hotspot dan PPPoE.** Hanya ada satu kolom
+   `paket.profile_hotspot`, label form-nya "Profile hotspot", dan opsi dropdown-nya diambil
+   dari `/ip/hotspot/user/profile` — termasuk ketika `jenis='pppoe'`. Nilai di kolom itu
+   tidak pernah dibaca router PPPoE (yang membaca `/ppp/profile`), sehingga kolom profil pada
+   paket PPPoE selama ini hanya hiasan; `paket/sinkron` juga menulis nama profile router ke
+   kolom hotspot apa pun jenis barisnya.
+
+**Diubah**
+
+*Skema — `scripts/migrate-v17.js` **baru** (idempoten, ada `--dry-run`; nama mengikuti urutan
+skrip v12/v13/v15/v16, bukan versi patch dokumen ini)*
+
+- `paket.profile_pppoe VARCHAR(64)` — nama profile di `/ppp/profile` untuk paket jenis pppoe.
+- `pelanggan.profile_isolir VARCHAR(64)` — profile yang dipakai saat pelanggan diisolir.
+- `pelanggan.profil_sebelum_isolir VARCHAR(64)` — profile asal secret, diisi otomatis.
+- Backfill dijaga: nilai lama `profile_hotspot` pada baris `jenis='pppoe'` **disalin** ke
+  `profile_pppoe` (kolom lama tidak dihapus supaya jalur sinkron lama tetap jalan), dan
+  jumlah baris yang disalin hanya dihitung bila kolom barunya memang belum ada.
+- `sql/schema.sql` memuat ketiga kolom yang sama untuk pemasangan baru.
+
+*Service — `src/services/monitoring.js`*
+
+- `setProfilSecret(user, {profil, idDataServer})` **baru**: cari secret berdasar `name`,
+  **validasi dulu profile-nya ada di `/ppp/profile`** (RouterOS 7.19.2 menolak nilai asing
+  dengan `input does not match any value of profile`), lalu `set profile=... disabled=no`,
+  catat `profil_lama`, dan buang sesi aktif di `/ppp/active` karena pergantian profile hanya
+  berlaku pada sesi baru. Mengembalikan `{router, profil, profil_lama, sesi_dibuang,
+  tidak_ada, gagal}`.
+- `sinkronStatus(p, status, idDataServer)` jadi jalur bersama rute status, tagihan jatuh
+  tempo, dan pelunasan:
+  - `isolir` + `profile_isolir` terisi dan profile ada di router → ganti profile
+    (cara `profil`), `profil_sebelum_isolir` disimpan persis seperti aslinya, koneksi tetap
+    naik dengan bandwidth terbatas.
+  - `isolir` + profile tidak ada di router → fallback `disabled=yes` (cara `matikan`) dengan
+    pesan kegagalan profile tetap ikut dikirim, jadi admin tahu kenapa.
+  - `isolir` + `profile_isolir` kosong → persis perilaku lama (`disabled=yes`).
+  - `aktif` + ada `profil_sebelum_isolir` → kembalikan profile asal lalu kolomnya dinolkan;
+    kalau profile asal sudah dihapus admin router, secret tetap dihidupkan dengan catatan
+    `profile '<x>' tidak ada di router — secret dihidupkan tanpa ganti profile`.
+  - `nonaktif` → `disabled=yes` seperti sebelumnya.
+- Ekspor modul: `setSecret, setProfilSecret, sinkronStatus, sesiTakTerkenal, routerTenant`.
+
+*Rute*
+
+- `src/routes/pelanggan.js`: `profilPaket(jenis, body, lama)` memisahkan kolom yang dibaca
+  per jenis (hotspot → `profile_hotspot`, pppoe → `profile_pppoe`, dengan fallback ke kolom
+  lama untuk data lama) dan `kunciProfil(p)` memilih kunci pencocokan router yang benar.
+  `POST`/`PUT /api/paket` ikut menulis `profile_pppoe`; `POST /api/paket/sinkron` sekarang
+  menyimpan nama profile router ke kolom yang cocok dengan `jenis` baris. `POST`/`PUT
+  /api/pelanggan` membaca dan mengosongkan `profile_isolir` lewat `hasOwnProperty` (kosong
+  berarti memang dikosongkan, bukan "tidak dikirim") dan men-sinkron ulang ke router ketika
+  status isolir atau profil isolir-nya yang berubah.
+- `src/routes/monitoring.js`: `GET /api/profil-mikrotik?jenis=hotspot|pppoe` **baru** —
+  mengembalikan daftar profile dari jalur router yang benar (`/ip/hotspot/user/profile` atau
+  `/ppp/profile`) beserta field `jalur` di respons; `/api/hotspot/profil` lama tetap utuh.
+- `src/services/billing.js`: `isolirJatuhTempo()` ikut menyeleksi `profile_isolir,
+  profil_sebelum_isolir` dan memanggil `mon.sinkronStatus(..., 'isolir', ...)`;
+  `lunaskanTagihan()` memanggil `mon.sinkronStatus(p, 'aktif', t.id_data_server)` sehingga
+  pelunasan mengembalikan profile asal, bukan sekadar mengaktifkan secret.
+
+*Panel — `public/panel/index.html` + `public/panel/panel.js` (`?v=20261011c`)*
+
+- Modal Paket: header kolom daftar berubah menjadi "Durasi · Profil router", label form ikut
+  `kJenis` ("Profile PPPoE (MikroTik)" vs "Profile hotspot"), teks penjelasan menyebut jalur
+  router yang dipakai, opsi dropdown diisi ulang dari `/api/profil-mikrotik` sesuai jenis,
+  paket tanpa profil menampilkan `ikut nama paket`, dan baris paket nonaktif diberi penanda.
+- Modal Pelanggan: baris baru **"Profile isolir (khusus PPPoE)"** (`#fIsolir` + datalist
+  `#dlIsolir` yang terisi dari `/ppp/profile`) dengan hint "tiap pelanggan bisa beda,
+  koneksi tetap naik hanya dibatasi. Kosong = secret dimatikan". Baris daftar pelanggan
+  menampilkan `🔒 <profile>` saat statusnya isolir.
+- `plgStatus()` memberi toast berbeda untuk jalur profil ("... diterapkan · koneksi tetap
+  naik, hanya dibatasi") dan jalur matikan secret.
+
+**Verifikasi (dijalankan di produksi lewat panel, semua data uji dikembalikan persis)**
+
+- Profile isolir dibuat di RO-IVVI: `/ppp/profile add name=isolir-1M rate-limit=1M/1M`.
+  **Profile ini sengaja ditinggal** sebagai starter isolir.
+- Pelanggan uji `ivvitest1` (paket 10-Mbps) diisolir dari tombol panel →
+  DB `{status: isolir, profile_isolir: isolir-1M, profil_sebelum_isolir: 10-Mbps}` dan
+  router `{".id": "*190", name: ivvitest1, profile: isolir-1M, disabled: false}` — secret
+  tidak dimatikan, hanya dibatasi.
+- Klik Aktifkan → DB `{status: aktif, profil_sebelum_isolir: null}` dan router kembali
+  `profile: 10-Mbps`.
+- Jalur lama: `profile_isolir = NULL` lalu isolir → router `disabled: true` (perilaku lama
+  utuh).
+- Profile tidak dikenal (`tidak-ada-xyz`) → secret tetap `10-Mbps`/`disabled: true` dan
+  panel melaporkan `profile 'tidak-ada-xyz' tidak ada di /ppp/profile`, bukan 500.
+- Menu Paket: form PPPoE menampilkan label "Profile PPPoE (MikroTik)" + keterangan
+  `/ppp/profile — secret PPPoE pelanggan memakai profil ini; kosong berarti ikut nama
+  paket`; saat jenis dipindah ke hotspot, daftar options berganti ke
+  `/ip/hotspot/user/profile`. Simpan menghasilkan `profile_pppoe=10-Mbps,
+  profile_hotspot=NULL`; setelah tombol sinkron dan pengembalian manual, kedelapan baris
+  `paket` kembali `profile_hotspot=NULL, profile_pppoe=NULL` seperti semula.
+- Pembilasan: tabel `pelanggan` kosong lagi, secret `ivvitest1` dihapus dari router, paket
+  `Lumpia` utuh, dan tidak ada baris error baru di `/var/log/ivvibill.log`.
+
+**Catatan**
+
+- Semua perubahan masih **belum di-commit** (12 berkas + `scripts/migrate-v17.js` berstatus
+  untracked di working tree produksi). Deploy ulang yang menimpa webroot dari repo akan
+  **menghapus** fitur ini; migrasinya sendiri idempoten jadi aman dijalankan lagi setelah
+  source diperbaiki.
+- Isolir lewat profile tetap membuang sesi aktif pelanggan. Itu disengaja: RouterOS tidak
+  menerapkan rate-limit profile baru pada sesi yang sudah jalan.
+- Fitur yang sengaja tidak diubah: `paket.profile_hotspot` tetap ada sebagai fallback,
+  `/api/hotspot/profil` lama tetap berfungsi, dan pelanggan non-PPPoE tidak dapat profil
+  isolir (field-nya dinolkan saat `tipe='hotspot'`).
+
 ## 2026-10-09 — v1.7.0 — voucher dibersihkan serentak (cabut/hapus massal) + tabel Paket disinkronkan dengan profile bandwidth yang benar-benar ada di MikroTik
 
 **Masalah**

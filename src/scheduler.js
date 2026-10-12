@@ -1,8 +1,9 @@
 'use strict';
 // ============================================================
 // Scheduler internal (tanpa dependensi) — cronjob ivvibill:
-//  1. Buat tagihan bulanan        (sesuai jadwal_buat_hari)
-//  2. Kirim tagihan WA            (sesuai jadwal_kirim_hari + jam)
+//  1. Buat tagihan bulanan        (hari dari profil_tagihan pelanggan;
+//                                 fallback jadwal_buat_hari)
+//  2. Kirim tagihan WA            (hari dari profil_tagihan + jam_kirim)
 //  3. Peringatan tagihan          (H-3 & penanda lewat tempo)
 //  4. Isolir menunggak            (lewat jatuh tempo)
 //  5. Antrean WhatsApp             (tiap menit)
@@ -14,6 +15,11 @@
 // Semua tugas berjalan in-process; untuk shared hosting tanpa
 // proses panjang, tersedia juga skrip cron eksternal di
 // scripts/cron.js (lihat docs/CRON.md).
+//
+// Tanggal & jam yang dibandingkan di tugasBilling adalah jam dinding ISP
+// (zona aplikasi, default Asia/Jakarta) lewat util/tanggal.waktuSiklus —
+// bukan UTC. Ambang "sudah lewat jam" dipakai supaya siklus tidak hilang
+// kalau proses sedang restart tepat pada menit jam_kirim.
 // ============================================================
 const db = require('./db');
 const billing = require('./services/billing');
@@ -21,11 +27,13 @@ const wa = require('./services/wa');
 const monitor = require('./services/monitoring');
 const olt = require('./services/olt');
 const onu = require('./services/onu');
+const { waktuSiklus } = require('./util/tanggal');
 
 /** Daftar ISP aktif; kolom jadwal dipilih eksplisit agar rahasia gateway tidak terbawa. */
 async function daftarTenant() {
   return db.q(
-    `SELECT id, nama_server, jadwal_buat_hari, jadwal_kirim_hari, jadwal_limit_hari, jam_kirim
+    `SELECT id, nama_server, jadwal_buat_hari, jadwal_kirim_hari, jadwal_limit_hari,
+            jam_kirim, jam_peringatan, jam_isolir
      FROM data_server WHERE status = 'Aktif' ORDER BY id`
   );
 }
@@ -43,6 +51,10 @@ async function tugasWa() {
   try {
     const r = await wa.prosesAntrean(30);
     if (r.sent || r.failed) log('WA antrean:', JSON.stringify(r));
+    // pesan yang pernah gagal (gateway sempat mati / URL media ditolak) jangan
+    // berhenti di 'gagal' selamanya: dicoba lagi sampai MAX_PERCOBAAN
+    const u = await wa.prosesAntrean(10, null, 'gagal');
+    if (u.sent || u.failed) log('WA ulang:', JSON.stringify(u));
   } catch (e) { log('WA error:', e.message); }
   finally { running.wa = false; }
 }
@@ -100,33 +112,38 @@ async function tugasBilling() {
   if (running.billing) return;
   running.billing = true;
   try {
-    const now = new Date();
-    const jam = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
+    const w = waktuSiklus();
+    const logLokal = (...a) => log(`[siklus ${w.hari} ${w.jam} ${w.zona}]`, ...a);
 
     for (const srv of await daftarTenant()) {
       const tag = `[${srv.id} ${srv.nama_server}]`;
-      if (now.getUTCDate() === Number(srv.jadwal_buat_hari)) {
-        const r = await billing.buatTagihanBulanan(srv.id, false);
-        if (r.dibuat) log('Tagihan dibuat', tag + ':', r.dibuat);
+      // Seluruh gerbang hari/jam ada di billing.jalankanSiklusTenant() — fungsi
+      // yang sama dipanggil tombol "Jalankan Siklus" di panel, jadi tidak ada
+      // lagi dua jalur yang bisa berbeda perilaku. COALESCE di dalamnya tetap
+      // memakai jadwal_buat_hari/jadwal_kirim_hari bila pelanggan belum punya
+      // profil, sehingga tenant lama tidak berubah perilakunya.
+      const { langkah: l } = await billing.jalankanSiklusTenant(srv, w, 50);
+
+      if (l.buat.jalan && l.buat.dibuat)
+        logLokal('Tagihan dibuat', tag + ':', l.buat.dibuat, JSON.stringify(l.buat.per_profil));
+      if (l.kirim.jalan && l.kirim.dikirim)
+        logLokal('Tagihan dikirim WA', tag + ':', l.kirim.dikirim);
+      if (l.peringatan.jalan && l.peringatan.diperingat)
+        logLokal('Peringatan', tag + ':', l.peringatan.diperingat);
+
+      if (l.isolir.jalan && l.isolir.isolir) {
+        // operator perlu bukti sesi yang sedang naik benar-benar diputus,
+        // bukan cuma status DB yang berubah
+        const sesi = (l.isolir.daftar || []).reduce((a, x) => a + Number(x.sesi_dibuang || 0), 0);
+        logLokal('Isolir', tag + ':', l.isolir.isolir,
+          sesi ? `(sesi aktif dibuang: ${sesi})` : '(tidak ada sesi aktif)');
       }
-      if (now.getUTCDate() === Number(srv.jadwal_kirim_hari) && jam === srv.jam_kirim) {
-        const r = await billing.kirimTagihanWajib(srv.id, 50);
-        log('Tagihan dikirim WA', tag + ':', r.dikirim);
-      }
-      // peringatan tiap hari jam 08:00
-      if (jam === '08:00') {
-        const r = await billing.peringatanTagihan(srv.id, 50);
-        if (r.diperingat) log('Peringatan', tag + ':', r.diperingat);
-      }
-      // isolir tiap hari jam 09:00
-      if (jam === '09:00') {
-        const r = await billing.isolirJatuhTempo(srv.id);
-        if (r.isolir) log('Isolir', tag + ':', r.isolir);
-        // status DB sudah isolir tapi secret masih hidup = layanan tidak putus
-        if (r.router_gagal && r.router_gagal.length) {
-          log('Isolir TANPA router', tag + ':', r.router_gagal.slice(0, 3).join(' | '));
-        }
-      }
+      // status DB sudah isolir tapi secret masih hidup = layanan tidak putus
+      if (l.isolir.router_gagal && l.isolir.router_gagal.length)
+        logLokal('Isolir TANPA router', tag + ':', l.isolir.router_gagal.slice(0, 3).join(' | '));
+      // pelanggan tanpa nomor WA tetap diisolir + dicatat, jangan diam-diam
+      if (l.isolir.tanpa_nomor_wa && l.isolir.tanpa_nomor_wa.length)
+        logLokal('Isolir tanpa WA', tag + ':', l.isolir.tanpa_nomor_wa.slice(0, 3).join(', '));
     }
   } catch (e) { log('Billing error:', e.message); }
   finally { running.billing = false; }

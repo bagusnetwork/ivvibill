@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ivvibill — Panel Data Server</title>
-<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/style.css?v=20261011b">
 <style>
   .menu-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:8px; margin-top:6px; }
   .menu-grid .chk { display:flex; align-items:center; justify-content:space-between; gap:10px;
@@ -61,6 +61,7 @@
       <a data-page="tagihan" data-menu="tagihan"><span class="ic">🧾</span> Tagihan</a>
       <a data-page="invoice" data-menu="invoice"><span class="ic">📄</span> Invoice Penjualan</a>
       <a data-page="pembayaran" data-menu="pembayaran"><span class="ic">💳</span> Pembayaran</a>
+      <a data-page="profil-tagihan" data-menu="profil_tagihan"><span class="ic">🗓️</span> Profile Tagihan</a>
     </nav>
     <div class="nav-group">Hotspot</div>
     <nav class="nav">
@@ -158,6 +159,8 @@
             <option value="aktif">aktif</option><option value="baru">baru</option>
             <option value="isolir">isolir</option><option value="nonaktif">nonaktif</option></select>
           <button class="btn sm" onclick="plgBulkTerapkan()">Terapkan ke terpilih</button>
+          <select id="plgBulkProfil" title="Pindahkan pelanggan terpilih ke satu Profile Tagihan"></select>
+          <button class="btn sm secondary" onclick="plgBulkProfilTerapkan()">Terapkan profil</button>
           <button class="btn sm secondary" onclick="plgBulkBersihkan()">Batal pilih</button>
         </div>
         <div class="panel"><div class="panel-body" style="padding:0">
@@ -196,10 +199,12 @@
             <option value="lunas">lunas</option><option value="jatuh_tempo">jatuh tempo</option>
             <option value="batal">batal</option></select>
           <div class="spacer"></div>
+          <button class="btn secondary" onclick="jalankanSiklus()" title="Jalankan siklus otomatis sekarang, tetap sesuai jadwal: hanya profil tagihan yang tanggal buat/kirimnya jatuh hari ini ditagih &amp; dikirim WA; pengingat dan isolir hanya untuk yang sudah lewat tempo">⟳ Jalankan Siklus</button>
           <button class="btn secondary" onclick="kirimTagihanWA()">📨 Kirim via WA</button>
           <button class="btn secondary" onclick="formTagihanSatuan()">+ Tagihan Satuan</button>
           <button class="btn" onclick="buatTagihan()">+ Buat Tagihan Bulanan</button>
         </div>
+        <p class="hint" id="tJadwal">Memuat jadwal siklus…</p>
         <div class="cards">
           <div class="card red"><div class="label">Belum lunas</div><div class="value" id="tBelum">Rp 0</div></div>
           <div class="card blue"><div class="label">Jumlah tagihan</div><div class="value" id="tJml">0</div></div>
@@ -254,6 +259,28 @@
           <tbody id="tbRek"><tr><td colspan="4" class="empty">Memuat…</td></tr></tbody></table></div></div>
       </div>
 
+      <!-- ================= PROFILE TAGIHAN ================= -->
+      <div data-view="profil-tagihan" data-onload="loadProfilTagihan" style="display:none">
+        <div class="toolbar"><div class="spacer"></div>
+          <button class="btn secondary" onclick="loadProfilTagihan()">Muat ulang</button>
+          <button class="btn" onclick="formProfilTagihan()">+ Tambah Profile Tagihan</button></div>
+        <p class="hint" id="ptJadwal">Memuat jadwal…</p>
+        <div class="panel"><div class="panel-body" style="padding:0">
+          <table><thead><tr><th>Profil</th><th class="t-num">Buat</th><th class="t-num">Kirim</th>
+            <th class="t-num">Isolir / tempo</th><th>PPN</th><th>Peringatan</th>
+            <th class="t-num">Kompensasi</th><th class="t-num">Pelanggan</th><th>Status</th>
+            <th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbProfilTagihan"><tr><td colspan="10" class="empty">Memuat…</td></tr></tbody></table>
+        </div></div>
+        <p class="hint"><b>Profile Tagihan menggantikan "Hari Tagihan"</b> per pelanggan. Satu
+           profil dipakai banyak warga: tanggal buat, tanggal kirim WA, tanggal isolir (= jatuh
+           tempo), mode PPN, dan boleh/tidaknya pengingat H-3. Gaji tanggal 25 dan tanggal 10 bisa
+           jalan di satu ISP tanpa saling menggeser.</p>
+        <p class="hint">Pelanggan yang <b>tidak</b> ditautkan ke profil mana pun mengikuti jadwal di
+           menu Pengaturan (jadwal lama) — jadi menambah profil tidak mengubah yang sudah ada.
+           Kompensasi tersimpan dan tampil di daftar, tapi belum memotong total tagihan.</p>
+      </div>
+
       <!-- ================= PAKET ================= -->
       <div data-view="paket" data-onload="loadPaket" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
@@ -261,7 +288,7 @@
           <button class="btn" onclick="formPaket()">+ Tambah Paket</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
           <table><thead><tr><th>Nama</th><th>Jenis</th><th class="t-num">Harga</th>
-            <th class="t-num">Harga agen</th><th>Kecepatan</th><th>Durasi · Profil hotspot</th><th class="t-actions">Aksi</th></tr></thead>
+            <th class="t-num">Harga agen</th><th>Kecepatan</th><th>Durasi · Profil router</th><th class="t-actions">Aksi</th></tr></thead>
           <tbody id="tbPaket"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
       </div>
@@ -580,6 +607,12 @@
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Tujuan</th><th>Jenis</th><th>Pesan</th><th>Percobaan</th></tr></thead>
           <tbody id="tbWaAntre"><tr><td colspan="4" class="empty">Kosong</td></tr></tbody></table></div></div>
+        <div class="panel"><div class="panel-head"><h2>Pesan gagal</h2>
+          <button class="btn sm secondary" onclick="waUlangi()">↻ Coba ulang semua</button></div>
+          <div class="panel-body" style="padding:0">
+          <p class="hint">Siklus WA juga mencoba ulang otomatis sampai 4 percobaan; setelah itu pesan berhenti dan perlu diperiksa (nomor tidak aktif / gateway mati / URL media ditolak).</p>
+          <table><thead><tr><th>Tujuan</th><th>Jenis</th><th>Pesan</th><th>Percobaan</th><th>Error</th></tr></thead>
+          <tbody id="tbWaGagal"><tr><td colspan="5" class="empty">Kosong</td></tr></tbody></table></div></div>
         <div class="panel"><div class="panel-head"><h2>Log pengiriman</h2></div>
           <div class="panel-body" style="padding:0">
           <table><thead><tr><th>Waktu</th><th>Tujuan</th><th>Status</th><th>Response</th></tr></thead>
@@ -599,8 +632,15 @@
                 <div class="form-row"><label>Tgl kirim WA</label><input id="sKirim" type="number" min="1" max="28"></div>
                 <div class="form-row"><label>Tgl jatuh tempo</label><input id="sLimit" type="number" min="1" max="28"></div>
                 <div class="form-row"><label>Jam kirim</label><input id="sJam" placeholder="07:00"></div>
+                <div class="form-row"><label>Jam pengingat H-3</label><input id="sJamPeri" placeholder="08:00"></div>
+                <div class="form-row"><label>Jam isolir otomatis</label><input id="sJamIso" placeholder="09:00"></div>
                 <div class="form-row"><label>PPN %</label><input id="sPpn" type="number" min="0" max="100" step="0.5"></div>
               </div>
+              <p class="hint">Jam di atas adalah jam dinding ISP (zona server, WIB) dan siklusnya
+                dicoba tiap menit sejak jam itu — jadi jadwal yang tertunda karena server restart tetap
+                jalan di menit berikutnya. Isolir otomatis hanya menyentuh pelanggan aktif bertagihan
+                lewat tempo: profile isolir miliknya dipasang (atau secret dimatikan bila kosong) +
+                sesi aktif dibuang + WhatsApp isolir dikirim.</p>
               <button class="btn" onclick="simpanSetting()">Simpan</button>
             </div></div>
 
@@ -644,12 +684,22 @@
       <div class="form-row"><label>Tipe</label><select id="fTipe">
         <option value="pppoe">PPPoE</option><option value="hotspot">Hotspot</option></select></div>
       <div class="form-row"><label>Paket</label><select id="fPaket"></select></div>
+      <div class="form-row"><label>Profile Tagihan</label>
+        <select id="fProfilTagihan" onchange="fProfilTagihanInfo()"></select>
+        <div class="hint">Jadwal penagihan golongan ini (buat / kirim / jatuh tempo &amp; isolir).
+          Menggantikan kolom "Hari Tagihan" — <span id="fProfilTagihanInfo">memuat…</span></div></div>
       <div class="form-row"><label>WhatsApp</label><input id="fWa" placeholder="08xx"></div>
       <div class="form-row"><label>Username PPPoE</label><input id="fUser"></div>
       <div class="form-row"><label>Password PPPoE</label><input id="fPass"></div>
       <div class="form-row"><label>Agen (hotspot)</label><select id="fAgen"></select></div>
       <div class="form-row"><label>Status</label><select id="fStatus">
         <option>baru</option><option>aktif</option><option>isolir</option><option>nonaktif</option></select></div>
+      <div class="form-row"><label>Profile isolir (khusus PPPoE)</label>
+        <input id="fIsolir" list="dlIsolir" placeholder="mis. isolir-1M">
+        <datalist id="dlIsolir"></datalist>
+        <div class="hint">Batas kecepatan saat pelanggan diisolir — tiap pelanggan bisa beda,
+          koneksi tetap naik hanya dibatasi. Kosong = secret dimatikan.
+          <span id="isolirHint"></span></div></div>
     </div>
     <div class="form-row"><label>Alamat</label><input id="fAlamat"></div>
     <div class="form-grid">
@@ -697,6 +747,48 @@
     <button class="btn" onclick="simpanDesa()">Simpan</button></div>
 </div></div>
 
+<div class="modal-bg" id="mProfilTagihan"><div class="modal">
+  <div class="modal-head"><h2 id="mProfilTagihanTitle">Tambah Profile Tagihan</h2>
+    <button class="btn sm ghost" onclick="modalClose('mProfilTagihan')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="ptId">
+    <div class="form-row"><label>Nama Profil *</label>
+      <input id="ptNama" placeholder="mis. GOLONGAN-10 atau Instansi-25">
+      <p class="hint">Dipakai juga di kolom "Profile Tagihan" pada form pelanggan dan berkas import.</p></div>
+    <div class="form-row"><label>Tanggal Buat Tagihan *</label>
+      <input id="ptBuat" type="number" min="1" max="28" value="1">
+      <p class="hint">Tanggal otomatis invoice periode ini dibuat (1–28; akhir bulan aman untuk Februari).</p></div>
+    <div class="form-row"><label>Tanggal Kirim Tagihan (WA) *</label>
+      <input id="ptKirim" type="number" min="1" max="28" value="2">
+      <p class="hint">Invoice golongan ini dikirim ke WhatsApp pada tanggal tersebut, mulai jam kirim di Pengaturan.</p></div>
+    <div class="form-row"><label>Tanggal Isolir / Jatuh Tempo *</label>
+      <input id="ptIsolir" type="number" min="1" max="28" value="10" oninput="ptRingkas()">
+      <p class="hint">Lewat tanggal ini tagihan dianggap jatuh tempo dan pelanggannya diisolir otomatis.
+        Nilai ini juga yang ditulis ke "Hari Tagihan" pelanggan (turunan).</p></div>
+    <div class="form-row"><label>Mode PPN</label>
+      <select id="ptPpn">
+        <option value="tanpa">Tanpa PPN (harga paket sudah final)</option>
+        <option value="ditambah">PPN ditambahkan di atas harga</option>
+        <option value="termasuk">Harga sudah termasuk PPN</option>
+      </select>
+      <p class="hint">Persen PPN diambil dari menu Pengaturan data server ini. "Ditambah" = perilaku lama.</p></div>
+    <div class="form-row"><label>Kirim Peringatan H-3</label>
+      <select id="ptPeringatan">
+        <option value="1">Ya — ingatkan 3 hari sebelum jatuh tempo</option>
+        <option value="0">Tidak — tanpa pesan pengingat</option>
+      </select></div>
+    <div class="form-row"><label>Kompensasi (% per hari)</label>
+      <input id="ptKomp" type="number" min="0" max="99.999" step="0.001" value="0">
+      <p class="hint">Tersimpan dan tampil di daftar; pemotongan otomatis belum dihitung di versi ini.</p></div>
+    <div class="form-row"><label>Status</label>
+      <select id="ptStatus"><option value="aktif">aktif</option><option value="nonaktif">nonaktif</option></select>
+      <p class="hint">Profil nonaktif tidak dibaca siklus: pelanggannya kembali ke jadwal data server.</p></div>
+    <p class="hint" id="ptInfo" style="margin-top:10px"></p>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mProfilTagihan')">Batal</button>
+    <button class="btn" onclick="simpanProfilTagihan()">Simpan</button></div>
+</div></div>
+
 <div class="modal-bg" id="mKas"><div class="modal">
   <div class="modal-head"><h2>Tambah Kas</h2>
     <button class="btn sm ghost" onclick="modalClose('mKas')">✕</button></div>
@@ -740,8 +832,8 @@
       Router / modem pelanggan hanya bisa dibuka bila fitur remote-nya aktif di perangkat.</p>
   </div>
   <div class="modal-foot">
+    <a class="btn" id="roBuka" target="_blank" rel="noopener" hidden>🌐 Buka</a>
     <button class="btn secondary" onclick="modalClose('mRemoteOnu')">Tutup</button>
-    <a class="btn" id="roBuka" target="_blank" rel="noopener" style="display:none">🌐 Buka</a>
   </div>
 </div></div>
 
@@ -772,7 +864,7 @@
     <input type="hidden" id="kPid">
     <div class="form-grid">
       <div class="form-row"><label>Nama *</label><input id="kNama"></div>
-      <div class="form-row"><label>Jenis</label><select id="kJenis">
+      <div class="form-row"><label>Jenis</label><select id="kJenis" onchange="muatProfilRouter(this.value)">
         <option value="pppoe">PPPoE</option><option value="hotspot">Hotspot</option></select></div>
       <div class="form-row"><label>Harga</label><input id="kHarga" type="number"></div>
       <div class="form-row"><label>Harga agen</label><input id="kAgen" type="number"></div>
@@ -781,10 +873,11 @@
       <div class="form-row"><label>Satuan masa aktif</label><select id="kSatuan">
         <option value="hari">hari</option><option value="jam">jam</option></select>
         <div class="hint">Voucher hotspot menghitung mundur dari saat pertama dipakai</div></div>
-      <div class="form-row"><label>Profile hotspot (MikroTik)</label>
+      <div class="form-row"><label id="kProfilLabel">Profile hotspot (MikroTik)</label>
         <input id="kProfil" list="dlProfil" placeholder="mis. hotspot-3jam">
         <datalist id="dlProfil"></datalist>
-        <div class="hint">Nama profile di /ip/hotspot/user/profile — wajib agar voucher terkirim ke router
+        <div class="hint"><span id="kProfilKet">Nama profile di /ip/hotspot/user/profile — wajib agar voucher
+          terkirim ke router</span>
           <span id="profilHint"></span></div></div>
       <div class="form-row"><label>Status</label><select id="kStatus">
         <option>aktif</option><option>nonaktif</option></select></div>
@@ -856,13 +949,14 @@
         <option value="lainnya">Lainnya</option></select></div>
       <div class="form-row"><label>Alamat / IP *</label><input id="dAlamat"></div>
       <div class="form-row"><label>Port</label><input id="dPort" type="number" placeholder="8728 / 80"></div>
+      <div class="form-row"><label>Port Remote ONU</label><input id="dPortRemote" type="number" placeholder="88 / 8080"></div>
       <div class="form-row"><label>Username</label><input id="dUser"></div>
       <div class="form-row"><label>Password</label><input id="dPass" type="password"></div>
       <div class="form-row"><label>Lokasi</label><input id="dLokasi"></div>
       <div class="form-row"><label>Pakai HTTPS</label><select id="dHttps">
         <option value="0">Tidak</option><option value="1">Ya</option></select></div>
     </div>
-    <p class="hint">Brand selain MikroTik bertindak sebagai OLT (monitoring redaman via WebFig).</p>
+    <p class="hint">Brand selain MikroTik bertindak sebagai OLT (monitoring redaman via WebFig). Port = port API RouterOS (8728 bawaan, atau port API yang dipindah, mis. 8429). Port Remote ONU = port publik yang dipakai tombol Remote ONU untuk membuka web ONU pelanggan; kosong berarti 8080.</p>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mPerangkat')">Batal</button>
     <button class="btn" onclick="simpanPerangkat()">Simpan</button></div>
@@ -1064,6 +1158,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js"></script>
-<script src="panel.js"></script>
+<script src="panel.js?v=20261011g"></script>
 </body>
 </html>

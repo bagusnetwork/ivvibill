@@ -22,12 +22,16 @@ router.use(requireAuth);
 // ---------------------------------------------- perangkat (CRUD)
 router.get('/perangkat', async (req, res, next) => {
   try {
-    const ts = tenantSql(req, 'id_data_server');
+    const ts = tenantSql(req, 'p.id_data_server');
     // token_push sengaja TIDAK ikut dibaca — itu kunci tulis endpoint /api/router/push
+    // port_remote ikut dibaca supaya form perangkat bisa menampilkan nilainya.
     const rows = await db.q(
-      `SELECT id, id_data_server, nama, brand, tipe, alamat, port, use_https, username, lokasi,
-              status, last_check, last_msg, (token_push IS NOT NULL) AS push_terpasang
-       FROM master_perangkat WHERE 1=1${ts.sql} ORDER BY tipe, nama`,
+      `SELECT p.id, p.id_data_server, p.nama, p.brand, p.tipe, p.alamat, p.port, p.use_https,
+              p.username, p.lokasi, p.status, p.last_check, p.last_msg,
+              (p.token_push IS NOT NULL) AS push_terpasang, m.port_remote
+       FROM master_perangkat p
+       LEFT JOIN setting_mikrotik m ON m.id_perangkat = p.id
+       WHERE 1=1${ts.sql} ORDER BY p.tipe, p.nama`,
       ts.params
     );
     const laporan = rows.length ? await db.q(
@@ -58,6 +62,8 @@ router.post('/perangkat', requirePJ(), requireMenu('perangkat', 'tambah'), async
     const username = v.str(req.body.username, { max: 60, def: null });
     const password = req.body.password ? String(req.body.password).slice(0, 200) : null;
     const lokasi = v.str(req.body.lokasi, { max: 120, def: null });
+    // Port Remote ONU: dipakai tombol Remote ONU (dst-nat). Kosong = bawaan 8080.
+    const portRemote = v.num(req.body.port_remote, { min: 1, max: 65535, int: true, def: null });
 
     const id = await db.insert(
       `INSERT INTO master_perangkat (id_data_server, nama, brand, tipe, alamat, port, use_https, username, password_enc, lokasi)
@@ -68,8 +74,8 @@ router.post('/perangkat', requirePJ(), requireMenu('perangkat', 'tambah'), async
       await db.insert('INSERT INTO setting_olt (id_perangkat) VALUES (?)', [id]);
     } else if (brand === 'mikrotik') {
       await db.insert(
-        'INSERT INTO setting_mikrotik (id_data_server, id_perangkat, nama) VALUES (?,?,?)',
-        [ds, id, nama]);
+        'INSERT INTO setting_mikrotik (id_data_server, id_perangkat, nama, port_remote) VALUES (?,?,?,?)',
+        [ds, id, nama, portRemote]);
     }
     await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
       [req.user.id, ds, 'tambah_perangkat', `${nama} (${brand})`, (req.ip || '').replace('::ffff:', '')]);
@@ -98,6 +104,20 @@ router.put('/perangkat/:id', requirePJ(), requireMenu('perangkat', 'ubah'), asyn
     }
     vals.push(id);
     await db.run(`UPDATE master_perangkat SET ${patch.join(',')} WHERE id=?`, vals);
+    // Port Remote ONU disimpan di setting_mikrotik (bukan master_perangkat) karena
+    // itulah kolom yang dibaca bukaRemote(). Hanya ditulis bila form mengirimnya,
+    // supaya ubah nama/alamat tidak menghapus nilai yang sudah diisi.
+    if (d.brand === 'mikrotik' && req.body.port_remote !== undefined) {
+      const portRemote = v.num(req.body.port_remote, { min: 1, max: 65535, int: true, def: null });
+      const ada = await db.one('SELECT id FROM setting_mikrotik WHERE id_perangkat = ?', [id]);
+      if (ada) {
+        await db.run('UPDATE setting_mikrotik SET port_remote = ? WHERE id_perangkat = ?', [portRemote, id]);
+      } else {
+        await db.insert(
+          'INSERT INTO setting_mikrotik (id_data_server, id_perangkat, nama, port_remote) VALUES (?,?,?,?)',
+          [d.id_data_server, id, d.nama, portRemote]);
+      }
+    }
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
@@ -329,9 +349,14 @@ async function bukaRemote({ req, s, ipUser, label }) {
       await api.run(['/ip/firewall/nat/set', `=.id=${ada[0]['.id']}`, `=to-addresses=${ipUser}`]);
       aksiNat = 'update';
     } else {
+      // dst-address hanya boleh alamat IP literal. Bila perangkat diisi domain,
+      // RouterOS akan mengubahnya jadi address-list dinamis yang rapuh; rule
+      // remote ONU yang sudah ada juga tidak memakai dst-address, jadi cukup
+      // cocokkan dst-port saja (sudah spesifik untuk chain=dstnat).
+      const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(String(s.alamat_api || ''));
+      const dst = isIp ? [`=dst-address=${s.alamat_api}`] : [];
       await api.run(['/ip/firewall/nat/add',
-        '=chain=dstnat', '=protocol=tcp',
-        `=dst-address=${s.alamat_api}`, `=dst-port=${portRemote}`,
+        '=chain=dstnat', '=protocol=tcp', ...dst, `=dst-port=${portRemote}`,
         `=to-addresses=${ipUser}`, '=to-ports=80',
         '=comment=Remote ONU - ivvibill']);
       aksiNat = 'buat';
@@ -432,6 +457,21 @@ router.post('/remote-onu', requireRole('superadmin', 'master', 'teknisi'),
 router.get('/hotspot/profil', async (req, res, next) => {
   try {
     res.json(await monitor.profilHotspot(tenantAktif(req)));
+  } catch (e) { next(e); }
+});
+
+/**
+ * Daftar profile bandwidth di router tenant, per jenis koneksi.
+ * hotspot → /ip/hotspot/user/profile, pppoe → /ppp/profile.
+ * Dipakai form paket (profil layanan) dan form pelanggan (profil isolir) supaya
+ * operator memilih nama yang benar-benar ada, bukan mengetik buta.
+ */
+router.get('/profil-mikrotik', async (req, res, next) => {
+  try {
+    const jenis = v.enumOf(req.query.jenis, ['hotspot', 'pppoe'], 'hotspot');
+    const r = await monitor.profilRouter(tenantAktif(req), jenis);
+    res.json({ jenis, jalur: jenis === 'pppoe' ? '/ppp/profile' : '/ip/hotspot/user/profile',
+      data: r.data, gagal: r.gagal });
   } catch (e) { next(e); }
 });
 

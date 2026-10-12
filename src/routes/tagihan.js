@@ -122,6 +122,57 @@ router.get('/tagihan/invoice-data', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/** Jadwal siklus otomatis — dipakai panel supaya "kapan dibuat/dikirim/diisolir
+ *  otomatis" terlihat, bukan hanya dipercaya. Jamnya jam dinding ISP (zona
+ *  aplikasi), bukan UTC. */
+router.get('/tagihan/jadwal', async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const srv = await cfgData.getServer(ds, true);
+    const w = billing.waktuSiklus();
+    const berikut = (hari) => {
+      const h = Math.max(1, Math.min(28, Number(hari) || 1));
+      const tgt = String(h).padStart(2, '0');
+      if (h > w.tanggal) return `${w.periode}-${tgt}`;
+      const d = new Date(`${w.periode}-01T12:00:00`);
+      d.setMonth(d.getMonth() + 1);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${tgt}`;
+    };
+    res.json({
+      zona: w.zona, sekarang: `${w.hari} ${w.jam}`, tanggal: w.tanggal,
+      buat: { hari: Number(srv.jadwal_buat_hari), berikutnya: berikut(srv.jadwal_buat_hari) },
+      kirim: {
+        hari: Number(srv.jadwal_kirim_hari), jam: srv.jam_kirim || '07:00',
+        berikutnya: berikut(srv.jadwal_kirim_hari)
+      },
+      isolir: {
+        mulai_jam: srv.jam_isolir || '09:00', tiap_hari: true,
+        peringatan_jam: srv.jam_peringatan || '08:00'
+      },
+      belum_terkirim: (await db.one(
+        `SELECT COUNT(*) AS n FROM tagihan t WHERE t.id_data_server = ? AND t.status = 'buat'`, [ds]
+      ) || {}).n || 0,
+      // v2.0: jadwal hari ini bukan satu angka lagi — tiap profil tagihan punya
+      // tanggalnya sendiri, jadi panel menampilkan per profil + hitungan yang
+      // masih mengikuti jadwal tenant (belum ditautkan).
+      profil: await jadwalProfil(ds, berikut),
+      // dua angka dengan makna berbeda: total tunggakan lewat tempo (semua
+      // status pelanggan, termasuk yang sudah diisolir) dan yang masih aktif
+      // sehingga akan diputus pada langkah isolir berikutnya
+      lewat_tempo: (await db.one(
+        `SELECT COUNT(*) AS n FROM tagihan
+         WHERE id_data_server = ? AND status NOT IN ('lunas','batal')
+           AND jatuh_tempo < CURDATE()`, [ds]
+      ) || {}).n || 0,
+      akan_isolir: (await db.one(
+        `SELECT COUNT(*) AS n FROM tagihan t JOIN pelanggan p ON p.id = t.id_pelanggan
+         WHERE t.id_data_server = ? AND t.status NOT IN ('lunas','batal')
+           AND t.jatuh_tempo < CURDATE() AND p.status = 'aktif'`, [ds]
+      ) || {}).n || 0
+    });
+  } catch (e) { next(e); }
+});
+
 router.get('/tagihan/:id', async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });
@@ -150,6 +201,62 @@ router.post('/tagihan/buat', requirePJ(), requireMenu('tagihan', 'tambah'), asyn
 router.post('/tagihan/kirim-wa', requirePJ(), requireMenu('tagihan', 'kirim'), async (req, res, next) => {
   try { res.json(await billing.kirimTagihanWajib(tenantAktif(req), 100)); }
   catch (e) { next(e); }
+});
+
+/** Kirim / kirim ulang WA satu tagihan — tombol manual per baris. */
+router.post('/tagihan/:id/kirim', requirePJ(), requireMenu('tagihan', 'kirim'), async (req, res, next) => {
+  try {
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const t = await cariTagihan(req, id);
+    if (!t) return res.status(404).json({ error: 'Tagihan tidak ada' });
+    const r = await billing.kirimTagihanSatuan(id, Number(t.id_data_server));
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, t.id_data_server, r.ok ? 'kirim_wa_tagihan' : 'kirim_wa_tagihan_gagal',
+       `#${id} ${r.ok ? '-> ' + r.tujuan : r.alasan}`, (req.ip || '').replace('::ffff:', '')]);
+    res.json(r);
+  } catch (e) { next(e); }
+});
+
+/**
+ * Jalankan siklus sekarang juga. Sejak v2.0.1 gerbangnya DIPINJAM dari scheduler
+ * (billing.jalankanSiklusTenant): satu langkah hanya jalan bila ada profil tagihan
+ * yang harinya jatuh hari ini, dan langkah berjam (kirim WA / pengingat / isolir)
+ * baru jalan setelah ambang jam tenant-nya. Dulu tombol ini memakai force=true
+ * sehingga sekali klik pada tanggal 11 langsung membuat tagihan untuk SEMUA
+ * golongan — jatuh temponya pun bisa sudah lewat saat itu juga.
+ *
+ * `paksa: true` tetap tersedia (hanya lewat API) untuk menagih semua golongan
+ * sekaligus, misalnya setelah server mati berhari-hari. Panel tidak pernah
+ * mengirimnya.
+ */
+router.post('/tagihan/siklus', requireRole('superadmin', 'master'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const paksa = req.body.paksa === true || req.body.paksa === '1';
+    const w = billing.waktuSiklus();
+    let hasil;
+    if (paksa) {
+      hasil = {
+        tanggal: w.hari, hari: w.tanggal, jam: w.jam, periode: w.periode, paksa: true,
+        langkah: {
+          buat: { jalan: true, ...(await billing.buatTagihanBulanan(ds, true)) },
+          kirim: { jalan: true, ...(await billing.kirimTagihanWajib(ds, 100)) },
+          peringatan: { jalan: true, ...(await billing.peringatanTagihan(ds, 100)) },
+          isolir: { jalan: true, ...(await billing.isolirJatuhTempo(ds)) }
+        }
+      };
+    } else {
+      const srv = await cfgData.getServer(ds, true);
+      hasil = { paksa: false, ...(await billing.jalankanSiklusTenant(srv, w, 100)) };
+    }
+    const l = hasil.langkah;
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'jalankan_siklus',
+       JSON.stringify({ paksa, dibuat: l.buat.dibuat, dikirim: l.kirim.dikirim,
+         diperingat: l.peringatan.diperingat, isolir: l.isolir.isolir }),
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json(hasil);
+  } catch (e) { next(e); }
 });
 
 /** Buat tagihan satuan — keterangan internet diketik manual, jumlah bebas. */
@@ -237,7 +344,8 @@ router.post('/tagihan/:id/bayar', upload.single('bukti'), async (req, res, next)
       [id, t.total, langsungLunas ? 'diterima' : 'menunggu', bukti, keterangan, langsungLunas ? req.user.id : null]
     );
     if (langsungLunas) {
-      await billing.lunaskanTagihan(id, 'manual', { verifiedBy: req.user.id, jumlah: Number(t.total) });
+      await billing.lunaskanTagihan(id, 'manual', {
+        verifiedBy: req.user.id, jumlah: Number(t.total), sudahDicatat: true });
     } else {
       await db.run(`UPDATE tagihan SET status='menunggu' WHERE id=?`, [id]);
     }
@@ -276,7 +384,8 @@ router.post('/pembayaran/:id/verifikasi', requirePJ(), requireMenu('pembayaran',
     if (b.status !== 'menunggu') return res.status(400).json({ error: 'Sudah diproses' });
     if (aksi === 'terima') {
       await db.run(`UPDATE pembayaran SET status='diterima', verified_by=? WHERE id=?`, [req.user.id, id]);
-      await billing.lunaskanTagihan(b.id_tagihan, b.metode, { verifiedBy: req.user.id, jumlah: Number(b.jumlah) });
+      await billing.lunaskanTagihan(b.id_tagihan, b.metode, {
+        verifiedBy: req.user.id, jumlah: Number(b.jumlah), sudahDicatat: true });
     } else {
       await db.run(`UPDATE pembayaran SET status='ditolak', verified_by=? WHERE id=?`, [req.user.id, id]);
       await db.run(`UPDATE tagihan SET status='terkirim' WHERE id=? AND status='menunggu'`, [b.id_tagihan]);
@@ -396,5 +505,96 @@ router.get('/rekening', async (req, res, next) => {
     res.json({ data: await db.q(`SELECT * FROM rekening WHERE status='aktif'${ts.sql}`, ts.params) });
   } catch (e) { next(e); }
 });
+
+// ------------------------------------------------ profil tagihan (v2.0)
+// Pengganti "Hari Tagihan" per pelanggan: satu profil = satu kebijakan
+// penagihan (tanggal buat / kirim / isolir, PPN, peringatan, kompensasi).
+// Ganti jadwal satu golongan = edit satu profil, bukan sunat 171 pelanggan.
+const profilCtl = require('../services/profilTagihan');
+
+router.get('/profil-tagihan', async (req, res, next) => {
+  try { res.json({ data: await profilCtl.daftar(tenantAktif(req)) }); }
+  catch (e) { next(e); }
+});
+
+router.post('/profil-tagihan', requirePJ(), requireMenu('profil_tagihan', 'tambah'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const r = await profilCtl.buat(ds, req.body);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'tambah_profil_tagihan', `${r.nama} (buat ${r.tanggal_buat}, kirim ${r.tanggal_kirim}, isolir ${r.tanggal_isolir})`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json({ id: r.id, ok: true });
+  } catch (e) { next(e); }
+});
+
+router.put('/profil-tagihan/:id', requirePJ(), requireMenu('profil_tagihan', 'ubah'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const r = await profilCtl.ubah(id, ds, req.body);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'ubah_profil_tagihan', `#${id} ${r.nama} (isolir ${r.tanggal_isolir})`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json(r);
+  } catch (e) { next(e); }
+});
+
+router.delete('/profil-tagihan/:id', requirePJ(), requireMenu('profil_tagihan', 'hapus'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const r = await profilCtl.hapus(id, ds);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'hapus_profil_tagihan', `#${id} ${r.nama}`, (req.ip || '').replace('::ffff:', '')]);
+    res.json(r);
+  } catch (e) { next(e); }
+});
+
+/**
+ * Tautkan profil ke banyak pelanggan sekaligus (aksi massal di daftar
+ * pelanggan). ids boleh kosong bila filter `q`/`status` dipakai, jadi
+ * "pindahkan seluruh golongan" cukup satu kali klik.
+ */
+router.post('/profil-tagihan/terapkan', requirePJ(), requireMenu('profil_tagihan', 'tautkan'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const idProfil = req.body.id_profil_tagihan === undefined ? null
+      : v.num(req.body.id_profil_tagihan, { int: true, min: 1, def: null });
+    let ids = Array.isArray(req.body.ids) ? req.body.ids : String(req.body.ids || '').split(',');
+    ids = ids.map(x => v.num(x, { int: true, min: 1, def: null })).filter(x => x !== null).slice(0, 1000);
+    if (!ids.length) return res.status(400).json({ error: 'Belum ada pelanggan dipilih' });
+    const r = await profilCtl.tautkan(ds, idProfil, ids);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'terapkan_profil_tagihan', `${r.profil || '(lepas)'} -> ${r.ditautkan} pelanggan`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json(r);
+  } catch (e) { next(e); }
+});
+
+/** Ringkasan jadwal per profil — dipakai kartu "Jadwal siklus" di panel. */
+async function jadwalProfil(ds, berikutFn) {
+  const rows = await db.q(
+    `SELECT pt.id, pt.nama, pt.status, pt.tanggal_buat, pt.tanggal_kirim, pt.tanggal_isolir,
+            pt.ppn_mode, pt.kirim_peringatan, pt.kompensasi_desimal,
+            (SELECT COUNT(*) FROM pelanggan p WHERE p.id_profil_tagihan = pt.id
+              AND p.id_data_server = pt.id_data_server AND p.status IN ('aktif','isolir')) AS jumlah_aktif
+     FROM profil_tagihan pt WHERE pt.id_data_server = ? ORDER BY pt.tanggal_buat, pt.nama`,
+    [ds]
+  );
+  const tanpa = await db.one(
+    `SELECT COUNT(*) AS n FROM pelanggan p
+     WHERE p.id_data_server = ? AND p.id_profil_tagihan IS NULL AND p.status IN ('aktif','isolir')`, [ds]
+  );
+  return {
+    data: rows.map(r => ({
+      ...r,
+      berikutnya_buat: berikutFn(r.tanggal_buat),
+      berikutnya_kirim: berikutFn(r.tanggal_kirim),
+      berikutnya_isolir: berikutFn(r.tanggal_isolir)
+    })),
+    tanpa_profil: Number((tanpa && tanpa.n) || 0)
+  };
+}
 
 module.exports = router;

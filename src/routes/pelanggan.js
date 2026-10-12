@@ -14,6 +14,8 @@ const { requireAuth, requireRole, requirePJ } = require('../middleware/auth');
 const { tenantSql, tenantAktif, requireMenu } = require('../util/scope');
 const wa = require('../services/wa');
 const mon = require('../services/monitoring');
+const billing = require('../services/billing');
+const profilCtl = require('../services/profilTagihan');
 const csv = require('../util/csv');
 
 const router = express.Router();
@@ -39,13 +41,13 @@ router.post('/paket', requirePJ(), requireMenu('paket', 'tambah'), async (req, r
     const kecepatan = v.str(req.body.kecepatan, { max: 40, def: null });
     const masaAktif = v.num(req.body.masa_aktif, { min: 1, max: 3650, def: 30, int: true });
     const satuan = v.enumOf(req.body.satuan, ['hari', 'jam'], 'hari');
-    const profil = v.str(req.body.profile_hotspot, { max: 64, def: null });
+    const [ph, pp] = profilPaket(jenis, req.body);
     const hargaAgen = v.num(req.body.harga_agen, { min: 0, max: 1e9, def: 0 });
     const id = await db.insert(
       `INSERT INTO paket (id_data_server, nama_paket, jenis, harga, kecepatan, masa_aktif, satuan,
-                          harga_agen, profile_hotspot)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
-      [ds, nama, jenis, harga, kecepatan, masaAktif, satuan, hargaAgen, profil]
+                          harga_agen, profile_hotspot, profile_pppoe)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [ds, nama, jenis, harga, kecepatan, masaAktif, satuan, hargaAgen, ph, pp]
     );
     res.json({ id });
   } catch (e) { next(e); }
@@ -63,14 +65,14 @@ router.put('/paket/:id', requirePJ(), requireMenu('paket', 'ubah'), async (req, 
     const kecepatan = v.str(req.body.kecepatan, { max: 40, def: p.kecepatan });
     const masaAktif = v.num(req.body.masa_aktif, { min: 1, max: 3650, def: p.masa_aktif, int: true });
     const satuan = v.enumOf(req.body.satuan, ['hari', 'jam'], p.satuan || 'hari');
-    const profil = v.str(req.body.profile_hotspot, { max: 64, def: p.profile_hotspot });
+    const [ph, pp] = profilPaket(jenis, req.body, p);
     const hargaAgen = v.num(req.body.harga_agen, { min: 0, max: 1e9, def: Number(p.harga_agen) });
     const status = v.enumOf(req.body.status, ['aktif', 'nonaktif'], p.status);
     await db.run(
       `UPDATE paket SET nama_paket=?, jenis=?, harga=?, kecepatan=?, masa_aktif=?, satuan=?,
-                        harga_agen=?, profile_hotspot=?, status=?
+                        harga_agen=?, profile_hotspot=?, profile_pppoe=?, status=?
        WHERE id=?`,
-      [nama, jenis, harga, kecepatan, masaAktif, satuan, hargaAgen, profil, status, id]
+      [nama, jenis, harga, kecepatan, masaAktif, satuan, hargaAgen, ph, pp, status, id]
     );
     res.json({ ok: true });
   } catch (e) { next(e); }
@@ -93,14 +95,41 @@ router.delete('/paket/:id', requirePJ(), requireMenu('paket', 'hapus'), async (r
 
 // ------------------------------------------------- sinkronisasi paket ↔ router
 /**
- * Kunci pencocokan paket dengan profile bandwidth di router.
- * hotspot: profile_hotspot yang dipakai saat voucher didorong ke router, jadi
- *          itu yang dibandingkan (nama_paket hanya cadangan untuk paket lama).
- * pppoe:   ivvibill tidak membuat secret PPPoE, jadi tidak ada kolom profile
- *          pppoe — nama paket yang jadi pegangan.
+ * Profil MikroTik sebuah paket, dipisahkan per jenis.
+ * hotspot → /ip/hotspot/user/profile (dipakai saat voucher didorong ke router)
+ * pppoe   → /ppp/profile (nama profile bandwidth secret)
+ *
+ * Dulu satu kolom profile_hotspot dipakai untuk dua jenis: paket PPPoE ikut
+ * menampung nama profile hotspot dan labelnya di panel menyebut "hotspot",
+ * sehingga operator mengira profil PPPoE-nya terisi padahal tidak pernah dibaca.
+ * Karena itu kolom yang tidak cocok dengan jenis selalu dinolkan, dan nilai
+ * lama (baris pppoe yang profil hotspot-nya terisi) tetap dipakai sebagai
+ * pegangan supaya tidak ada data yang tiba-tiba hilang.
+ */
+function profilPaket(jenis, body, lama = null) {
+  const baca = (k) => {
+    if (Object.prototype.hasOwnProperty.call(body, k)) return v.str(body[k], { max: 64, def: null });
+    return lama ? (lama[k] || null) : null;
+  };
+  const hotspot = jenis === 'hotspot' ? baca('profile_hotspot') : null;
+  let pppoe = null;
+  if (jenis === 'pppoe') {
+    pppoe = baca('profile_pppoe');
+    // paket lama menyimpan profil PPPoE di kolom profile_hotspot — dipindah,
+    // bukan dibuang, supaya mengisi jenis tidak mengubah data
+    if (!pppoe && lama) pppoe = lama.profile_hotspot || null;
+  }
+  return [hotspot, pppoe];
+}
+
+/**
+ * Kunci pencocokan paket dengan profile bandwidth di router — nama profile
+ * jenisnya, atau nama paket sebagai cadangan untuk paket lama yang profilnya
+ * belum diisi.
  */
 function kunciProfil(p) {
-  return String((p.jenis === 'hotspot' ? (p.profile_hotspot || p.nama_paket) : p.nama_paket) || '')
+  return String((p.jenis === 'hotspot' ? (p.profile_hotspot || p.nama_paket)
+    : (p.profile_pppoe || p.profile_hotspot || p.nama_paket)) || '')
     .toLowerCase().trim();
 }
 
@@ -168,10 +197,11 @@ router.post('/paket/sinkron', requirePJ(), requireMenu('paket', 'tambah'), async
       if (ada) { dilewati.push({ nama, alasan: `Sudah jadi paket #${ada.id}` }); continue; }
       const id = await db.insert(
         `INSERT INTO paket (id_data_server, nama_paket, jenis, harga, kecepatan, masa_aktif,
-                            satuan, harga_agen, profile_hotspot, deskripsi, status)
-         VALUES (?,?,?,?,?,?,?,?,?,?, 'nonaktif')`,
+                            satuan, harga_agen, profile_hotspot, profile_pppoe, deskripsi, status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?, 'nonaktif')`,
         [ds, nama, jenis, 0, p.kecepatan, 30, 'hari', 0,
           jenis === 'hotspot' ? nama : null,
+          jenis === 'pppoe' ? nama : null,
           `diambil dari profile router ${p.router}`]
       );
       dibuat.push({ id, nama_paket: nama, kecepatan: p.kecepatan });
@@ -197,16 +227,13 @@ const STATUS = ['baru', 'aktif', 'isolir', 'nonaktif'];
 
 /**
  * Sinkronkan status pelanggan ke secret PPPoE di router tenant.
- * Isolir/nonaktif di panel harus benar-benar memutus layanan, bukan cuma ganti
- * kolom di database.
+ * Isolir/nonaktif di panel harus benar-benar mengubah layanan, bukan cuma ganti
+ * kolom di database. Pelanggan PPPoE dengan 'profile_isolir' diisi tidak
+ * dimatikan secret-nya — bandwidth-nya diturunkan ke profil isolir miliknya
+ * (lihat monitoring.sinkronStatus).
  */
 function sinkronRouter(p, status, idDataServer) {
-  if (p.tipe !== 'pppoe' || !p.username_pppoe) return null;
-  if (status === 'isolir' || status === 'nonaktif') {
-    return mon.setSecret(p.username_pppoe, { disabled: true, idDataServer });
-  }
-  if (status === 'aktif') return mon.setSecret(p.username_pppoe, { disabled: false, idDataServer });
-  return null;
+  return mon.sinkronStatus(p, status, idDataServer);
 }
 
 /** Tulis satu lembar xlsx ke response download. */
@@ -274,6 +301,27 @@ async function validasiLokasi(req, body, def, dsBaris) {
   };
 }
 
+/**
+ * Kebijakan penagihan dari form/API pelanggan (v2.0).
+ * Profile Tagihan adalah sumber jadwal; hari_tagihan hanyalah NILAI TURUNAN
+ * dari tanggal_isolir profil, jadi keduanya tidak pernah bertentangan.
+ * Tanpa profil, perilaku lama berlaku (hari_tagihan diketik manual, default 1).
+ */
+async function kebijakanTagihanPelanggan(ds, body, lama = null) {
+  const hariLama = Number((lama && lama.hari_tagihan) || 1);
+  let pt;
+  if (Object.prototype.hasOwnProperty.call(body, 'id_profil_tagihan')) {
+    pt = await profilCtl.profilTenant(ds, body.id_profil_tagihan);
+  } else if (lama && lama.id_profil_tagihan) {
+    pt = await profilCtl.satu(lama.id_profil_tagihan, ds, 'ringkas');
+  }
+  const eksplisit = v.num(body.hari_tagihan, { min: 1, max: 28, int: true, def: null });
+  return {
+    idProfilTagihan: pt ? Number(pt.id) : null,
+    hariTagihan: pt ? Number(pt.tanggal_isolir) : (eksplisit !== null ? eksplisit : hariLama)
+  };
+}
+
 router.get('/pelanggan', async (req, res, next) => {
   try {
     const f = filterDaftar(req);
@@ -283,11 +331,14 @@ router.get('/pelanggan', async (req, res, next) => {
     const rows = await db.q(
       `SELECT p.*, pk.nama_paket, pk.harga, ps.online AS pppoe_online, ps.last_seen,
          ps.ip_address AS ip_lokal,
+         pt.nama AS profil_tagihan, pt.tanggal_isolir AS profil_tanggal_isolir,
          mt.nama AS nama_topologi, mt.titik_koordinat, md.nama AS nama_desa,
          o.mac AS mac_onu, o.sn AS sn_onu,
          rd.rx_dbm, rd.redaman_db, rd.status AS status_redaman
        FROM pelanggan p
        LEFT JOIN paket pk ON pk.id = p.id_paket
+       LEFT JOIN profil_tagihan pt ON pt.id = p.id_profil_tagihan
+         AND pt.id_data_server = p.id_data_server
        LEFT JOIN pppoe_status ps ON ps.id_pelanggan = p.id
        LEFT JOIN master_topologi mt ON mt.id = p.id_master_topologi
        LEFT JOIN master_desa md ON md.id = p.id_master_desa
@@ -333,7 +384,7 @@ router.get('/pelanggan/unmanage', requireRole('superadmin', 'master', 'teknisi')
 // menampilkannya di template hanya membingungkan pengguna.
 const KOLOM_EXPORT = ['nama', 'tipe', 'paket', 'agen', 'username_pppoe',
   'password_pppoe', 'nomor_whatsapp', 'email', 'alamat', 'ip_address', 'mac_address',
-  'status', 'tanggal_masuk', 'hari_tagihan'];
+  'status', 'tanggal_masuk', 'profil_tagihan', 'hari_tagihan'];
 
 /** Judul kolom memakai Bahasa Indonesia; import tetap mengenali nama lama. */
 const LABEL_ID = {
@@ -341,7 +392,8 @@ const LABEL_ID = {
   username_pppoe: 'Username PPPoE', password_pppoe: 'Password PPPoE',
   nomor_whatsapp: 'Nomor WhatsApp', email: 'Email', alamat: 'Alamat',
   ip_address: 'IP Address', mac_address: 'MAC Address', status: 'Status',
-  tanggal_masuk: 'Tanggal Masuk', hari_tagihan: 'Hari Tagihan', kode: 'Kode'
+  tanggal_masuk: 'Tanggal Masuk', profil_tagihan: 'Profile Tagihan',
+  hari_tagihan: 'Hari Tagihan', kode: 'Kode'
 };
 const judul = (k) => LABEL_ID[k] || k;
 
@@ -356,15 +408,16 @@ const PETUNJUK = [
   'Username dan Password PPPoE boleh dikosongkan; bila diisi username dan sudah dipakai pelanggan lain, baris itu ditolak.',
   'Nomor WhatsApp tanpa tanda +, contoh 081234567890',
   'Tanggal Masuk: YYYY-MM-DD, contoh 2026-10-08 (kosong = hari ini)',
-  'Hari Tagihan: angka 1 sampai 28 (kosong = 1)',
+  'Profile Tagihan: NAMAnya persis seperti di menu Profile Tagihan (mis. IVV-10). Berisi tanggal buat/kirim/isolir, PPN dan peringatan satu golongan warga.',
+  'Hari Tagihan: angka 1 sampai 28 (kosong = 1). HANYA dipakai bila kolom Profile Tagihan kosong — bila profil terisi, tanggal isolir profil yang berlaku.',
   'Kode pelanggan dibuat otomatis oleh sistem, jadi tidak perlu dan tidak bisa diisi dari berkas.',
   'Import hanya MENAMBAH pelanggan baru. Baris yang sudah ada tidak diubah dan WhatsApp tidak dikirim saat import.',
   'Baris kosong dan baris yang diawali # diabaikan. Maksimal 1000 baris sekali import.'
 ];
 
 const CONTOH = [
-  ['Budi Santoso', 'pppoe', '10M Rumahan', '', 'budi01', 'rahasia123', '081234567890', '', 'Jl. Merdeka No. 1', '', '', 'baru', '2026-10-08', '1'],
-  ['Siti Aminah', 'hotspot', 'Tiket 3 Jam', '', '', '', '089876543210', '', 'Perum Griya Asri C2', '', '', 'aktif', '2026-10-08', '5']
+  ['Budi Santoso', 'pppoe', '10M Rumahan', '', 'budi01', 'rahasia123', '081234567890', '', 'Jl. Merdeka No. 1', '', '', 'baru', '2026-10-08', 'IVV-10', '10'],
+  ['Siti Aminah', 'hotspot', 'Tiket 3 Jam', '', '', '', '089876543210', '', 'Perum Griya Asri C2', '', '', 'aktif', '2026-10-08', '', '5']
 ];
 
 /** Nilai sel → teks (Date jadi tanggal ISO, null jadi string kosong). */
@@ -380,10 +433,13 @@ async function barisEkspor(req) {
   const rows = await db.q(
     `SELECT p.nama, p.tipe, pk.nama_paket AS paket, ag.nama AS agen,
        p.username_pppoe, p.password_pppoe, p.nomor_whatsapp, p.email, p.alamat,
-       p.ip_address, p.mac_address, p.status, p.tanggal_masuk, p.hari_tagihan
+       p.ip_address, p.mac_address, p.status, p.tanggal_masuk,
+       pt.nama AS profil_tagihan, p.hari_tagihan
      FROM pelanggan p
      LEFT JOIN paket pk ON pk.id = p.id_paket
      LEFT JOIN agen ag ON ag.id = p.id_agen
+     LEFT JOIN profil_tagihan pt ON pt.id = p.id_profil_tagihan
+       AND pt.id_data_server = p.id_data_server
      WHERE ${f.where}
      ORDER BY p.id DESC LIMIT 5000`, f.params
   );
@@ -443,6 +499,8 @@ const HEADER_IMPOR = {
   status: 'status',
   tanggalmasuk: 'tanggal_masuk', tglmasuk: 'tanggal_masuk', tgl: 'tanggal_masuk',
   haritagihan: 'hari_tagihan',
+  // v2.0 — "Profile Tagihan" / "Profil Tagihan" (dan varian tanpa spasi)
+  profiletagihan: 'profil_tagihan', profiltagihan: 'profil_tagihan',
   kode: 'kode'                            // berkas lama masih punya kolom ini; sengaja diabaikan
 };
 
@@ -479,13 +537,16 @@ router.post('/pelanggan/import', requireRole('superadmin', 'master', 'teknisi'),
     }
     const ds = tenantAktif(req);
 
-    const [paketRows, agenRows, pref] = await Promise.all([
+    const [paketRows, agenRows, pref, profilRows] = await Promise.all([
       db.q('SELECT id, nama_paket FROM paket WHERE id_data_server = ?', [ds]),
       db.q('SELECT id, nama FROM agen WHERE id_data_server = ?', [ds]),
-      db.q('SELECT prefix_invoice FROM data_server WHERE id = ?', [ds])
+      db.q('SELECT prefix_invoice FROM data_server WHERE id = ?', [ds]),
+      db.q(`SELECT id, nama, tanggal_isolir FROM profil_tagihan
+            WHERE id_data_server = ? AND status = 'aktif'`, [ds])
     ]);
     const petaPaket = new Map(paketRows.map(p => [String(p.nama_paket).toLowerCase(), Number(p.id)]));
     const petaAgen = new Map(agenRows.map(a => [String(a.nama).toLowerCase(), Number(a.id)]));
+    const petaProfil = new Map(profilRows.map(x => [String(x.nama).toLowerCase(), x]));
     const prefix = (pref[0] && pref[0].prefix_invoice) || 'IVV';
 
     const dipakai = new Set(
@@ -531,8 +592,17 @@ router.post('/pelanggan/import', requireRole('superadmin', 'master', 'teknisi'),
         const mac = v.str(amb(r, 'mac_address') || null, { max: 40, def: null });
         const status = v.enumOf(amb(r, 'status') || null, STATUS, 'baru');
         const tglMasuk = v.tgl(amb(r, 'tanggal_masuk') || null, hariIni);
-        const hariTagihan = v.num(amb(r, 'hari_tagihan') || null,
-          { min: 1, max: 28, def: 1, int: true });
+        // v2.0: Profile Tagihan adalah sumber jadwal. Kalau terisi, hari_tagihan
+        // mengikuti tanggal_isolir profil; kalau kosong, kolom Hari Tagihan lama
+        // tetap berlaku persis seperti sebelum v2.0.
+        const namaProfil = amb(r, 'profil_tagihan');
+        let pt = null;
+        if (namaProfil) {
+          pt = petaProfil.get(namaProfil.toLowerCase()) || null;
+          if (!pt) throw new Error(`Profile Tagihan "${namaProfil}" tidak ditemukan (atau nonaktif) di data server ini`);
+        }
+        const hariTagihan = pt ? Number(pt.tanggal_isolir)
+          : v.num(amb(r, 'hari_tagihan') || null, { min: 1, max: 28, def: 1, int: true });
 
         let idPaket = null;
         const namaPaket = amb(r, 'paket');
@@ -555,10 +625,10 @@ router.post('/pelanggan/import', requireRole('superadmin', 'master', 'teknisi'),
         await db.insert(
           `INSERT INTO pelanggan (id_data_server, kode, nama, alamat, nomor_whatsapp, email, tipe,
             id_paket, id_agen, username_pppoe, password_pppoe, ip_address, mac_address,
-            tanggal_masuk, hari_tagihan, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            tanggal_masuk, hari_tagihan, id_profil_tagihan, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [ds, kode, nama, alamat, nowa, email, tipe, idPaket, idAgen,
-            username, pass, ip, mac, tglMasuk, hariTagihan, status]
+            username, pass, ip, mac, tglMasuk, hariTagihan, pt ? Number(pt.id) : null, status]
         );
         if (username) dipakai.add(username.toLowerCase());
         sukses += 1;
@@ -599,6 +669,7 @@ async function ubahStatusBulk(req, res, next) {
         gagal.push({ id, alasan: 'Hanya penanggung jawab yang dapat menonaktifkan' }); continue;
       }
       const ds = Number(p.id_data_server) || tenantAktif(req);
+      const sebelumnya = p.status;
       await db.run('UPDATE pelanggan SET status = ? WHERE id = ?', [status, id]);
       let router = null;
       try {
@@ -606,9 +677,31 @@ async function ubahStatusBulk(req, res, next) {
       } catch (e) {
         router = { router: null, gagal: [String(e.message).slice(0, 120)] };
       }
+      // Aksi manual harus memberi efek yang sama dengan siklus otomatis:
+      // pelanggan diisolir = layanan benar-benar dibatasi/putus DI ROUTER
+      // (sudah ditangani sinkronRouter) + warga dikabari lewat WA.
+      let waTerkirim = false;
+      try {
+        if (status === 'isolir' && sebelumnya !== 'isolir') {
+          waTerkirim = await billing.kirimWaIsolirPelanggan(id, ds);
+          const t = await db.one(
+            `SELECT nomor_invoice, total FROM tagihan WHERE id_pelanggan = ? AND status != 'batal'
+             ORDER BY (status = 'lunas'), jatuh_tempo ASC, id DESC LIMIT 1`, [id]);
+          await db.insert(
+            'INSERT INTO issue_pelanggan (id_pelanggan, tipe, pesan) VALUES (?,?,?)',
+            [id, 'isolir', t ? `Isolir manual — tagihan ${t.nomor_invoice} (Rp ${Number(t.total).toLocaleString('id-ID')})`
+              : 'Isolir manual dari panel']);
+        }
+        if (status === 'aktif' && sebelumnya === 'isolir') {
+          await db.run('DELETE FROM issue_pelanggan WHERE id_pelanggan = ? AND tipe IN (?,?)',
+            [id, 'menunggak', 'isolir']);
+        }
+      } catch (e) {
+        router = { ...(router || {}), gagal: [...((router && router.gagal) || []), `WA: ${String(e.message).slice(0, 120)}`] };
+      }
       await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
         [req.user.id, ds, 'ubah_status_pelanggan', `#${id} ${p.nama} -> ${status}`, (req.ip || '').replace('::ffff:', '')]);
-      diubah.push({ id, status, router });
+      diubah.push({ id, status, router, wa_terkirim: waTerkirim });
     }
     res.json({ diubah, gagal });
   } catch (e) { next(e); }
@@ -631,11 +724,14 @@ router.get('/pelanggan/:id', async (req, res, next) => {
     const p = await db.one(
       `SELECT p.*, pk.nama_paket, pk.harga, ps.online AS pppoe_online, ps.last_seen,
          ps.ip_address AS ip_lokal,
+         pt.nama AS profil_tagihan, pt.tanggal_isolir AS profil_tanggal_isolir,
          mt.nama AS nama_topologi, md.nama AS nama_desa,
          o.mac AS mac_onu, o.sn AS sn_onu,
          rd.rx_dbm, rd.redaman_db, rd.status AS status_redaman
        FROM pelanggan p
        LEFT JOIN paket pk ON pk.id = p.id_paket
+       LEFT JOIN profil_tagihan pt ON pt.id = p.id_profil_tagihan
+         AND pt.id_data_server = p.id_data_server
        LEFT JOIN pppoe_status ps ON ps.id_pelanggan = p.id
        LEFT JOIN master_topologi mt ON mt.id = p.id_master_topologi
        LEFT JOIN master_desa md ON md.id = p.id_master_desa
@@ -671,8 +767,14 @@ router.post('/pelanggan', requireRole('superadmin', 'master', 'teknisi'),
     const ip = v.str(req.body.ip_address, { max: 40, def: null });
     const mac = v.str(req.body.mac_address, { max: 40, def: null });
     const tglMasuk = v.tgl(req.body.tanggal_masuk, new Date().toISOString().slice(0, 10));
-    const hariTagihan = v.num(req.body.hari_tagihan, { min: 1, max: 28, def: 1, int: true });
     const idAgen = v.num(req.body.id_agen, { int: true, min: 1, def: null });
+    // profil isolir hanya berlaku untuk PPPoE (profil di /ppp/profile);
+    // pelanggan hotspot diisolir lewat akun user/vouchernya sendiri
+    const profilIsolir = v.str(req.body.profile_isolir, { max: 64, def: null });
+    let jadwal;
+    try { jadwal = await kebijakanTagihanPelanggan(ds, req.body, null); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    const hariTagihan = jadwal.hariTagihan;
     let lok;
     try { lok = await validasiLokasi(req, req.body, null); }
     catch (e) { return res.status(400).json({ error: e.message }); }
@@ -694,10 +796,12 @@ router.post('/pelanggan', requireRole('superadmin', 'master', 'teknisi'),
     const id = await db.insert(
       `INSERT INTO pelanggan (id_data_server, kode, nama, alamat, nomor_whatsapp, email, tipe,
         id_paket, id_agen, username_pppoe, password_pppoe, ip_address, mac_address,
-        tanggal_masuk, hari_tagihan, status,
+        tanggal_masuk, hari_tagihan, id_profil_tagihan, status, profile_isolir,
         id_master_topologi, id_master_desa, port_odp, latitude, longitude)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'baru',?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?, 'baru', ?,?,?,?,?,?)`,
       [ds, kode, nama, alamat, nowa, email, tipe, idPaket, idAgen, username, passPppoe, ip, mac, tglMasuk, hariTagihan,
+        jadwal.idProfilTagihan,
+        tipe === 'pppoe' ? profilIsolir : null,
         lok.idMasterTopologi, lok.idMasterDesa, lok.portOdp, lok.latitude, lok.longitude]
     );
     await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
@@ -733,6 +837,12 @@ router.put('/pelanggan/:id', requireRole('superadmin', 'master', 'teknisi', 'age
     const ip = v.str(req.body.ip_address, { max: 40, def: p.ip_address });
     const status = v.enumOf(req.body.status, ['baru', 'aktif', 'isolir', 'nonaktif'], p.status);
     const catatan = v.str(req.body.catatan, { max: 5000, def: p.catatan });
+    // dikirim kosong = sengaja dihapus (isolir kembali ke perilaku matikan secret)
+    const profilIsolir = Object.prototype.hasOwnProperty.call(req.body, 'profile_isolir')
+      ? v.str(req.body.profile_isolir, { max: 64, def: null }) : p.profile_isolir;
+    let jadwal;
+    try { jadwal = await kebijakanTagihanPelanggan(ds, req.body, p); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
     let lok;
     try { lok = await validasiLokasi(req, req.body, p, ds); }
     catch (e) { return res.status(400).json({ error: e.message }); }
@@ -743,11 +853,14 @@ router.put('/pelanggan/:id', requireRole('superadmin', 'master', 'teknisi', 'age
     }
 
     const statusBaru = status !== p.status;
+    const profilBerubah = (profilIsolir || null) !== (p.profile_isolir || null);
     await db.run(
       `UPDATE pelanggan SET nama=?, alamat=?, nomor_whatsapp=?, id_paket=?, username_pppoe=?,
-        password_pppoe=?, ip_address=?, status=?, catatan=?,
+        password_pppoe=?, ip_address=?, status=?, profile_isolir=?, catatan=?,
+        id_profil_tagihan=?, hari_tagihan=?,
         id_master_topologi=?, id_master_desa=?, port_odp=?, latitude=?, longitude=? WHERE id=?`,
-      [nama, alamat, nowa, idPaket, username, passPppoe, ip, status, catatan,
+      [nama, alamat, nowa, idPaket, username, passPppoe, ip, status, profilIsolir, catatan,
+        jadwal.idProfilTagihan, jadwal.hariTagihan,
         lok.idMasterTopologi, lok.idMasterDesa, lok.portOdp, lok.latitude, lok.longitude, id]
     );
 
@@ -757,11 +870,14 @@ router.put('/pelanggan/:id', requireRole('superadmin', 'master', 'teknisi', 'age
       await wa.enqueue({ tujuan: nowa, jenis: 'aktivasi', pesan, idRef: id, idDataServer: ds });
     }
 
-    // status adalah cara operator memutus koneksi, jadi secret PPPoE ikut diset
+    // status adalah cara operator memutus/membatasi koneksi, jadi secret PPPoE
+    // ikut diset — termasuk saat profil isolir pelanggan diubah ketika status
+    // sudah isolir (profil baru langsung dipakai)
     let router = null;
-    if (statusBaru) {
+    if (statusBaru || (status === 'isolir' && profilBerubah)) {
       try {
-        router = await sinkronRouter({ ...p, username_pppoe: username }, status, ds);
+        router = await sinkronRouter({ ...p, id, tipe: p.tipe, username_pppoe: username,
+          profile_isolir: profilIsolir }, status, ds);
       } catch (e) {
         router = { router: null, gagal: [String(e.message).slice(0, 120)] };
       }

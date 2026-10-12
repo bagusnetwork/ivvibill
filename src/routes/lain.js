@@ -447,7 +447,9 @@ router.get('/setting', requirePJ(), async (req, res, next) => {
         nomor_whatsapp: srv.nomor_whatsapp, email: srv.email, alamat: srv.alamat,
         prefix_invoice: srv.prefix_invoice,
         jadwal_buat_hari: srv.jadwal_buat_hari, jadwal_kirim_hari: srv.jadwal_kirim_hari,
-        jadwal_limit_hari: srv.jadwal_limit_hari, jam_kirim: srv.jam_kirim, ppn_persen: srv.ppn_persen
+        jadwal_limit_hari: srv.jadwal_limit_hari, jam_kirim: srv.jam_kirim,
+        jam_peringatan: srv.jam_peringatan, jam_isolir: srv.jam_isolir,
+        ppn_persen: srv.ppn_persen
       },
       setting: rows, template: tpl
     });
@@ -469,6 +471,11 @@ router.put('/setting', requirePJ(), requireMenu('setting', 'ubah'), async (req, 
     if (b.jadwal_kirim_hari !== undefined) set('jadwal_kirim_hari', v.num(b.jadwal_kirim_hari, { min: 1, max: 28, int: true }));
     if (b.jadwal_limit_hari !== undefined) set('jadwal_limit_hari', v.num(b.jadwal_limit_hari, { min: 1, max: 28, int: true }));
     if (b.jam_kirim !== undefined) set('jam_kirim', v.str(b.jam_kirim, { min: 4, max: 5 }));
+    // jam siklus: diverifikasi bentuk HH:MM supaya perbandingan "sudah lewat
+    // jam" di scheduler tidak pernah dibandingkan dengan teks sembarang
+    const jam = (x) => /^\d{1,2}:\d{2}$/.test(String(x || '')) ? String(x) : null;
+    if (b.jam_peringatan !== undefined) set('jam_peringatan', jam(b.jam_peringatan) || '08:00');
+    if (b.jam_isolir !== undefined) set('jam_isolir', jam(b.jam_isolir) || '09:00');
     if (b.ppn_persen !== undefined) set('ppn_persen', v.num(b.ppn_persen, { min: 0, max: 100 }));
     if (patch.length) {
       vals.push(ds);
@@ -500,7 +507,11 @@ router.get('/wa/log', requirePJ(), async (req, res, next) => {
     const antreTs = tenantSql(req, 'id_data_server');
     const antre = await db.q(
       `SELECT * FROM wa_queue WHERE status='pending'${antreTs.sql} ORDER BY id LIMIT 50`, antreTs.params);
-    res.json({ data: rows, antrean: antre });
+    // pesan gagal harus terlihat di panel: tanpa ini operator hanya melihat
+    // antrean kosong padahal kwitansi/pesan pelanggan tidak pernah sampai
+    const gagal = await db.q(
+      `SELECT * FROM wa_queue WHERE status='gagal'${antreTs.sql} ORDER BY id DESC LIMIT 50`, antreTs.params);
+    res.json({ data: rows, antrean: antre, gagal });
   } catch (e) { next(e); }
 });
 
@@ -515,6 +526,12 @@ router.post('/wa/kirim', requirePJ(), requireMenu('wa', 'kirim'), async (req, re
 
 router.post('/wa/proses', requirePJ(), requireMenu('wa', 'proses'), async (req, res, next) => {
   try { res.json(await wa.prosesAntrean(30, tenantAktif(req))); }
+  catch (e) { next(e); }
+});
+
+/** Coba lagi pesan berstatus 'gagal' — untuk yang tidak mau menunggu cron menit. */
+router.post('/wa/ulangi', requirePJ(), requireMenu('wa', 'proses'), async (req, res, next) => {
+  try { res.json(await wa.prosesAntrean(20, tenantAktif(req), 'gagal')); }
   catch (e) { next(e); }
 });
 

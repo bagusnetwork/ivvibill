@@ -267,7 +267,10 @@ async function setSecret(user, { disabled, idDataServer }) {
       await c.run(['/ppp/secret/set', '=.id=' + secret[0]['.id'],
         '=disabled=' + (disabled ? 'yes' : 'no')]);
       if (disabled) {
-        const sesi = await c.run(['/ppp/active/print', '?user=' + nama]);
+        // Atribut sesi di /ppp/active adalah `name` (bukan `user` — RouterOS
+        // 7.19.2 tidak punya `user` di daftar atribut, sehingga ?user= selalu
+        // mengembalikan 0 baris dan sesi tidak pernah dibuang).
+        const sesi = await c.run(['/ppp/active/print', '?name=' + nama]);
         for (const s of sesi) {
           if (!s['.id']) continue;
           try { await c.run(['/ppp/active/remove', '=.id=' + s['.id']]); hasil.sesi_dibuang++; }
@@ -281,6 +284,134 @@ async function setSecret(user, { disabled, idDataServer }) {
     } finally { if (c) c.close(); }
   }
   return hasil;
+}
+
+/**
+ * Ganti profile bandwidth sebuah secret PPPoE (bukan sekadar mematikan).
+ * Isolir ala ISP: pelanggan tetap bisa connect tapi kecepatannya turun ke
+ * profile khusus miliknya — tiap rumah berbeda, ada yang 1M ada yang 512k.
+ * RouterOS hanya membaca profile saat client naik, jadi sesi yang sedang jalan
+ * harus dibuang supaya profile baru langsung terpakai.
+ *
+ * Nama profile dicek dulu di /ppp/profile: RouterOS 7 menolak nama yang tidak
+ * dikenal ("input does not match any value of profile"), dan diam-diam
+ * meninggalkan secret dengan profile palsu jauh lebih buruk daripada dibatalkan
+ * + dilaporkan.
+ *
+ * return { router, profil, profil_lama, sesi_dibuang, tidak_ada, gagal }
+ */
+async function setProfilSecret(user, { profil, idDataServer }) {
+  const nama = String(user || '').trim();
+  if (!nama) throw new Error('Username PPPoE kosong');
+  const target = bersih(profil);
+  const hasil = { router: null, profil: null, profil_lama: null,
+    sesi_dibuang: 0, tidak_ada: false, gagal: [] };
+  if (!target) { hasil.gagal.push('Profile kosong'); return hasil; }
+  for (const r of await routerTenant(idDataServer)) {
+    let c;
+    try {
+      const { dev } = await perangkatMikrotik(r.id);
+      c = klien(dev);
+      await sambungkan(c);
+      const secret = await c.run(['/ppp/secret/print', '=.proplist=.id,name,profile',
+        '?name=' + nama]);
+      if (!secret.length || !secret[0]['.id']) continue;
+      const s = secret[0];
+      const ada = await c.run(['/ppp/profile/print', '=.proplist=name', '?name=' + target]);
+      if (!ada.length) {
+        hasil.tidak_ada = true;
+        hasil.gagal.push(`${dev.nama}: profile '${target}' tidak ada di /ppp/profile`);
+        break;
+      }
+      await c.run(['/ppp/secret/set', `=.id=${s['.id']}`,
+        `=profile=${target}`, '=disabled=no']);
+      hasil.profil_lama = bersih(s.profile);
+      hasil.profil = target;
+      const sesi = await c.run(['/ppp/active/print', '=.proplist=.id', '?name=' + nama]);
+      for (const x of sesi) {
+        if (!x['.id']) continue;
+        try { await c.run(['/ppp/active/remove', '=.id=' + x['.id']]); hasil.sesi_dibuang++; }
+        catch (_) { /* sesi sudah putus sendiri */ }
+      }
+      hasil.router = dev.nama;
+      return hasil;
+    } catch (e) {
+      hasil.gagal.push(`${r.nama}: ${String(e.message).slice(0, 120)}`);
+    } finally { if (c) c.close(); }
+  }
+  return hasil;
+}
+
+/**
+ * Satu jalur untuk menerapkan status pelanggan ke secret PPPoE-nya: tombol
+ * Isolir/Aktifkan/Nonaktif di panel, form ubah pelanggan, dan scheduler tagihan
+ * semuanya lewat sini supaya tidak berbeda perilaku.
+ *
+ * isolir   : ada 'profile_isolir' → bandwidth diturunkan ke profile itu dan
+ *            profile asal disimpan di profil_sebelum_isolir (bisa dikembalikan
+ *            saat lunas). Kolom itu kosong → perilaku lama: secret dimatikan.
+ *            Kalau profile isolir ternyata tidak ada di router, layanan tetap
+ *            diputus lewat disabled=yes — isolir tidak boleh gagal diam-diam.
+ * aktif    : secret dihidupkan; kalau dulu diisolir lewat profile, profile asal
+ *            dikembalikan lalu kolomnya dibersihkan.
+ * nonaktif : secret dimatikan, profile tidak disentuh.
+ *
+ * return null (bukan PPPoE / tanpa username) | { cara, ...hasil router }
+ */
+async function sinkronStatus(p, status, idDataServer) {
+  if (!p || p.tipe !== 'pppoe' || !p.username_pppoe) return null;
+  const user = p.username_pppoe;
+
+  if (status === 'isolir') {
+    const profil = bersih(p.profile_isolir);
+    if (profil) {
+      const r = await setProfilSecret(user, { profil, idDataServer });
+      if (r.router) {
+        r.cara = 'profil';
+        if (p.id && !bersih(p.profil_sebelum_isolir) && r.profil_lama && r.profil_lama !== profil) {
+          await db.run('UPDATE pelanggan SET profil_sebelum_isolir = ? WHERE id = ?',
+            [r.profil_lama, p.id]);
+        }
+        return r;
+      }
+      if (r.tidak_ada) {
+        const d = await setSecret(user, { disabled: true, idDataServer });
+        d.cara = 'matikan';
+        d.gagal = [...r.gagal, ...(d.gagal || [])];
+        return d;
+      }
+      r.cara = 'profil';
+      return r;
+    }
+    const d = await setSecret(user, { disabled: true, idDataServer });
+    d.cara = 'matikan';
+    return d;
+  }
+
+  if (status === 'nonaktif') {
+    const d = await setSecret(user, { disabled: true, idDataServer });
+    d.cara = 'matikan';
+    return d;
+  }
+
+  if (status === 'aktif') {
+    const lama = bersih(p.profil_sebelum_isolir);
+    if (lama && p.id) {
+      const r = await setProfilSecret(user, { profil: lama, idDataServer });
+      await db.run('UPDATE pelanggan SET profil_sebelum_isolir = NULL WHERE id = ?', [p.id]);
+      if (r.router) { r.cara = 'profil'; return r; }
+      const d = await setSecret(user, { disabled: false, idDataServer });
+      d.cara = 'hidupkan';
+      d.gagal = [...(d.gagal || []),
+        `profile '${lama}' tidak ada di router — secret dihidupkan tanpa ganti profile`];
+      return d;
+    }
+    const d = await setSecret(user, { disabled: false, idDataServer });
+    d.cara = 'hidupkan';
+    return d;
+  }
+
+  return null;
 }
 
 /**
@@ -770,7 +901,7 @@ async function sesiSnapshot(idPerangkat, menit = 5) {
 
 module.exports = {
   pollRouter, cekPppoePelanggan, pollSemuaRouter, klien, perangkatMikrotik, sambungkan,
-  setSecret, sesiTakTerkenal, routerTenant,
+  setSecret, setProfilSecret, sinkronStatus, sesiTakTerkenal, routerTenant,
   pushHotspotAktif, profilHotspot, profilRouter, tambahHotspotUser, hapusHotspotUser, pushVoucher,
   intervalVoucher,
   urlPush, sandiPush, pasangPush, simpanPush, sesiSnapshot, tokenBaru,

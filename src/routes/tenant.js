@@ -31,6 +31,10 @@ const MENU = [
   // mencatat kehadirannya sendiri lewat /teknisi/ tanpa bergantung grant grup,
   // sama seperti Order Pekerjaan.
   'absen',
+  // v2.0: Profile Tagihan — jadwal penagihan per golongan warga. Pengganti
+  // "Hari Tagihan" per pelanggan, jadi grant-nya sendiri (lihat/tambah/ubah/
+  // hapus/tautkan) dan tidak ikut menu Tagihan.
+  'profil_tagihan',
   'data_server', 'group_akses'
 ];
 
