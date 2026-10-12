@@ -349,10 +349,77 @@ async function setProfilSecret(user, { profil, idDataServer }) {
 }
 
 /**
+ * Aktivasi pelanggan baru: secret PPPoE harus benar-benar ADA di router.
+ * setSecret()/sinkronStatus() hanya men-set secret yang sudah tercetak
+ * (`if (!secret.length) continue`), jadi pelanggan hasil registrasi panel
+ * selama ini bisa berstatus 'aktif' di database tapi tidak pernah bisa
+ * konek — persis kasus username yang tidak punya secret di RO-IVVI.
+ *
+ * Fungsi ini mencetak secret bila belum ada (name + password + service=pppoe
+ * + profile milik paketnya), dan bila sudah ada tinggal memastikan ia
+ * enabled. Profil yang tidak ada di /ppp/profile TIDAK membatalkan aktivasi:
+ * secret dibuat tanpa profile dan flag `profil_tidak_ada` dikembalikan supaya
+ * operator tahu bandwidth-nya belum dipatok.
+ *
+ * return { router: [nama], dibuat: [], diaktifkan: [], sudah_aktif: [],
+ *          gagal: [], profil_tidak_ada: false, tanpa_router: false }
+ */
+async function pastikanSecret(user, { password, profil, idDataServer }) {
+  const nama = bersih(user, 63);
+  if (!nama) throw new Error('Username PPPoE kosong — tidak bisa diaktivasi');
+  const hasil = { router: [], dibuat: [], diaktifkan: [], sudah_aktif: [],
+    gagal: [], profil_tidak_ada: false, tanpa_router: false };
+  const daftar = await routerTenant(idDataServer);
+  if (!daftar.length) { hasil.tanpa_router = true; return hasil; }
+  const sandi = bersih(password, 63);
+  const target = bersih(profil);
+  for (const r of daftar) {
+    let c;
+    try {
+      const { dev } = await perangkatMikrotik(r.id);
+      c = klien(dev);
+      await sambungkan(c);
+      let profilPakai = target;
+      if (profilPakai) {
+        const pf = await c.run(['/ppp/profile/print', '=.proplist=.id', '?name=' + profilPakai]);
+        if (!pf.length || !pf[0]['.id']) {
+          hasil.profil_tidak_ada = true;
+          hasil.gagal.push(`${dev.nama}: profile '${profilPakai}' tidak ada di /ppp/profile —`
+            + ' secret dibuat tanpa pembatasan bandwidth');
+          profilPakai = null;
+        }
+      }
+      const rows = await c.run(['/ppp/secret/print', '=.proplist=.id,disabled', '?name=' + nama]);
+      const s = rows[0];
+      if (!s || !s['.id']) {
+        const add = ['/ppp/secret/add', `=name=${nama}`, '=service=pppoe'];
+        if (sandi) add.push(`=password=${sandi}`);
+        if (profilPakai) add.push(`=profile=${profilPakai}`);
+        add.push('=comment=ivvibill');
+        await c.run(add);
+        hasil.dibuat.push(dev.nama);
+      } else if (String(s.disabled) === 'true' || s.disabled === 'yes') {
+        const set = ['/ppp/secret/set', `=.id=${s['.id']}`, '=disabled=no'];
+        if (profilPakai) set.push(`=profile=${profilPakai}`);
+        await c.run(set);
+        hasil.diaktifkan.push(dev.nama);
+      } else {
+        // sudah hidup: profile hanya diset ulang bila paket memang punya profil
+        if (profilPakai) await c.run(['/ppp/secret/set', `=.id=${s['.id']}`, `=profile=${profilPakai}`]);
+        hasil.sudah_aktif.push(dev.nama);
+      }
+      hasil.router.push(dev.nama);
+    } catch (e) {
+      hasil.gagal.push(`${r.nama}: ${String(e.message).slice(0, 120)}`);
+    } finally { if (c) c.close(); }
+  }
+  return hasil;
+}
+
+/**
  * Satu jalur untuk menerapkan status pelanggan ke secret PPPoE-nya: tombol
  * Isolir/Aktifkan/Nonaktif di panel, form ubah pelanggan, dan scheduler tagihan
- * semuanya lewat sini supaya tidak berbeda perilaku.
- *
+ * semuanya lewat sini supaya tidak berbeda perilaku. *
  * isolir   : ada 'profile_isolir' → bandwidth diturunkan ke profile itu dan
  *            profile asal disimpan di profil_sebelum_isolir (bisa dikembalikan
  *            saat lunas). Kolom itu kosong → perilaku lama: secret dimatikan.
@@ -907,7 +974,7 @@ async function sesiSnapshot(idPerangkat, menit = 5) {
 
 module.exports = {
   pollRouter, cekPppoePelanggan, pollSemuaRouter, klien, perangkatMikrotik, sambungkan,
-  setSecret, setProfilSecret, sinkronStatus, sesiTakTerkenal, routerTenant,
+  setSecret, setProfilSecret, pastikanSecret, sinkronStatus, sesiTakTerkenal, routerTenant,
   pushHotspotAktif, profilHotspot, profilRouter, tambahHotspotUser, hapusHotspotUser, pushVoucher,
   intervalVoucher,
   urlPush, sandiPush, pasangPush, simpanPush, sesiSnapshot, tokenBaru,

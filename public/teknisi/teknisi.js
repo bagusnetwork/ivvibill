@@ -133,8 +133,125 @@ async function loadPelanggan() {
         <td>${esc(p.nama_paket || '-')}</td><td>${esc(p.username_pppoe || '-')}</td>
         <td><span class="badge ${p.status === 'aktif' ? 'ok' : p.status === 'isolir' ? 'bad' : 'mute'}">${esc(p.status)}</span></td>
         <td>${p.pppoe_online ? '<span class="badge ok">online</span>' : '<span class="badge mute">offline</span>'}</td>
-      </tr>`).join('') || '<tr><td colspan="7" class="empty">Kosong</td></tr>';
+        <td class="t-actions">
+          <button class="btn sm" onclick="remoteOnu(${p.id})" title="Auto-generate NAT MikroTik → web ONU">Remote ONU</button>
+        </td>
+      </tr>`).join('') || '<tr><td colspan="8" class="empty">Kosong</td></tr>';
   } catch (e) { toast(e.message, true); }
+}
+
+// ---------------- registrasi & remote ONU oleh teknisi (v2.2.0)
+// Teknisi mencetak calon pelanggan di lapangan (status 'baru') dan membuka web
+// ONU-nya. Menyalakan layanan bukan bagiannya: itu tombol Aktivasi di panel
+// admin, yang juga mencetak secret PPPoE lalu mengirim WhatsApp ke warga.
+let OPSI_DAFTAR = null;
+
+async function muatOpsiDaftar() {
+  try {
+    if (!OPSI_DAFTAR) {
+      OPSI_DAFTAR = await Promise.all([
+        API.get('/api/paket'), API.get('/api/master/topologi'), API.get('/api/master/desa'),
+        API.get('/api/profil-tagihan').catch(() => ({ data: [] }))
+      ]);
+    }
+    const [pk, tp, ds, pt] = OPSI_DAFTAR;
+    document.getElementById('dPaket').innerHTML = '<option value="">— belum dipilih —</option>'
+      + (pk.data || []).filter(p => p.status === 'aktif').map(p =>
+        `<option value="${p.id}">${esc(p.nama_paket)}${p.harga ? ' · ' + rupiah(p.harga) : ''}</option>`).join('');
+    const opsi = (list, port) => '<option value="">— tanpa —</option>' + (list || []).map(x =>
+      `<option value="${x.id}">${esc(x.nama)}${port ? ` (${x.jumlah_terpakai}/${x.jumlah_port} port)` : ''}</option>`).join('');
+    document.getElementById('dTopo').innerHTML = opsi(tp.data, true);
+    document.getElementById('dDesa').innerHTML = opsi(ds.data);
+    // Golongan tagihan: profil aktif paling banyak dipakai jadi pilihan awal,
+    // supaya pendaftaran lapangan tidak jatuh ke tempo hari 1 seperti dulu.
+    const profil = (pt.data || []).filter(x => x.status === 'aktif');
+    const el = document.getElementById('dProfil');
+    el.innerHTML = '<option value="">— tanpa (jadwal default) —</option>' + profil.map(x =>
+      `<option value="${x.id}">${esc(x.nama)} · tagih tgl ${x.tanggal_isolir} (${x.jumlah_pelanggan} warga)</option>`).join('');
+    if (profil.length) {
+      const favorit = profil.reduce((a, b) => (Number(b.jumlah_pelanggan) > Number(a.jumlah_pelanggan) ? b : a), profil[0]);
+      el.value = String(favorit.id);
+    }
+  } catch (e) { toast('Pilihan formulir gagal dimuat: ' + e.message, true); }
+}
+
+function formDaftar() {
+  ['dNama', 'dWa', 'dUser', 'dPass', 'dAlamat', 'dPort', 'dKoor', 'dLat', 'dLong']
+    .forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('dTgl').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('dLokasi').textContent = '';
+  muatOpsiDaftar();
+  modalOpen('mDaftar');
+}
+
+/** Titik pasang memakai GPS ponsel — sama polanya dengan absensi. */
+function ambilLokasi() {
+  const el = document.getElementById('dLokasi');
+  if (!navigator.geolocation) { el.textContent = 'browser ini tidak mendukung GPS'; return; }
+  el.textContent = 'mencari sinyal…';
+  navigator.geolocation.getCurrentPosition((p) => {
+    const lat = p.coords.latitude.toFixed(6), long = p.coords.longitude.toFixed(6);
+    document.getElementById('dLat').value = lat;
+    document.getElementById('dLong').value = long;
+    document.getElementById('dKoor').value = `${lat}, ${long}`;
+    el.textContent = `akurasi ±${Math.round(p.coords.accuracy)} m`;
+  }, (e) => {
+    el.textContent = (e && e.code === 1 ? 'izin lokasi ditolak' : 'sinyal tidak ditemukan')
+      + ' — koordinat boleh dikosongkan';
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 });
+}
+
+async function simpanDaftar() {
+  const nama = document.getElementById('dNama').value.trim();
+  if (nama.length < 2) { toast('Nama pelanggan wajib diisi', true); return; }
+  if (document.getElementById('dUser').value.trim() && !document.getElementById('dPass').value.trim()) {
+    toast('Isi password PPPoE-nya juga — secret nanti dicetak saat aktivasi.', true);
+    return;
+  }
+  const body = {
+    nama, tipe: 'pppoe',
+    alamat: document.getElementById('dAlamat').value.trim() || null,
+    nomor_whatsapp: document.getElementById('dWa').value.trim(),
+    id_paket: document.getElementById('dPaket').value || null,
+    id_profil_tagihan: document.getElementById('dProfil').value || null,
+    username_pppoe: document.getElementById('dUser').value.trim() || null,
+    password_pppoe: document.getElementById('dPass').value.trim() || null,
+    tanggal_masuk: document.getElementById('dTgl').value || null,
+    id_master_topologi: document.getElementById('dTopo').value || null,
+    id_master_desa: document.getElementById('dDesa').value || null,
+    port_odp: document.getElementById('dPort').value.trim() || null,
+    latitude: document.getElementById('dLat').value || null,
+    longitude: document.getElementById('dLong').value || null
+  };
+  try {
+    const r = await API.post('/api/pelanggan', body);
+    modalClose('mDaftar');
+    OPSI_DAFTAR = null;
+    toast(`${r.kode} terdaftar — status baru, menunggu aktivasi admin data server`);
+    loadPelanggan();
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Remote ONU: tab dibuka sinkron dari klik, rule NAT diganti, lalu diarahkan. */
+async function remoteOnu(id) {
+  const w = tabSementara();
+  toast('Menyiapkan remote ONU…');
+  try {
+    const r = await API.post(`/api/pelanggan/${id}/remote-onu`, {});
+    document.getElementById('roInfo').innerHTML = `
+      <div class="form-grid">
+        <div><div class="hint">Nama</div><b>${esc(r.nama)}</b></div>
+        <div><div class="hint">Alamat</div><b>${esc(r.alamat)}</b></div>
+        <div><div class="hint">IP pelanggan</div><b>${esc(r.ip_pelanggan)}</b></div>
+        <div><div class="hint">Router · port remote</div><b>${esc(r.router)} · ${r.port_remote}</b></div>
+        <div><div class="hint">NAT rule</div><b>${r.nat === 'update' ? 'to-addresses diupdate' : 'rule baru dibuat'}</b></div>
+        <div><div class="hint">IP dari</div><b>${esc(r.via)}</b></div>
+      </div>`;
+    const a = tautanRemoteOnu(r.link);
+    if (!arahkanTab(w, r.link)) toast('Popup diblokir browser — tekan tombol Buka di jendela ini.', true);
+    modalOpen('mRemoteOnu');
+    if (a) a.focus();
+  } catch (e) { tutupTab(w); toast(e.message, true); }
 }
 
 // ---------------- monitoring

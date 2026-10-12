@@ -101,14 +101,18 @@
       </div>
 
       <div data-view="pelanggan" data-onload="loadPelanggan" style="display:none">
-        <div class="toolbar"><input id="pq" placeholder="Cari pelanggan…" oninput="loadPelanggan()"></div>
+        <div class="toolbar"><input id="pq" placeholder="Cari pelanggan…" oninput="loadPelanggan()">
+          <div class="spacer"></div>
+          <button class="btn" onclick="formDaftar()">＋ Daftarkan Pelanggan</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
           <table><thead><tr><th>Kode</th><th>Nama</th><th>Tipe</th><th>Paket</th>
-            <th>Username</th><th>Status</th><th>Koneksi</th></tr></thead>
-          <tbody id="tbPel"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
+            <th>Username</th><th>Status</th><th>Koneksi</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbPel"><tr><td colspan="8" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
-        <p class="hint">Teknisi dapat mengubah data & status pelanggan, tetapi tidak dapat menonaktifkan
-           atau menghapus pelanggan (hanya superadmin).</p>
+        <p class="hint" id="pelPetunjuk">Teknisi dapat <b>mendaftarkan pelanggan baru</b> dan membuka
+          <b>Remote ONU</b> dari halaman ini. Status pelanggan — aktivasi, isolir, nonaktif — sengaja
+          <b>tidak</b> ada di sini: menyalakan dan memutus layanan dilakukan admin data server, dan
+          pelanggan dikabari lewat WhatsApp saat layanan diaktifkan.</p>
       </div>
 
       <div data-view="interface" data-onload="loadInterface" style="display:none">
@@ -180,7 +184,57 @@
     <button class="btn" onclick="simpanTiket()">Simpan</button></div>
 </div></div>
 
-<script src="/assets/app.js?v=20261012a"></script>
-<script src="teknisi.js"></script>
+<div class="modal-bg" id="mDaftar"><div class="modal">
+  <div class="modal-head"><h2>Daftarkan Pelanggan Baru</h2>
+    <button class="btn sm ghost" onclick="modalClose('mDaftar')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-grid">
+      <div class="form-row"><label>Nama pelanggan *</label><input id="dNama"></div>
+      <div class="form-row"><label>Nomor WhatsApp</label><input id="dWa" placeholder="08xxxxxxxxxx"></div>
+      <div class="form-row"><label>Paket</label><select id="dPaket"><option value="">— memuat —</option></select></div>
+      <div class="form-row"><label>Profile tagihan</label><select id="dProfil"><option value="">— ikut admin —</option></select>
+        <div class="hint">Jadwal penagihan golongan ini (tanggal tagihan &amp; isolir).</div></div>
+      <div class="form-row"><label>Username PPPoE</label><input id="dUser" placeholder="mis. suparno01"></div>
+      <div class="form-row"><label>Password PPPoE</label><input id="dPass"></div>
+      <div class="form-row"><label>Tanggal masuk</label><input id="dTgl" type="date"></div>
+    </div>
+    <div class="form-row"><label>Alamat</label><input id="dAlamat"></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Topologi / ODP</label><select id="dTopo"><option value="">— tanpa —</option></select></div>
+      <div class="form-row"><label>Port ODP</label><input id="dPort" placeholder="mis. 12"></div>
+      <div class="form-row"><label>Desa</label><select id="dDesa"><option value="">— tanpa —</option></select></div>
+      <div class="form-row"><label>Titik koordinat</label>
+        <input id="dKoor" readonly placeholder="belum diambil">
+      </div>
+    </div>
+    <div class="toolbar">
+      <button class="btn sm secondary" onclick="ambilLokasi()">📍 Ambil lokasi dari GPS</button>
+      <span class="hint" id="dLokasi"></span>
+    </div>
+    <input type="hidden" id="dLat"><input type="hidden" id="dLong">
+    <p class="hint">Pelanggan tersimpan berstatus <b>baru</b>. Admin data server yang mengaktifkan
+      layanannya — secret PPPoE dicetak di router dan pelanggan menerima WhatsApp pemberitahuan.</p>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mDaftar')">Batal</button>
+    <button class="btn" onclick="simpanDaftar()">Daftarkan</button></div>
+</div></div>
+
+<div class="modal-bg" id="mRemoteOnu"><div class="modal">
+  <div class="modal-head"><h2>Remote ONU — Web Browser</h2>
+    <button class="btn sm ghost" onclick="modalClose('mRemoteOnu')">✕</button></div>
+  <div class="modal-body">
+    <p id="roInfo" class="hint" style="margin-bottom:12px"></p>
+    <p class="hint">Rule dst-nat MikroTik otomatis diarahkan ke IP pelanggan (to-ports 80).
+      ONU hanya bisa dibuka bila fitur remote-nya aktif di perangkat. Satu akun hanya bisa
+      memegang satu remote selama 180 detik.</p>
+  </div>
+  <div class="modal-foot">
+    <a class="btn" id="roBuka" target="_blank" rel="noopener" hidden>🌐 Buka</a>
+    <button class="btn secondary" onclick="modalClose('mRemoteOnu')">Tutup</button>
+  </div>
+</div></div>
+
+<script src="/assets/app.js?v=20261012b"></script>
+<script src="teknisi.js?v=20261012b"></script>
 </body>
 </html>

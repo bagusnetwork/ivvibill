@@ -176,7 +176,9 @@ async function loadPelanggan() {
         <td class="t-actions">
           <button class="btn sm" onclick="remoteOnu(${p.id})" title="Auto-generate NAT MikroTik → web ONU">Remote ONU</button>
           <button class="btn sm secondary" onclick="formPelanggan(${esc(JSON.stringify(p))})">Ubah</button>
-          ${p.status !== 'aktif' ? `<button class="btn sm" onclick="plgStatus(${p.id},'aktif')">Aktifkan</button>` : ''}
+          ${p.status === 'baru'
+            ? `<button class="btn sm" onclick="aktivasiPelanggan(${p.id})" title="Cetak secret PPPoE di router, status jadi aktif, kabari pelanggan lewat WA">⚡ Aktivasi</button>`
+            : p.status !== 'aktif' ? `<button class="btn sm" onclick="plgStatus(${p.id},'aktif')">Aktifkan</button>` : ''}
           ${p.status !== 'isolir' ? `<button class="btn sm secondary" onclick="plgStatus(${p.id},'isolir')">Isolir</button>` : ''}
           ${p.status !== 'nonaktif' ? `<button class="btn sm secondary" onclick="plgStatus(${p.id},'nonaktif')">Nonaktif</button>` : ''}
           <button class="btn sm ghost" onclick="plgHapus(${p.id})">Hapus</button>
@@ -283,9 +285,33 @@ async function plgStatus(id, status) {
   loadPelanggan();
 }
 
-async function plgHapus(id) {
-  if (!confirm('Hapus pelanggan ini? Riwayat tagihan harus kosong.')) return;
+/**
+ * Aktivasi pelanggan baru (khusus penanggung jawab data server): rute server
+ * mencetak secret PPPoE di router, menaikkan status, dan mengantrekan WA
+ * template 'aktivasi'. Hasil router dilaporkan apa adanya — 'aktif' tanpa
+ * secret tidak pernah lagi terjadi diam-diam.
+ */
+async function aktivasiPelanggan(id) {
+  if (!confirm('Aktivasi pelanggan ini?\n\nSecret PPPoE dibuat/diyakinkan hidup di router, status menjadi aktif, dan pelanggan dikabari lewat WhatsApp.')) return;
   try {
+    const r = await API.post(`/api/pelanggan/${id}/aktivasi`, {});
+    const rt = r.router || {};
+    const bagian = [];
+    if ((rt.dibuat || []).length) bagian.push(`secret baru di ${rt.dibuat.join(', ')}`);
+    if ((rt.diaktifkan || []).length) bagian.push(`secret dihidupkan di ${rt.diaktifkan.join(', ')}`);
+    if ((rt.sudah_aktif || []).length) bagian.push('secret sudah hidup, hanya disinkron');
+    if (rt.profil_tidak_ada) bagian.push('profile paket tidak ada di router — bandwidth belum dipatok');
+    toast(`#${id} aktif — ${bagian.join(' · ') || 'tanpa aksi router (pelanggan hotspot)'}`
+      + (r.wa_terkirim ? ' · WA aktivasi dikirim'
+        : r.tanpa_nomor_wa ? ' · pelanggan tidak punya nomor WhatsApp' : ''));
+    (rt.gagal || []).slice(0, 2).forEach(x => toast(x, true));
+    if (r.wa_gagal) toast(`WA aktivasi gagal: ${r.wa_gagal}`, true);
+  } catch (e) { toast(e.message, true); }
+  loadPelanggan();
+}
+
+async function plgHapus(id) {
+  if (!confirm('Hapus pelanggan ini? Riwayat tagihan harus kosong.')) return;  try {
     await API.del(`/api/pelanggan/${id}`);
     toast('Pelanggan dihapus');
     loadPelanggan();
@@ -2412,52 +2438,8 @@ async function simpanTiket() {
 // ============================================================ REMOTE ONU
 // Auto-generate/update rule dst-nat MikroTik → web ONU pelanggan
 // (port_remote di Setting MikroTik), dengan kunci 180 detik antar teknisi.
-//
-// Tab baru wajib dibuka dari gestur klik, yani window.open dipanggil
-// SINKRON sebelum await pertama. Sesudah await, aktivasi pengguna dianggap
-// lewat sehingga Chrome/Android menolak popup dan tab diam-diam hilang.
-// Tab sementara itu lalu diarahkan ke link ONU; kalau browser tetap
-// memblokir, modal berisi tombol "Buka" menjadi jalan pintas.
-function tabSementara() {
-  const w = window.open('', '_blank');
-  if (!w) return null;
-  try {
-    w.document.write('<title>Remote ONU…</title>'
-      + '<body style="font:14px/1.6 system-ui,sans-serif;padding:28px;color:#333">'
-      + 'Mengubah rule NAT MikroTik, lalu membuka web ONU pelanggan…'
-      + '</body>');
-    w.document.close();
-  } catch (_) { /* tab kosong juga tetap bisa diarahkan */ }
-  return w;
-}
-
-/** Pindahkan tab sementara ke link ONU. false = popup diblokir / tab mati. */
-function arahkanTab(w, link) {
-  if (!w) return false;
-  try {
-    if (w.closed) return false;
-    w.location.href = link;
-    w.focus();
-    return true;
-  } catch (_) {
-    tutupTab(w);
-    return false;
-  }
-}
-
-function tutupTab(w) {
-  try { if (w && !w.closed) w.close(); } catch (_) {}
-}
-
-/** Tombol "Buka" di modal — cadangan bila tab baru diblokir browser. */
-function tautanRemoteOnu(link) {
-  const a = document.getElementById('roBuka');
-  a.href = link;
-  a.textContent = `🌐 Buka ${link}`;
-  a.hidden = false;
-  a.style.display = '';        // versi lama memakai style="display:none" inline
-  return a;
-}
+// Helper tabSementara/arahkanTab/tutupTab/tautanRemoteOnu pindah ke
+// assets/app.js sejak v2.2.0 karena aplikasi teknisi memakai pola yang sama.
 
 async function remoteOnu(id) {
   const w = tabSementara();

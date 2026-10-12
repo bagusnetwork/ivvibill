@@ -4,6 +4,136 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-12 — v2.2.0 — Teknisi bisa mendaftar & Remote ONU, aktivasi tetap di tangan admin data server
+
+**Gejala user**
+
+"cek role teknisi tidak bisa remote onu dan tidak bisa regist data pelanggan baru —
+untuk aktivasi dilakukan oleh admin data server tersebut. lalu ada notif ke pelanggan
+bahwa sudah dilakukan aktivasi"
+
+**Apa yang sebenarnya terjadi (diperiksa dulu, bukan ditebak)**
+
+1. **Aplikasi teknisi tidak punya tombolnya sama sekali.** Remote ONU dan formulir
+   pelanggan baru hanya ada di panel. API-nya sendiri sudah mengizinkan teknisi
+   (`POST /api/pelanggan` menyebut `'teknisi'`), jadi gejalanya "tidak bisa" sementara
+   yang hilang adalah "tidak ada tempat menekan".
+2. **Kunci role di API tidak seragam dengan aplikasinya.** `POST /pelanggan/status` dan
+   `/pelanggan/:id/status` terbuka untuk teknisi, tetapi `ubahStatusBulk()` menolak
+   teknisi di tengah fungsi; `POST /pelanggan/import` memakai `requirePJ('teknisi')`
+   padahal impor massal bukan pekerjaan lapangan. Teknisi juga bisa menimpa `status`
+   lewat `PUT /pelanggan/:id`, artinya "teknisi tidak mengaktivasi" hanya berlaku di UI.
+3. **Template WA `aktivasi` praktis tidak pernah terkirim.** Satu-satunya tempat ia
+   dipakai adalah `PUT /pelanggan/:id` ketika status naik ke `aktif` — dan satu-satunya
+   cara menaikkan status dari `baru` adalah tombol "Aktifkan" yang memanggil
+   `ubahStatusBulk()`, yang **tidak mengirim WA sama sekali**.
+4. **Aktivasi tidak menyentuh router.** Status bisa menjadi `aktif` sementara secret
+   PPPoE-nya tidak ada atau masih `disabled=yes` — pelanggan sudah "aktif di kertas"
+   tapi tetap tidak bisa connect.
+5. Ikutan ditemukan saat pengujian: pendaftaran lewat teknisi menghasilkan
+   `id_profil_tagihan NULL` sehingga `hari_tagihan` jatuh ke **1** (tempo default), dan
+   pesan registrasi berbunyi `Selamat datang di !` karena rute `POST /pelanggan` hanya
+   mengirim `#usr` dan `#lyn` ke renderer sementara template bawaan memakai `#srv`.
+
+**Keputusan (dipilih user)**
+
+* Teknisi dapat: **Remote ONU** + **mendaftar pelanggan baru**.
+* Aktivasi (menyalakan layanan) tetap **hak admin data server** — pemilik ISP / pemilik
+  platform, dan satu kliknya harus: **cetak secret + pastikan aktif di router + kabari
+  pelanggan lewat WA**.
+
+**Diubah — `src/services/monitoring.js`**
+
+`pastikanSecret(user, { password, profil, idDataServer })` baru (diekspor). Untuk setiap
+router milik tenant: cari `/ppp/secret` atas nama user; tidak ada → `add`
+(`service=pppoe`, `comment=ivvibill`, password & profile bila diketahui); ada tapi
+`disabled` → `set disabled=no` (+ profile); ada dan hidup → `sudah_aktif`, profil hanya
+di-update bila paket memakannya. Profile yang tidak ada di `/ppp/profile` **tidak**
+membatalkan aktivasi — secret tetap dibuat dan dilaporkan lewat
+`profil_tidak_ada`/`gagal`. Hasilnya terstruktur (`dibuat`, `diaktifkan`, `sudah_aktif`,
+`gagal`, `router`, `tanpa_router`) supaya antrean tombol bisa menampilkan apa yang
+benar-benar terjadi di router, bukan sekadar "OK".
+
+**Diubah — `src/routes/pelanggan.js`**
+
+* `POST /pelanggan/:id/aktivasi` (`requirePJ()` + `requireMenu('pelanggan','ubah')`,
+  jadi teknisi ditolak middleware sebelum menyentuh router): secret dipastikan, status
+  naik `aktif`, `profil_sebelum_isolir` dibersihkan, issue `menunggak`/`isolir` dihapus,
+  WA template `aktivasi` diantrekan (fallback `TPL_AKTIVASI_BAWAAN` bila tenant belum
+  punya template), audit `aktivasi_pelanggan`. **Bila tidak satu pun router terjangkau,
+  status tidak diubah dan respons 502** — tombol bisa ditekan ulang, `aktif` tidak pernah
+  berarti diam-diam.
+* Teknisi dikunci konsisten: `POST /pelanggan/status` & `/pelanggan/:id/status` kini
+  `requireRole('superadmin','master')`; `ubahStatusBulk()` menolak teknisi dengan pesan
+  yang menjelaskan siapa yang berwenang; `POST /pelanggan/import` jadi `requirePJ()`;
+  `PUT /pelanggan/:id` menolak perubahan `status` oleh teknisi.
+* `PUT /pelanggan/:id` dengan status `aktif` untuk pelanggan `baru` tipe pppoe kini
+  melewati `pastikanSecret()` (profil PPPoE diambil dari paket) — jadi "Simpan" di form
+  tidak lagi menyalakan layanan tanpa secret.
+* Kabar registrasi memakai `#srv`/`#ppp`/`#add` + nama paket dari query yang sama,
+  sehingga pesan menjadi `… Selamat datang di IVVINET-CBD!`.
+
+**Diubah — `public/assets/app.js`**: `tabSementara()`, `arahkanTab()`, `tutupTab()`,
+`tautanRemoteOnu()` dipindah dari panel.js ke aset bersama — `window.open` harus tetap
+sinkron di dalam handler klik (kalau tidak, browser memblokir popup), dan aplikasi
+teknisi kini butuh pola yang sama persis.
+
+**Diubah — `public/panel/panel.js` + `public/panel/index.html`**: baris pelanggan
+berstatus `baru` mendapat tombol **⚡ Aktivasi** (`aktivasiPelanggan()` → konfirmasi,
+POST, toast berisi hasil router: N secret baru / M dihidupkan / sudah aktif, peringatan
+profile tidak ada, dan status WA), lalu daftar dimuat ulang. Helper Remote ONU tinggal
+komentar penunjuk ke `app.js`.
+
+**Diubah — `public/teknisi/index.html` + `public/teknisi/teknisi.js`**: toolbar
+**＋ Daftarkan Pelanggan** + kolom **Aksi** di daftar pelanggan + modal `#mDaftar`
+(nama, WA, paket, **profile tagihan**, username/password PPPoE, tanggal masuk, alamat,
+topologi/port ODP, desa, koordinat GPS via `ambilLokasi()`) dan modal `#mRemoteOnu`.
+`muatOpsiDaftar()` mengambil paket/topologi/desa/profil sekaligus dan **memilih otomatis
+profile tagihan aktif yang paling banyak dipakai**, supaya pendaftaran lapangan tidak
+jatuh ke tempo hari 1. `simpanDaftar()` mengirim tipe `pppoe` dan menegaskan hasilnya:
+*"… terdaftar — status baru, menunggu aktivasi admin data server"*.
+Cache-bust: `app.js?v=20261012b`, `teknisi.js?v=20261012b`, `panel.js?v=20261012c`.
+
+**Verifikasi lewat jalur asli (bukan probe sintetis)**
+
+Login `ujiteknisi220` (teknisi, data server 2) di `https://bill.ivvinet.my.id/teknisi/`:
+modal daftar terbuka, profil **IVV-10 · tagih tgl 10 (100 warga)** terpilih otomatis,
+pelanggan `Uji Aktivasi V220b` tersimpan → `id 177 · status baru · id_profil_tagihan 2 ·
+hari_tagihan 10`, dan antrean WA #510 **terkirim**:
+`Halo Uji Aktivasi V220b, pendaftaran layanan 10-Mbps diterima. Selamat datang di IVVINET-CBD!`
+(Sebelum perbaikan: `id_profil_tagihan NULL / hari_tagihan 1` dan `Selamat datang di !`.)
+
+Login `adminmaster`, data server IVVINET-CBD, tombol **⚡ Aktivasi** pada baris 177:
+router mencetak `*195 name=ujiv220b profile=10-Mbps disabled=false comment=ivvibill`
+(TOTAL secret 281 → 282), `status aktif`, audit `449 aktivasi_pelanggan #177 … → aktif
+(secret: 1 baru, 0 dihidupkan); WA: antre`, dan WA #511 pada tick scheduler berikutnya
+**terkirim**: `Halo Uji Aktivasi V220b, layanan 10-Mbps sudah AKTIF. Username PPPoE:
+ujiv220b. Terima kasih.` Tombol ⚡ hilang dari baris yang sudah aktif.
+
+Penolakan teknisi juga diuji pada endpoint aslinya (status massal, status satuan, impor,
+`PUT` ganti status) → semuanya 403 dengan pesan yang menyebut admin data server.
+Remote ONU teknisi sudah terbukti pada v2.2.0 pengujian sebelumnya: NAT rule `*16`
+benar-benar ditulis ulang lalu **dikembalikan persis** ke `192.168.7.56`
+(`*19` → `192.168.21.247`), `setting_mikrotik.user_remote` dikosongkan lagi.
+
+**Data uji dipulihkan persis:** secret `ujiv220`/`ujiv220b` dihapus (TOTAL 281),
+pelanggan 176 & 177 beserta baris `wa_queue`-nya dihapus, akun `app_user` id 6
+`ujiteknisi220` dihapus. Baseline kembali: pelanggan ds2 **171** (aktif 159, isolir 12,
+baru 0), `wa_queue` **496** dengan 0 pending, `app_user` **3** baris, service `active`,
+panel 200. Jejak audit #439–#449 dibiarkan sebagai riwayat pengujian.
+
+**Belum tercover / catatan**
+
+* Akun **master ISP tenant 2** belum diuji — user memilih mencoba sendiri; rute aktivasi
+  memakai `requirePJ()` sehingga master termasuk yang diizinkan.
+* `profil_tidak_ada` sengaja tidak memblokir aktivasi; kalau pemilik ISP ingin yang
+  ketat, itu keputusan terpisah.
+* Endpoint `DELETE /api/pengguna` belum ada — akun uji harus dihapus lewat SQL.
+* RouterOS API port 8429 belum di-allowlist; aktivasi lewat jaringan luar tetap butuh
+  jalur itu terjangkau.
+
+---
+
 ## 2026-10-12 — v2.1.2 — Group Akses dan menu Pengguna akhirnya satu bahasa
 
 **Gejala user**

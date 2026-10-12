@@ -529,7 +529,9 @@ function bacaBerkas(file) {
  * tanpa enqueue pesan WhatsApp supaya import besar tidak mengejar spam.
  * Kegagalan per baris dikumpulkan, bukan menggagalkan seluruh file.
  */
-router.post('/pelanggan/import', requireRole('superadmin', 'master', 'teknisi'),
+// v2.2.0 — impor massal bukan tugas teknisi lapangan: satu file bisa
+// menggeser ratusan baris + jadwal tagihan, jadi hanya penanggung jawab tenant.
+router.post('/pelanggan/import', requirePJ(),
   requireMenu('pelanggan', 'tambah'), uploadImpor.single('file'), async (req, res, next) => {
   try {
     if (!req.file || !req.file.buffer) {
@@ -651,6 +653,13 @@ router.post('/pelanggan/import', requireRole('superadmin', 'master', 'teknisi'),
 /** Ganti status massal + sinkron secret PPPoE. Dipakai tombol per-baris dan bulk. */
 async function ubahStatusBulk(req, res, next) {
   try {
+    // v2.2.0 — status adalah keputusan bisnis pemilik ISP (aktivasi, isolir,
+    // nonaktif). Teknisi tidak lagi boleh mengubahnya, bahkan lewat API, karena
+    // aplikasinya juga tidak menawarkan tombolnya.
+    if (req.user.role === 'teknisi') {
+      return res.status(403).json({ error:
+        'Perubahan status pelanggan (aktif/isolir/nonaktif) dilakukan admin data server' });
+    }
     const status = v.enumOf(req.body.status, STATUS, null);
     if (!status) return res.status(400).json({ error: 'Status tidak valid' });
     const ids = Array.isArray(req.body.ids) ? req.body.ids : String(req.body.ids || '').split(',');
@@ -707,14 +716,103 @@ async function ubahStatusBulk(req, res, next) {
   } catch (e) { next(e); }
 }
 
-router.post('/pelanggan/status', requireRole('superadmin', 'master', 'teknisi'),
+router.post('/pelanggan/status', requireRole('superadmin', 'master'),
   requireMenu('pelanggan', 'ubah'), ubahStatusBulk);
 
-router.post('/pelanggan/:id/status', requireRole('superadmin', 'master', 'teknisi'),
+router.post('/pelanggan/:id/status', requireRole('superadmin', 'master'),
   requireMenu('pelanggan', 'ubah'), (req, res, next) => {
     req.body = { ...req.body, ids: [req.params.id] };
     return ubahStatusBulk(req, res, next);
   });
+
+/** Isi WA aktivasi bila tenant belum punya template 'aktivasi' sama sekali. */
+const TPL_AKTIVASI_BAWAAN =
+  'Halo #usr, layanan #lyn atas nama #ppp sudah AKTIF dan bisa dipakai. Terima kasih.';
+
+/**
+ * Aktivasi pelanggan baru — khusus penanggung jawab data server (superadmin
+ * pemilik platform / master ISP). Teknisi boleh mendaftarkan pelanggan dan
+ * membuka Remote ONU, tetapi "menyalakan layanan" adalah keputusan bisnis
+ * pemilik ISP: di sini secret PPPoE dicetak (bila router belum punya) atau
+ * diyakinkan hidup, status naik ke 'aktif', issue isolir dibersihkan, lalu
+ * warga dikabari lewat WA template 'aktivasi'.
+ *
+ * Semua router gagal → status TIDAK diubah dan kode 502 dikembalikan, supaya
+ * tombol bisa ditekan ulang dan 'aktif' tidak pernah berarti diam-diam.
+ */
+router.post('/pelanggan/:id/aktivasi', requirePJ(), requireMenu('pelanggan', 'ubah'),
+  async (req, res, next) => {
+  try {
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const ts = tenantSql(req, 'id_data_server');
+    const p = await db.one(`SELECT * FROM pelanggan WHERE id = ?${ts.sql}`, [id, ...ts.params]);
+    if (!p) return res.status(404).json({ error: 'Pelanggan tidak ada di data server ini' });
+    const ds = Number(p.id_data_server) || tenantAktif(req);
+    if (p.status === 'aktif') {
+      return res.status(400).json({ error: 'Pelanggan sudah aktif — pakai tombol Aktifkan/Isolir untuk sinkron ulang' });
+    }
+
+    const pk = p.id_paket
+      ? await db.one('SELECT nama_paket, profile_pppoe FROM paket WHERE id = ? AND id_data_server = ?',
+        [p.id_paket, ds])
+      : null;
+    const srv = await db.one('SELECT nama_server FROM data_server WHERE id = ?', [ds]);
+
+    let hasilRouter = null;
+    if (p.tipe === 'pppoe') {
+      if (!p.username_pppoe) {
+        return res.status(400).json({ error: 'Username PPPoE kosong — lengkapi datanya dulu sebelum diaktivasi' });
+      }
+      hasilRouter = await mon.pastikanSecret(p.username_pppoe, {
+        password: p.password_pppoe, profil: pk && pk.profile_pppoe, idDataServer: ds
+      });
+      if (!hasilRouter.router.length) {
+        const alasan = hasilRouter.tanpa_router
+          ? 'belum ada router MikroTik aktif di data server ini'
+          : (hasilRouter.gagal[0] || 'secret tidak berhasil dibuat di router');
+        await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+          [req.user.id, ds, 'aktivasi_pelanggan_gagal',
+            `#${id} ${p.nama}: ${alasan}`, (req.ip || '').replace('::ffff:', '')]);
+        return res.status(502).json({
+          error: `Aktivasi dibatalkan — ${alasan}. Status pelanggan tidak diubah, coba lagi setelah router terjangkau.`,
+          router: hasilRouter
+        });
+      }
+    }
+
+    await db.run("UPDATE pelanggan SET status = 'aktif', profil_sebelum_isolir = NULL WHERE id = ?", [id]);
+    await db.run("DELETE FROM issue_pelanggan WHERE id_pelanggan = ? AND tipe IN ('menunggak','isolir')", [id]);
+
+    // Kabar pelanggan: jalur ini satu-satunya yang mengirim template 'aktivasi',
+    // jadi isinya ikut dilaporkan ke tombol (terkirim / tanpa nomor / gagal).
+    let waTerkirim = false, waGagal = null;
+    if (p.nomor_whatsapp) {
+      try {
+        const tpl = await wa.ambilTemplate('aktivasi', ds) || TPL_AKTIVASI_BAWAAN;
+        const pesan = wa.render(tpl, {
+          usr: p.nama, ppp: p.username_pppoe || '-', srv: (srv && srv.nama_server) || 'layanan',
+          lyn: (pk && pk.nama_paket) || 'layanan'
+        });
+        if (pesan.trim()) {
+          await wa.enqueue({ tujuan: p.nomor_whatsapp, jenis: 'aktivasi', pesan, idRef: id, idDataServer: ds });
+          waTerkirim = true;
+        }
+      } catch (e) { waGagal = String(e.message).slice(0, 140); }
+    }
+
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'aktivasi_pelanggan',
+        `#${id} ${p.nama} → aktif (secret: ${hasilRouter ? hasilRouter.dibuat.length : 0} baru, `
+        + `${hasilRouter ? hasilRouter.diaktifkan.length : 0} dihidupkan); WA: ${waTerkirim ? 'antre' : (p.nomor_whatsapp ? 'gagal' : 'tanpa nomor')}`,
+        (req.ip || '').replace('::ffff:', '')]);
+
+    res.json({
+      ok: true, id, nama: p.nama, status: 'aktif',
+      router: hasilRouter, wa_terkirim: waTerkirim, wa_gagal: waGagal,
+      tanpa_nomor_wa: !p.nomor_whatsapp
+    });
+  } catch (e) { next(e); }
+});
 
 
 router.get('/pelanggan/:id', async (req, res, next) => {
@@ -809,7 +907,17 @@ router.post('/pelanggan', requireRole('superadmin', 'master', 'teknisi'),
 
     if (nowa) {
       const tpl = await wa.ambilTemplate('registrasi', ds);
-      const pesan = wa.render(tpl, { usr: nama, lyn: (idPaket ? (await db.one('SELECT nama_paket FROM paket WHERE id=? AND id_data_server=?',[idPaket, ds]))?.nama_paket : 'layanan') || 'layanan' });
+      // Template bawaan memakai #usr #lyn #srv #ppp — dulu hanya usr dan lyn
+      // yang dikirim, sehingga pesan pelanggan berbunyi "Selamat datang di !"
+      // dengan nama ISP kosong.
+      const pk = idPaket
+        ? await db.one('SELECT nama_paket FROM paket WHERE id=? AND id_data_server=?', [idPaket, ds])
+        : null;
+      const srv = await db.one('SELECT nama_server FROM data_server WHERE id=?', [ds]);
+      const pesan = wa.render(tpl, {
+        usr: nama, lyn: (pk && pk.nama_paket) || 'layanan',
+        srv: (srv && srv.nama_server) || '', ppp: username || '', add: alamat || ''
+      });
       await wa.enqueue({ tujuan: nowa, jenis: 'registrasi', pesan, idRef: id, idDataServer: ds });
     }
     res.json({ id, kode });
@@ -847,9 +955,11 @@ router.put('/pelanggan/:id', requireRole('superadmin', 'master', 'teknisi', 'age
     try { lok = await validasiLokasi(req, req.body, p, ds); }
     catch (e) { return res.status(400).json({ error: e.message }); }
 
-    // teknisi tidak boleh ubah status ke nonaktif/hapus kredensial sembarangan
-    if (req.user.role === 'teknisi' && status === 'nonaktif') {
-      return res.status(403).json({ error: 'Hanya penanggung jawab yang dapat menonaktifkan' });
+    // v2.2.0 — teknisi tidak mengubah status sama sekali: menyalakan layanan
+    // (aktivasi) dan memutus/menonaktifkannya adalah wewenang admin tenant.
+    if (req.user.role === 'teknisi' && status !== p.status) {
+      return res.status(403).json({ error:
+        'Teknisi tidak dapat mengubah status pelanggan — aktivasi/nonaktif dilakukan admin data server' });
     }
 
     const statusBaru = status !== p.status;
@@ -874,7 +984,18 @@ router.put('/pelanggan/:id', requireRole('superadmin', 'master', 'teknisi', 'age
     // ikut diset — termasuk saat profil isolir pelanggan diubah ketika status
     // sudah isolir (profil baru langsung dipakai)
     let router = null;
-    if (statusBaru || (status === 'isolir' && profilBerubah)) {
+    // v2.2.0 — baru → aktif lewat form berarti mengaktivasi pelanggan: secretnya
+    // dicetak dulu. sinkronStatus() hanya menyalakan secret yang sudah ada, jadi
+    // jalur lama membuat pelanggan 'aktif' di DB tapi tak pernah bisa konek.
+    if (statusBaru && status === 'aktif' && p.status === 'baru'
+        && p.tipe === 'pppoe' && username) {
+      const pk = idPaket ? await db.one(
+        'SELECT profile_pppoe FROM paket WHERE id = ? AND id_data_server = ?', [idPaket, ds]) : null;
+      router = { cara: 'aktivasi',
+        ...(await mon.pastikanSecret(username, {
+          password: passPppoe, profil: pk && pk.profile_pppoe, idDataServer: ds
+        })) };
+    } else if (statusBaru || (status === 'isolir' && profilBerubah)) {
       try {
         router = await sinkronRouter({ ...p, id, tipe: p.tipe, username_pppoe: username,
           profile_isolir: profilIsolir }, status, ds);

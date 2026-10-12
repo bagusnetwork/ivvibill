@@ -270,3 +270,56 @@ function terapkanMerek(m) {
     }
   }
 }
+
+/* ============================================================
+   Remote ONU — dipakai panel DAN aplikasi teknisi (v2.2.0).
+   Dulu keempat helper ini hidup di panel.js saja, sehingga tombol
+   remote di aplikasi teknisi harus menduplikasi trick popup-nya.
+   ============================================================ */
+
+/**
+ * Tab baru wajib dibuka dari gestur klik, yani window.open dipanggil
+ * SINKRON sebelum await pertama. Sesudah await, aktivasi pengguna dianggap
+ * lewat sehingga Chrome/Android menolak popup dan tab diam-diam hilang.
+ */
+function tabSementara() {
+  const w = window.open('', '_blank');
+  if (!w) return null;
+  try {
+    w.document.write('<title>Remote ONU…</title>'
+      + '<body style="font:14px/1.6 system-ui,sans-serif;padding:28px;color:#333">'
+      + 'Mengubah rule NAT MikroTik, lalu membuka web ONU pelanggan…'
+      + '</body>');
+    w.document.close();
+  } catch (_) { /* tab kosong juga tetap bisa diarahkan */ }
+  return w;
+}
+
+/** Pindahkan tab sementara ke link ONU. false = popup diblokir / tab mati. */
+function arahkanTab(w, link) {
+  if (!w) return false;
+  try {
+    if (w.closed) return false;
+    w.location.href = link;
+    w.focus();
+    return true;
+  } catch (_) {
+    tutupTab(w);
+    return false;
+  }
+}
+
+function tutupTab(w) {
+  try { if (w && !w.closed) w.close(); } catch (_) {}
+}
+
+/** Tautan "Buka" di modal — cadangan bila tab baru diblokir browser. */
+function tautanRemoteOnu(link, idEl = 'roBuka') {
+  const a = document.getElementById(idEl);
+  if (!a) return null;
+  a.href = link;
+  a.textContent = `🌐 Buka ${link}`;
+  a.hidden = false;
+  a.style.display = '';        // versi lama memakai style="display:none" inline
+  return a;
+}
