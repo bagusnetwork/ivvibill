@@ -972,9 +972,84 @@ async function sesiSnapshot(idPerangkat, menit = 5) {
      ORDER BY akun`, [Number(idPerangkat), Number(menit)]);
 }
 
+// ------------------------------------------------ MAC pelanggan (v2.2.3)
+
+/**
+ * Alamat fisik pelanggan PPPoE hanya ada di router, tidak di database:
+ * - /ppp/active → `caller-id` = MAC perangkat yang sedang naik;
+ * - /ppp/secret → `caller-id` terisi HANYA bila ISP mengunci MAC, sedangkan
+ *   `last-caller-id` terisi setelah login pertama kali.
+ * Probe read-only RO-IVVI 2026-10-12: 201/201 sesi punya caller-id, 0/281 secret
+ * punya caller-id terkunci — jadi sumbernya sesi dulu, lalu last-caller-id untuk
+ * yang sedang offline. Hotspot tidak ikut: usernya bukan milik pelanggan tetap.
+ */
+function normalMac(v) {
+  const s = String(v == null ? '' : v).trim().replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+  if (!/^[0-9A-F]{12}$/.test(s)) return null;
+  return s.match(/../g).join(':');
+}
+
+/**
+ * Ambil MAC dari router tenant ini dan tulis ke pelanggan PPPoE yang usernya cocok.
+ * Tidak menyentuh status, secret, maupun sesi — hanya kolom mac_address.
+ * Dipanggil dari tombol di menu Pelanggan, BUKAN dari scheduler, supaya beban
+ * router dan waktu eksekusi tetap jadi keputusan operator.
+ */
+async function sinkronMacPelanggan(idDataServer) {
+  const ds = cfgApp.idWajib(idDataServer);
+  const routers = await routerTenant(ds);
+  const peta = new Map();
+  const gagal = [];
+  let terbaca = 0;
+  for (const r of routers) {
+    let c;
+    try {
+      const { dev } = await perangkatMikrotik(r.id);
+      c = klien(dev);
+      await sambungkan(c);
+      const sec = await c.run(['/ppp/secret/print',
+        '=.proplist=name,caller-id,last-caller-id']);
+      for (const s of sec) {
+        const u = String(s.name || '').trim().toLowerCase();
+        const m = normalMac(s['caller-id']) || normalMac(s['last-caller-id']);
+        if (u && m) peta.set(u, { mac: m, dari: 'secret' });
+      }
+      // Sesi yang sedang naik lebih baru daripada last-caller-id secret.
+      const act = await c.run(['/ppp/active/print',
+        '=.proplist=name,user,service,caller-id']);
+      for (const a of act) {
+        const u = String(a.user || a.name || '').trim().toLowerCase();
+        const m = normalMac(a['caller-id']);
+        if (u && m) peta.set(u, { mac: m, dari: 'sesi' });
+      }
+      terbaca++;
+    } catch (e) {
+      gagal.push(`${r.nama}: ${String(e.message).slice(0, 120)}`);
+    } finally { if (c) c.close(); }
+  }
+
+  const rows = await db.q(
+    `SELECT id, username_pppoe, mac_address FROM pelanggan
+     WHERE id_data_server = ? AND tipe = 'pppoe'
+       AND username_pppoe IS NOT NULL AND username_pppoe != ''`, [ds]);
+  const hasil = { dicek: rows.length, diisi: 0, diganti: 0, sudah_sama: 0,
+    tanpa_data_router: 0, router_terbaca: terbaca, router_total: routers.length,
+    pemetaan: peta.size, router_gagal: gagal };
+  for (const p of rows) {
+    const f = peta.get(String(p.username_pppoe).toLowerCase());
+    if (!f) { hasil.tanpa_data_router++; continue; }
+    const lama = normalMac(p.mac_address);
+    if (lama === f.mac) { hasil.sudah_sama++; continue; }
+    await db.run('UPDATE pelanggan SET mac_address = ? WHERE id = ?', [f.mac, p.id]);
+    if (lama) hasil.diganti++; else hasil.diisi++;
+  }
+  return hasil;
+}
+
 module.exports = {
   pollRouter, cekPppoePelanggan, pollSemuaRouter, klien, perangkatMikrotik, sambungkan,
   setSecret, setProfilSecret, pastikanSecret, sinkronStatus, sesiTakTerkenal, routerTenant,
+  sinkronMacPelanggan, normalMac,
   pushHotspotAktif, profilHotspot, profilRouter, tambahHotspotUser, hapusHotspotUser, pushVoucher,
   intervalVoucher,
   urlPush, sandiPush, pasangPush, simpanPush, sesiSnapshot, tokenBaru,

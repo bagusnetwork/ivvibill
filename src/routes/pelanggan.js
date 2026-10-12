@@ -382,20 +382,48 @@ router.get('/pelanggan/unmanage', requireRole('superadmin', 'master', 'teknisi')
 // 'kode' SENGAJA tidak ada di daftar ini. Kolom itu digenerate import
 // (prefix + waktu + urutan) dan tidak pernah dibaca dari berkas, jadi
 // menampilkannya di template hanya membingungkan pengguna.
+// v2.2.3 — "IP Address" dan "Hari Tagihan" sengaja dibuang dari daftar kolom:
+// IP pelanggan PPPoE adalah leases router (bukan data yang perlu diketik), dan
+// tanggal penagihan sudah menjadi milik Profile Tagihan. Keduanya TETAP dikenali
+// lewat HEADER_IMPOR, jadi berkas keluaran versi lama masih bisa diimport utuh.
 const KOLOM_EXPORT = ['nama', 'tipe', 'paket', 'agen', 'username_pppoe',
-  'password_pppoe', 'nomor_whatsapp', 'email', 'alamat', 'ip_address', 'mac_address',
-  'status', 'tanggal_masuk', 'profil_tagihan', 'hari_tagihan'];
+  'password_pppoe', 'nomor_whatsapp', 'email', 'alamat', 'latitude', 'longitude',
+  'mac_address', 'status', 'tanggal_masuk', 'profil_tagihan'];
 
 /** Judul kolom memakai Bahasa Indonesia; import tetap mengenali nama lama. */
 const LABEL_ID = {
   nama: 'Nama', tipe: 'Tipe', paket: 'Paket', agen: 'Agen',
   username_pppoe: 'Username PPPoE', password_pppoe: 'Password PPPoE',
   nomor_whatsapp: 'Nomor WhatsApp', email: 'Email', alamat: 'Alamat',
+  latitude: 'Latitude', longitude: 'Longitude',
   ip_address: 'IP Address', mac_address: 'MAC Address', status: 'Status',
   tanggal_masuk: 'Tanggal Masuk', profil_tagihan: 'Profile Tagihan',
   hari_tagihan: 'Hari Tagihan', kode: 'Kode'
 };
 const judul = (k) => LABEL_ID[k] || k;
+
+/** Nilai sel → teks biasa untuk perbandingan maupun penyimpanan. */
+const teksSel = (v) => String(v == null ? '' : v).trim();
+
+/**
+ * v2.2.3 — koordinat dari berkas Excel/CSV. Longitudenya bisa 3 digit dan
+ * koma desimal adalah kebiasaan Excel locale Indonesia, jadi keduanya diterima.
+ * Nilai di luar rentang bumi (contoh -654.53 yang muncul di berkas nyata)
+ * ditolak per baris dengan pesan yang jelas — menyimpan koordinat palsu berarti
+ * titik di peta jadi salah selamanya.
+ */
+function koordDariSel(nilai, { nama, min, max }) {
+  const mentah = teksSel(nilai).replace(/\s+/g, '').replace(/,/g, '.');
+  if (mentah === '') return null;
+  if (!/^-?\d{1,3}(\.\d{1,12})?$/.test(mentah)) {
+    throw new Error(`${nama} "${teksSel(nilai)}" bukan angka koordinat (contoh ${nama === 'Longitude' ? '110.0438' : '-7.2575'})`);
+  }
+  const n = Number(mentah);
+  if (!(n >= min && n <= max)) {
+    throw new Error(`${nama} ${teksSel(nilai)} di luar rentang ${min} sampai ${max} — periksa kolom Latitude/Longitude tidak tertukar`);
+  }
+  return String(n);
+}
 
 /** Baris petunjuk — dipakai sebagai lembar kedua di xlsx dan baris '#' di CSV. */
 const PETUNJUK = [
@@ -408,16 +436,22 @@ const PETUNJUK = [
   'Username dan Password PPPoE boleh dikosongkan; bila diisi username dan sudah dipakai pelanggan lain, baris itu ditolak.',
   'Nomor WhatsApp tanpa tanda +, contoh 081234567890',
   'Tanggal Masuk: YYYY-MM-DD, contoh 2026-10-08 (kosong = hari ini)',
+  'Latitude dan Longitude: koordinat lokasi dalam angka desimal, contoh -7.2575 dan 110.0438. Koma sebagai pemisah desimal juga diterima. Latitude antara -90 dan 90, Longitude antara -180 dan 180. Kosongkan bila belum tahu — titik hanya muncul di peta bila keduanya terisi.',
+  'MAC Address boleh dikosongkan. Tombol "Sinkron MAC dari router" di menu Pelanggan mengisinya dari /ppp/active (sesi berjalan) lalu /ppp/secret (last-caller-id) milik pelanggan PPPoE.',
   'Profile Tagihan: NAMAnya persis seperti di menu Profile Tagihan (mis. IVV-10). Berisi tanggal buat/kirim/isolir, PPN dan peringatan satu golongan warga.',
-  'Hari Tagihan: angka 1 sampai 28 (kosong = 1). HANYA dipakai bila kolom Profile Tagihan kosong — bila profil terisi, tanggal isolir profil yang berlaku.',
+  'Hari Tagihan TIDAK ada di template ini — tanggal jatuh tempo mengikuti Profile Tagihan. Berkas lama yang masih punya kolom Hari Tagihan (angka 1-28) atau IP Address tetap dibaca; Hari Tagihan hanya dipakai bila Profile Tagihan kosong.',
   'Kode pelanggan dibuat otomatis oleh sistem, jadi tidak perlu dan tidak bisa diisi dari berkas.',
   'Import hanya MENAMBAH pelanggan baru. Baris yang sudah ada tidak diubah dan WhatsApp tidak dikirim saat import.',
   'Baris kosong dan baris yang diawali # diabaikan. Maksimal 1000 baris sekali import.'
 ];
 
 const CONTOH = [
-  ['Budi Santoso', 'pppoe', '10M Rumahan', '', 'budi01', 'rahasia123', '081234567890', '', 'Jl. Merdeka No. 1', '', '', 'baru', '2026-10-08', 'IVV-10', '10'],
-  ['Siti Aminah', 'hotspot', 'Tiket 3 Jam', '', '', '', '089876543210', '', 'Perum Griya Asri C2', '', '', 'aktif', '2026-10-08', '', '5']
+  ['Budi Santoso', 'pppoe', '10M Rumahan', '', 'budi01', 'rahasia123', '081234567890',
+    '', 'Jl. Merdeka No. 1', '-7.2575', '110.0438', '', 'baru', '2026-10-08', 'IVV-10'],
+  ['Siti Aminah', 'hotspot', 'Tiket 3 Jam', '', '', '', '089876543210',
+    '', 'Perum Griya Asri C2', '-7.2601', '110.0388', '', 'aktif', '2026-10-08', ''],
+  ['Andi Wijaya', 'pppoe', '10M Rumahan', '', 'andi01', 'rahasia456', '08111222333',
+    '', 'Jl. Kenanga No. 7', '-7.2490', '110.0512', 'AA:BB:CC:DD:EE:FF', 'tidak aktif', '2026-10-08', '']
 ];
 
 /** Nilai sel → teks (Date jadi tanggal ISO, null jadi string kosong). */
@@ -433,8 +467,8 @@ async function barisEkspor(req) {
   const rows = await db.q(
     `SELECT p.nama, p.tipe, pk.nama_paket AS paket, ag.nama AS agen,
        p.username_pppoe, p.password_pppoe, p.nomor_whatsapp, p.email, p.alamat,
-       p.ip_address, p.mac_address, p.status, p.tanggal_masuk,
-       pt.nama AS profil_tagihan, p.hari_tagihan
+       p.latitude, p.longitude, p.mac_address, p.status, p.tanggal_masuk,
+       pt.nama AS profil_tagihan
      FROM pelanggan p
      LEFT JOIN paket pk ON pk.id = p.id_paket
      LEFT JOIN agen ag ON ag.id = p.id_agen
@@ -476,6 +510,26 @@ router.get('/pelanggan/template', (req, res) => {
   unduhXlsx(res, [['Pelanggan', isi], ['Petunjuk', PETUNJUK.map(t => [t])]], 'template-pelanggan.xlsx');
 });
 
+/**
+ * v2.2.3 — isi MAC Address pelanggan dari router (/ppp/active lalu /ppp/secret).
+ * Hanya menulis kolom mac_address; tidak menyentuh status, secret, maupun sesi,
+ * dan tidak ikut jalan di scheduler supaya beban router jadi pilihan operator.
+ */
+router.post('/pelanggan/sinkron-mac', requirePJ(), requireMenu('pelanggan', 'ubah'),
+  async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const r = await mon.sinkronMacPelanggan(ds);
+    await db.insert(
+      'INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'sinkron_mac',
+        `${r.diisi + r.diganti}/${r.dicek} pelanggan PPPoE, ${r.router_terbaca}/${r.router_total} router terbaca`,
+        (req.ip || '').replace('::ffff:', '')]
+    );
+    res.json({ ok: true, ...r });
+  } catch (e) { next(e); }
+});
+
 const uploadImpor = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 },
@@ -496,6 +550,9 @@ const HEADER_IMPOR = {
   email: 'email', alamat: 'alamat',
   ipaddress: 'ip_address', ip: 'ip_address',
   macaddress: 'mac_address', mac: 'mac_address',
+  // v2.2.3 — koordinat. Varian bahasa Indonesia + singkatan spreadsheet ikut dikenali.
+  latitude: 'latitude', lat: 'latitude', lintang: 'latitude', latitudedesimal: 'latitude',
+  longitude: 'longitude', long: 'longitude', lng: 'longitude', bujur: 'longitude',
   status: 'status',
   tanggalmasuk: 'tanggal_masuk', tglmasuk: 'tanggal_masuk', tgl: 'tanggal_masuk',
   haritagihan: 'hari_tagihan',
@@ -592,11 +649,18 @@ router.post('/pelanggan/import', requirePJ(),
         const pass = v.str(amb(r, 'password_pppoe') || null, { max: 50, def: null });
         const ip = v.str(amb(r, 'ip_address') || null, { max: 40, def: null });
         const mac = v.str(amb(r, 'mac_address') || null, { max: 40, def: null });
+        // v2.2.3 — koordinat ikut diisi dari berkas. Simpan sebagai teks bersih
+        // (kolomnya VARCHAR(30)) supaya tidak ada selisih pembulatan float.
+        const lat = koordDariSel(amb(r, 'latitude'),
+          { nama: 'Latitude', min: -90, max: 90 });
+        const long = koordDariSel(amb(r, 'longitude'),
+          { nama: 'Longitude', min: -180, max: 180 });
         const status = v.enumOf(v.normalStatus(amb(r, 'status')), STATUS, 'baru');
         const tglMasuk = v.tgl(amb(r, 'tanggal_masuk') || null, hariIni);
         // v2.0: Profile Tagihan adalah sumber jadwal. Kalau terisi, hari_tagihan
         // mengikuti tanggal_isolir profil; kalau kosong, kolom Hari Tagihan lama
-        // tetap berlaku persis seperti sebelum v2.0.
+        // tetap berlaku persis seperti sebelum v2.0. Sejak v2.2.3 kolom itu tidak
+        // lagi ada di template, tapi berkas yang masih memilikinya dibaca normal.
         const namaProfil = amb(r, 'profil_tagihan');
         let pt = null;
         if (namaProfil) {
@@ -627,10 +691,11 @@ router.post('/pelanggan/import', requirePJ(),
         await db.insert(
           `INSERT INTO pelanggan (id_data_server, kode, nama, alamat, nomor_whatsapp, email, tipe,
             id_paket, id_agen, username_pppoe, password_pppoe, ip_address, mac_address,
-            tanggal_masuk, hari_tagihan, id_profil_tagihan, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            latitude, longitude, tanggal_masuk, hari_tagihan, id_profil_tagihan, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [ds, kode, nama, alamat, nowa, email, tipe, idPaket, idAgen,
-            username, pass, ip, mac, tglMasuk, hariTagihan, pt ? Number(pt.id) : null, status]
+            username, pass, ip, mac, lat, long, tglMasuk, hariTagihan,
+            pt ? Number(pt.id) : null, status]
         );
         if (username) dipakai.add(username.toLowerCase());
         sukses += 1;

@@ -4,6 +4,88 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-12 — v2.2.3 — Template impor berpenghuni baru (koordinat + contoh tidak aktif), MAC pelanggan diambil dari router
+
+**Gejala user**
+
+"satu langkah penyempurnaan di template import dan export harus ada pengisian kordinat colum
+latitude dan longitude serta buang yang tidak perlu colum ip address lalu tambahkan contoh
+status tidak aktif, colum hari tanggal tidak perlu juga karena ada profile tagihan selanjutnya
+di menu pelanggan mac address harusnya muncul diambil dari mikrotik ppp aktif atau secrete
+final tanpa meng interferensi logica lainnya"
+
+**Apa yang sebenarnya terjadi**
+
+1. Kolom **IP Address** dan **Hari Tagihan** masih dicetak di template/export. IP pelanggan
+   PPPoE adalah leases router (bukan data yang diketik manual), dan tanggal penagihan sejak
+   v2.0.0 milik Profile Tagihan — keduanya hanya mengundang kolom kosong yang membingungkan.
+2. **Koordinat tidak bisa diisi lewat berkas** sama sekali: `pelanggan.latitude/longitude`
+   sudah ada sejak skema awal dan sudah dipakai menu Peta Sebaran, tapi hanya form Ubah
+   Pelanggan yang menulisnya.
+3. Tidak ada contoh **status tidak aktif**, padahal istilah itu yang ditulis orang di
+   spreadsheet ("tidak aktif", "sudah tidak berlangganan") — v2.2.1 sudah mentolerannya,
+   templatenya belum pernah menunjukkan.
+4. Kolom **MAC** di daftar pelanggan selalu `-`: `mac_address` tidak pernah terisi (0 dari
+   197 pelanggan). Probe read-only di router produksi (RO-IVVI, RouterOS 7.19.2)
+   membuktikan alamat fisik ada di dua tempat: `caller-id` di `/ppp/active` terisi
+   **201/201** sesi, sedangkan `caller-id` di `/ppp/secret` terisi **0/281** (tidak ada
+   kunci MAC) — yang terisi untuk pelanggan yang sedang offline adalah `last-caller-id`.
+
+**Diubah**
+
+* `src/routes/pelanggan.js`
+  * `KOLOM_EXPORT` (satu daftar untuk template **dan** export, jadi round-trip tetap utuh):
+    `IP Address` dan `Hari Tagihan` keluar, `Latitude` + `Longitude` masuk setelah `Alamat`.
+  * `LABEL_ID` tetap mengenal nama lama; `HEADER_IMPOR` **tidak diubah isinya** dan
+    menambah kunci baru `latitude/lat/lintang`, `longitude/long/lng/bujur`. Berkas keluaran
+    versi lama (masih punya IP Address + Hari Tagihan) tetap terimport seperti dulu —
+    `hari_tagihan` hanya dipakai bila kolom Profile Tagihan kosong, persis aturan v2.0.
+  * `koordDariSel()` baru: menerima `-7.2575`, `110,04` (koma desimal Excel locale ID) dan
+    spasi; menolak yang bukan angka atau di luar rentang bumi per baris dengan pesan
+    "periksa kolom Latitude/Longitude tidak tertukar". Aturan ini penting: pada berkas nyata
+    yang dibongkar di v2.2.1 ada nilai mustahil (mis. `-654.53`) — menyimpannya berarti
+    menaruh titik palsu di peta selamanya.
+  * `INSERT` impor menambah `latitude, longitude`; `PETUNJUK` menjelaskan koordinat, MAC,
+    dan hilangnya Hari Tagihan; `CONTOH` menjadi tiga baris — baris ketiga berstatus
+    **`tidak aktif`** dengan contoh MAC.
+* `src/services/monitoring.js` — `sinkronMacPelanggan(idDataServer)` + `normalMac()`:
+  baca `/ppp/secret` (`caller-id` → `last-caller-id`) lalu ditimpa `/ppp/active`
+  (`caller-id` sesi yang sedang naik), dinormalkan jadi `AA:BB:CC:DD:EE:FF`, dan **hanya**
+  menulis `pelanggan.mac_address` untuk pelanggan PPPoE tenant ini yang usernya cocok.
+  Status, secret, profile, maupun sesi tidak disentuh; **tidak** dipasang di scheduler,
+  jadi beban router tetap keputusan operator.
+* `src/routes/pelanggan.js` — `POST /api/pelanggan/sinkron-mac` (`requirePJ()` +
+  grant `pelanggan/ubah`), mencatat audit `sinkron_mac "<n>/<total> pelanggan PPPoE,
+  <r>/<R> router terbaca"`.
+* `public/panel/index.html` + `panel.js` — tombol **🔌 Sinkron MAC dari router** di toolbar
+  Pelanggan (`plgSinkronMac()`, toast berisi diisi/diperbarui/sudah sama + jumlah yang tidak
+  ketemu di router), teks dialog Import diperbarui ikut daftar kolom baru,
+  `panel.js?v=20261012e`.
+
+**Verifikasi lewat UI asli (tenant ISP, akun pemilik platform)**
+
+* Template dan export (CSV maupun xlsx) keluar dengan 15 kolom baru; tiga baris contoh
+  terlihat, baris ketiga `tidak aktif`.
+* Excel uji (dibuat dengan SheetJS milik aplikasi) diimport lewat modal Import panel:
+  3 dari 4 baris masuk — koordinat biasa, koordinat **koma** (`-7,26` → `-7.26`) dan
+  `tidak aktif` → `nonaktif` tersimpan benar; baris `Longitude -654.53` **ditolak per baris**
+  dengan pesan yang menyebut kedua rentang. Baris dengan Profile Tagihan ikut
+  `hari_tagihan = tanggal_isolir profil` (10) seperti aturan v2.0.
+* Berkas **bentuk lama** (masih berkolom IP Address + Hari Tagihan, tanpa koordinat)
+  terimport 1/1 dan tersimpan utuh (`ip_address` + `hari_tagihan 17`) — kompatibilitas
+  terpelihara.
+* Tombol Sinkron MAC: **189/201** pelanggan PPPoE terisi (1 router terbaca), daftar
+  Pelanggan langsung menampilkan `MAC: xx:xx:...` di kolom IP lokal / MAC. Pemanggilan ulang
+  menghasilkan `diisi 0, diganti 0, sudah sama 189` dan **diff seluruh tabel pelanggan
+  kosong** → idempoten dan tidak ada kolom sampingan yang ikut tertulis. Router setelahnya
+  tetap **281 secret** dan **47 disabled** seperti sebelumnya; 12 pelanggan tanpa MAC adalah
+  username yang memang tidak punya secret / belum pernah login di router.
+* Empat baris uji dihapus lewat `DELETE /api/pelanggan/:id` (panel), jumlah kembali 197;
+  berkas uji di `/tmp` server dibersihkan. Cadangan `pelanggan` sebelum perubahan ada di
+  `/root/bak-v223/`.
+
+---
+
 ## 2026-10-12 — v2.2.2 — Tanggal penagihan hanya di Profile Tagihan, Pengaturan tidak lagi ikut mengatur
 
 **Gejala user**

@@ -152,6 +152,8 @@
           <a class="btn secondary" href="/api/pelanggan/template" download>Template Excel</a>
           <a class="btn secondary" id="lnEkspor" href="/api/pelanggan/export" download>Export</a>
           <button class="btn secondary" onclick="formImporPelanggan()">Import</button>
+          <button class="btn secondary" id="plgMacBtn" onclick="plgSinkronMac(this)"
+            title="Ambil MAC Address pelanggan PPPoE dari MikroTik: sesi aktif di /ppp/active, lalu last-caller-id di /ppp/secret. Status, secret dan sesi tidak disentuh.">🔌 Sinkron MAC dari router</button>
           <button class="btn" onclick="formPelanggan()">+ Tambah Pelanggan</button>
         </div>
         <div class="toolbar" id="plgBulk" style="display:none">
@@ -889,9 +891,17 @@
       isi sheet <b>Pelanggan</b>, lalu unggah di sini. CSV UTF-8 juga diterima.</p>
     <p class="hint" style="margin-bottom:12px">Judul kolom sudah berbahasa Indonesia:
       <b>Nama</b> (satu-satunya yang wajib), Tipe, Paket, Agen, Username PPPoE, Password PPPoE,
-      Nomor WhatsApp, Email, Alamat, IP Address, MAC Address, Status, Tanggal Masuk, Hari Tagihan.
-      Paket dan Agen diisi <b>namanya</b>, bukan nomor ID. Kode pelanggan dibuat otomatis oleh sistem,
-      jadi kolom kode tidak ada di template dan tidak dibaca saat import.</p>
+      Nomor WhatsApp, Email, Alamat, <b>Latitude</b>, <b>Longitude</b>, MAC Address, Status,
+      Tanggal Masuk, Profile Tagihan. Paket, Agen dan Profile Tagihan diisi <b>namanya</b>, bukan
+      nomor ID. Kode pelanggan dibuat otomatis oleh sistem, jadi kolom kode tidak ada di template
+      dan tidak dibaca saat import.</p>
+    <p class="hint" style="margin-bottom:12px">Status boleh <code>baru</code>, <code>aktif</code>,
+      <code>isolir</code>, <code>nonaktif</code> — tulisan <b>tidak aktif</b>, <b>mati</b>,
+      <b>off</b> atau <b>sudah tidak berlangganan</b> juga diterima (lihat baris contoh ketiga di
+      template). Latitude/Longitude angka desimal, contoh <code>-7.2575</code> dan
+      <code>110.0438</code>; koma desimal ikut diterima. Kolom <b>IP Address</b> dan
+      <b>Hari Tagihan</b> sudah tidak dipakai — berkas lama yang masih memilikinya tetap
+      terbaca, dan hari tagihan kini mengikuti Profile Tagihan.</p>
     <p class="hint">Data hanya <b>ditambahkan</b> — baris yang sudah ada tidak diubah, dan pesan WhatsApp
       tidak dikirim saat import. Baris bermasalah dilaporkan per baris, tidak menggagalkan seluruh file.</p>
     <div class="form-row"><label>File Excel / CSV</label>
@@ -1209,6 +1219,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261012d"></script>
+<script src="panel.js?v=20261012e"></script>
 </body>
 </html>

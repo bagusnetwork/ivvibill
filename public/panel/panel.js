@@ -509,9 +509,29 @@ async function jalankanImport() {
   } catch (e) { box.textContent = ''; toast(e.message, true); }
 }
 
+/**
+ * v2.2.3 — isi MAC Address pelanggan PPPoE dari router (/ppp/active → /ppp/secret).
+ * Hanya membaca router dan menulis kolom mac_address; status/secret/sesi tidak
+ * disentuh, jadi aman ditekan kapan pun.
+ */
+async function plgSinkronMac(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await API.post('/api/pelanggan/sinkron-mac', {});
+    if (!r.router_terbaca) {
+      return toast(r.router_total
+        ? `MAC tidak diambil: ${r.router_total} router tenant ini tidak bisa dihubungi`
+        : 'Tenant ini belum punya perangkat MikroTik aktif di menu Data Server', true);
+    }
+    toast(`MAC dari router: ${r.diisi} diisi, ${r.diganti} diperbarui, ${r.sudah_sama} sudah sama`
+      + (r.tanpa_data_router ? ` · ${r.tanpa_data_router} pelanggan tidak ketemu di router` : ''));
+    loadPelanggan();
+  } catch (e) { toast(e.message, true); }
+  finally { if (btn) btn.disabled = false; }
+}
+
 // ============================================================ TAGIHAN
 let TQ_ROWS = [];
-
 async function loadTagihan() {
   try {
     const q = encodeURIComponent(document.getElementById('tq').value || '');
