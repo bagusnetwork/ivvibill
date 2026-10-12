@@ -29,23 +29,26 @@ function render(template, vars) {
   });
 }
 
-async function ambilTemplate(jenis, idDataServer = 1) {
+async function ambilTemplate(jenis, idDataServer) {
   const t = await db.one(
     'SELECT konten FROM pesan_template WHERE id_data_server = ? AND jenis = ?',
-    [idDataServer, jenis]
+    [cfgUtil.idTenant(idDataServer), jenis]
   );
   return t ? t.konten : '';
 }
 
 /** Enqueue pesan — dipanggil oleh billing/cron/modul lain.
  *  `media` = URL gambar/PDF yang sudah bisa dijangkau gateway; kalau diisi,
- *  `pesan` dipakai sebagai caption (WHAPI sendMediaFromUrl). */
-async function enqueue({ tujuan, jenis, pesan, media = null, idRef = null, idDataServer = 1 }) {
+ *  `pesan` dipakai sebagai caption (WHAPI sendMediaFromUrl).
+ *  `idDataServer` WAJIB: antrean inilah yang menentukan gateway (nomor
+ *  WhatsApp) mana yang dipakai mengirim, jadi nilai bawaan tenant 1
+ *  pernah berisiko mengirim pesan ISP lain dari nomor pemilik platform. */
+async function enqueue({ tujuan, jenis, pesan, media = null, idRef = null, idDataServer }) {
   const no = normalizePhone(tujuan);
   if (!no) return null;
   return db.insert(
     'INSERT INTO wa_queue (id_data_server, tujuan, jenis, pesan, media, id_ref) VALUES (?,?,?,?,?,?)',
-    [idDataServer, no, jenis, pesan, media, idRef]
+    [cfgUtil.idTenant(idDataServer), no, jenis, pesan, media, idRef]
   );
 }
 

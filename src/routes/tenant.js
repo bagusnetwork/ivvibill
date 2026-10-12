@@ -13,8 +13,10 @@ const db = require('../db');
 const v = require('../util/validate');
 const config = require('../config');
 const cfgData = require('../services/configData');
+const cfgApp = require('../services/configApp');
 const { requireAuth, requireRole, requirePJ } = require('../middleware/auth');
 const { tenantSql, tenantAktif } = require('../util/scope');
+const { waktuSiklus } = require('../util/tanggal');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -39,15 +41,48 @@ const MENU = [
 ];
 
 // ------------------------------------------------------ data server
+/**
+ * Daftar ISP untuk menu Data Server. Sejak v2.1.1 halaman ini yang jadi tempat
+ * rekap lintas tenant: halaman panel lain hanya menampilkan satu data server
+ * (lihat util/scope.sekatBaca), jadi angka "semua ISP" harus dihitung per baris
+ * di sini, bukan dicampur di dasbor yang berlabel satu ISP.
+ *
+ * Semua agregat memakai kolom tenant milik tabel itu sendiri; issue/open tidak
+ * dihitung di sini karena lewat JOIN pelanggan (butuh query terpisah per tenant)
+ * dan memang tidak dipakai di tabel rekap.
+ */
 router.get('/data-server', requireRole('superadmin'), async (req, res, next) => {
   try {
     const rows = await db.q(
-      `SELECT id, nama_server, nama_pemilik, nomor_whatsapp, email, alamat, prefix_invoice,
-              username, expaired_date, status, jadwal_buat_hari, jadwal_kirim_hari,
-              jadwal_limit_hari, jam_kirim, ppn_persen, wa_status, pg_active, created_at
-       FROM data_server ORDER BY id`
+      `SELECT d.id, d.nama_server, d.nama_pemilik, d.nomor_whatsapp, d.email, d.alamat,
+              d.prefix_invoice, d.username, d.expaired_date, d.status, d.jadwal_buat_hari,
+              d.jadwal_kirim_hari, d.jadwal_limit_hari, d.jam_kirim, d.ppn_persen,
+              d.wa_status, d.pg_active, d.logo, d.created_at,
+              (SELECT COUNT(*) FROM pelanggan p
+                WHERE p.id_data_server = d.id AND p.status = 'aktif') AS pelanggan_aktif,
+              (SELECT COUNT(*) FROM pelanggan p WHERE p.id_data_server = d.id) AS pelanggan_total,
+              (SELECT COUNT(*) FROM tagihan t
+                WHERE t.id_data_server = d.id AND t.status NOT IN ('lunas','batal')) AS tagihan_terbuka,
+              (SELECT IFNULL(SUM(t.total),0) FROM tagihan t
+                WHERE t.id_data_server = d.id AND t.status NOT IN ('lunas','batal')) AS piutang,
+              (SELECT IFNULL(SUM(t.total),0) FROM tagihan t
+                WHERE t.id_data_server = d.id AND t.status = 'lunas'
+                  AND t.paid_at >= DATE_FORMAT(NOW(), '%Y-%m-01')) AS pemasukan_bulan,
+              (SELECT COUNT(*) FROM app_user u
+                WHERE FIND_IN_SET(d.id, u.id_data_server)) AS pengguna,
+              (SELECT COUNT(*) FROM master_perangkat m WHERE m.id_data_server = d.id) AS perangkat,
+              (SELECT COUNT(*) FROM profil_tagihan f WHERE f.id_data_server = d.id) AS profil_tagihan
+       FROM data_server d ORDER BY d.id`
     );
-    res.json({ data: rows });
+    const hari = waktuSiklus().hari;
+    res.json({
+      data: rows.map((t) => ({
+        ...t,
+        // flag untuk badge: expaired_date = hari TERAKHIR yang masih berlaku
+        habis: !!t.expaired_date && String(t.expaired_date).slice(0, 10) < hari,
+        tenantAktif: Number(t.id) === Number(req.ds)
+      }))
+    });
   } catch (e) { next(e); }
 });
 
@@ -62,6 +97,12 @@ router.post('/data-server', requireRole('superadmin'), async (req, res, next) =>
       if (dup) return res.status(400).json({ error: 'Username master sudah dipakai' });
     }
     const hash = pass ? await bcrypt.hash(pass, config.security.bcryptRounds) : null;
+    // nilai jadwal dipromosikan ke variabel: profile tagihan awal tenant ini
+    // harus meniru angka yang sama, bukan diisi ulang secara terpisah
+    const dPref = v.str(req.body.prefix_invoice, { min: 2, max: 10, def: 'IVV' }).toUpperCase();
+    const buatHari = v.num(req.body.jadwal_buat_hari, { min: 1, max: 28, def: 1, int: true });
+    const kirimHari = v.num(req.body.jadwal_kirim_hari, { min: 1, max: 28, def: 2, int: true });
+    const limitHari = v.num(req.body.jadwal_limit_hari, { min: 1, max: 28, def: 10, int: true });
     const id = await db.insert(
       `INSERT INTO data_server (nama_server, nama_pemilik, nomor_whatsapp, email, alamat,
          prefix_invoice, username, password_hash, expaired_date, status,
@@ -69,12 +110,10 @@ router.post('/data-server', requireRole('superadmin'), async (req, res, next) =>
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [nama, v.str(req.body.nama_pemilik, { max: 100, def: null }), v.phone(req.body.nomor_whatsapp),
        v.email(req.body.email), v.str(req.body.alamat, { max: 255, def: null }),
-       v.str(req.body.prefix_invoice, { min: 2, max: 10, def: 'IVV' }).toUpperCase(),
+       dPref,
        username, hash, v.tgl(req.body.expaired_date, null),
        v.enumOf(req.body.status, ['Aktif', 'Tidak Aktif'], 'Aktif'),
-       v.num(req.body.jadwal_buat_hari, { min: 1, max: 28, def: 1, int: true }),
-       v.num(req.body.jadwal_kirim_hari, { min: 1, max: 28, def: 2, int: true }),
-       v.num(req.body.jadwal_limit_hari, { min: 1, max: 28, def: 10, int: true }),
+       buatHari, kirimHari, limitHari,
        v.str(req.body.jam_kirim, { min: 4, max: 5, def: '07:00' }),
        v.num(req.body.ppn_persen, { min: 0, max: 100, def: 0 })]
     );
@@ -83,9 +122,48 @@ router.post('/data-server', requireRole('superadmin'), async (req, res, next) =>
       `INSERT INTO pesan_template (id_data_server, jenis, konten) SELECT ?, jenis, konten
        FROM pesan_template WHERE id_data_server = 1`, [id]
     );
+    // --- v2.1.0: sisakan "rumah" yang bisa langsung dipakai, bukan cuma baris
+    // data_server. Sebelum ini tenant baru lahir tanpa pengaturan, tanpa grup
+    // akses dan tanpa profile tagihan, sehingga menu Pengaturan kosong dan
+    // monitoring jatuh ke nilai tenant 1. Semua bisa diubah oleh ISP-nya
+    // sendiri nanti; prefix invoice, masa aktif dan status tetap milik
+    // superadmin platform (form Data Server).
+    await cfgApp.seed(id, {
+      app_name: cfgApp.DEFAULT_APLIKASI.app_name,
+      timezone: cfgApp.DEFAULT_APLIKASI.timezone,
+      // nama_tampilan sengaja kosong: panel memakai nama_server sampai ISP
+      // menentukan label sendiri
+      base_url: ''
+    });
+    // satu profile tagihan warisan jadwal tenant → siklus bulan pertama sudah
+    // punya tujuan jatuh tempo tanpa harus membuat profil dulu
+    const namaProfil = `${String(dPref || 'IVV').replace(/-+$/, '')}-${limitHari}`;
+    await db.run(
+      `INSERT INTO profil_tagihan (id_data_server, nama, tanggal_buat, tanggal_kirim,
+                                   tanggal_isolir, ppn_mode, kirim_peringatan, status)
+       VALUES (?,?,?,?,?, 'tanpa', 1, 'aktif')
+       ON DUPLICATE KEY UPDATE nama=nama`,
+      [id, namaProfil, buatHari, kirimHari, limitHari]
+    );
+    // dua grup akses siap pakai — tanpa grup, pengguna baru otomatis dapat
+    // semua menu tenant-nya, jadi ini hanya pemendek jalan untuk pendelegasian
+    await db.run(
+      `INSERT INTO group_akses (id_data_server, nama, akses, status) VALUES (?,?,?,'aktif')
+       ON DUPLICATE KEY UPDATE nama=nama`,
+      [id, 'Admin Tagihan', JSON.stringify({ menu: {
+        dashboard: true, pelanggan: true, tagihan: true, pembayaran: true, profil_tagihan: true,
+        invoice: true, keuangan: true, wa: true, tiket: true, pengguna: true } })]
+    );
+    await db.run(
+      `INSERT INTO group_akses (id_data_server, nama, akses, status) VALUES (?,?,?,'aktif')
+       ON DUPLICATE KEY UPDATE nama=nama`,
+      [id, 'Teknisi', JSON.stringify({ menu: {
+        dashboard: true, pelanggan: { sub_menu: ['lihat', 'ubah'] }, issue: true, olt: true,
+        interface: true, noc: true, tiket: true, absen: true, peta: true } })]
+    );
     await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
       [req.user.id, id, 'tambah_data_server', nama, (req.ip || '').replace('::ffff:', '')]);
-    res.json({ id });
+    res.json({ id, profil_tagihan: namaProfil, grup: ['Admin Tagihan', 'Teknisi'] });
   } catch (e) { next(e); }
 });
 
@@ -158,6 +236,10 @@ router.delete('/data-server/:id', requireRole('superadmin'), async (req, res, ne
       await t.run('DELETE FROM pesan_template WHERE id_data_server = ?', [id]);
       await t.run('DELETE FROM setting_app WHERE id_data_server = ?', [id]);
       await t.run('DELETE FROM rekening WHERE id_data_server = ?', [id]);
+      // v2.1.0: profil tagihan ikut dibuang — sejak penataan awal tenant,
+      // barisnya selalu dibuat otomatis, jadi meninggalkannya membuat daftar
+      // "Profile Tagihan" tenant yang sudah mati tetap tersisa di laporan.
+      await t.run('DELETE FROM profil_tagihan WHERE id_data_server = ?', [id]);
       await t.run('DELETE FROM wa_queue WHERE id_data_server = ?', [id]);
       await t.run('DELETE FROM data_server WHERE id = ?', [id]);
     });

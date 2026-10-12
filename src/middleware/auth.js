@@ -11,6 +11,7 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../db');
+const cfgData = require('../services/configData');
 const { daftarTenant, aksesObjek } = require('../util/scope');
 
 const COOKIE = 'ivvi_token';
@@ -99,6 +100,23 @@ async function requireAuth(req, res, next) {
 
     let ds = Number(payload.ds) || (user.ids ? user.ids[0] : 1);
     if (user.ids && !user.ids.includes(ds)) ds = user.ids[0];
+
+    // Sekat berlangganan: dulu `expaired_date` hanya diperiksa sekali saat login,
+    // sehingga sesi 12 jam — dan seluruh scheduler yang sudah terlanjur membaca
+    // daftar tenant — tetap jalan setelah masa aktif ISP habis. Pemilik platform
+    // (ids = null) tidak digiring ke gerbang ini; ia justru harus bisa masuk
+    // ke tenant yang mati untuk menagih perpanjangan.
+    if (user.ids) {
+      const srv = await cfgData.getServer(ds).catch(() => null);
+      if (!srv) return res.status(403).json({ error: 'Data server tidak ditemukan' });
+      if (srv.status !== 'Aktif') {
+        return res.status(403).json({ error: 'Data server ini sedang dinonaktifkan' });
+      }
+      if (cfgData.habisMasa(srv)) {
+        return res.status(403).json({ error: 'Masa langganan data server ini sudah berakhir' });
+      }
+    }
+
     req.user = user;
     req.ds = ds;
     req.tenantSemua = !user.ids;      // true hanya untuk pemilik platform

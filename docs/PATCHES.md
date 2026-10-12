@@ -4,6 +4,205 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-12 — v2.1.1 — Halaman panel pemilik platform hanya menampilkan SATU data server; rekap lintas ISP pindah ke menu Data Server
+
+**Gejala user**
+
+"untuk data server harusnya multi tenant karena nantinya akan banyak data server
+berlangganan aplikasi ini masing2 punya data", diperjelas: *tenant 1 = superadmin
+platform dengan akses penuh (mengelola Data Server), sisanya masing-masing ISP
+menata datanya sendiri — logo custom, nama billing — di bawah kontrol superadmin.*
+
+Temuan saya saat memverifikasi v2.1.0, yang jadi inti rilis ini: header panel
+bertuliskan **IVVI Network** (data server 1, milik pemilik platform) tapi kartu
+dasbor menunjukkan **171 pelanggan dan Rp 26.215.000** — itu angka IVVINET-CBD
+(tenant 2).
+
+**Penyebab**
+
+Sekat baca dibangun dari `req.user.ids`. Bagi akun platform (`ids` kosong) artinya
+"boleh melihat semua tenant", jadi **setiap** rute baca — dasbor, daftar pelanggan,
+keuangan — menghasilkan agregat lintas ISP. `req.ds` (data server yang sedang
+dipilih di kanan atas) hanya dipakai untuk aksi tulis dan untuk melabeli halaman.
+Akibatnya label "satu ISP" ditempel di atas angka "semua ISP".
+
+**Keputusan (ditanyakan ke user, bukan asumsi)**
+
+Pilihan yang diambil: **"Ketat + opsi gabungan"** — setiap halaman panel hanya
+menampilkan data server aktif; rekap semua ISP hidup di menu Data Server, bukan
+diselipkan sebagai angka dasbor yang berlabel satu ISP.
+
+Mode "gabungan" (`ds = 0`) di semua halaman sengaja **ditolak**: `tenantAktif(req)`
+dipanggil di 51 tempat, banyak di antaranya GET, sehingga sesi ber-ds 0 akan membuat
+sebagian besar halaman error, bukan menampilkan gabungan.
+
+**Diubah — `src/util/scope.js` (jantung rilis ini)**
+
+* `sekatBaca(req)` jadi satu-satunya sumber cakupan baca:
+  * pemilik platform + `?ds=all` → `null` = tanpa filter (hanya lewat permintaan
+    eksplisit, dipakai daftar rujukan lintas tenant);
+  * pemilik platform + `?ds=N` → hanya tenant N;
+  * tanpa override → `[ds aktif]` bila sah, kalau tidak → `ids` milik pengguna;
+  * pengguna terikat tenant **tidak bisa** naik jadi lintas ISP (`?ds=all` diabaikan);
+  * `ids` kosong dan bukan pemilik platform → `AND 1 = 0`.
+* `tenantSql`, `tenantFrag` dan `tenantUserSql` kini dibangun di atas `sekatBaca`
+  (tetap `FIND_IN_SET` karena `app_user.id_data_server` berbentuk CSV `'1,5'`).
+  `tenantUserSql` tetap ikut memperlihatkan akun ber-`id_data_server` NULL **hanya**
+  kepada pemilik platform, supaya `adminmaster` masih bisa mengelola sesamanya di
+  menu Pengguna.
+* `tenantAktif(req)` melempar `Error` dengan `.status = 400`
+  ("Tenant aktif tidak valid — pilih satu data server terlebih dahulu") alih-alih
+  jatuh ke HTTP 500.
+
+**Diubah — `src/routes/tenant.js`, `src/routes/lain.js`, panel**
+
+* `GET /api/data-server` menjadi rekap per baris: subquery milik tenant itu sendiri
+  untuk `pelanggan_aktif/total`, `tagihan_terbuka`, `piutang`, `pemasukan_bulan`
+  (`paid_at >= awal bulan`), `pengguna` (`FIND_IN_SET`), `perangkat`, `profil_tagihan`,
+  plus `logo`. Setiap baris diberi `habis` (memakai `waktuSiklus().hari`, bukan
+  perbandingan `Date` UTC) dan `tenantAktif`.
+* Tabel Data Server di panel jadi 10 kolom (badge `sedang dibuka` di baris aktif,
+  `masa aktif habis` di kolom kedaluwarsa) dengan tombol **Kelola** →
+  `POST /api/auth/server` lalu `location.reload()`.
+* `penyiapan` (checklist isi data server: pelanggan, paket, profil tagihan, rekening,
+  perangkat, grup, pengguna, template tagihan) ikut dikirim oleh `GET/PUT /api/setting`.
+* Dasbor memberi peringatan anti-"data hilang" untuk pemilik platform: bila tenant
+  aktif tidak punya pelanggan aktif, muncul angka tenant lain yang tersedia
+  (`171 pelanggan di IVVINET-CBD`) + arah ke menu Data Server.
+* `isiOpsiGrup()` memakai `/api/group-akses?ds=all` bila sesi pemilik platform, jadi
+  grup rujukan tetap bisa dipilih lintas tenant.
+
+**Verifikasi di produksi (bukan uji sintetis)**
+
+* Harness `sekatBaca` 8 kasus, semuanya sesuai rancangan: pemilik ds=1 → `IN (1)`;
+  `?ds=all` → tanpa filter; `?ds=3` → `[3]`; master ber-ids=[2] + `?ds=all` → tetap
+  `[2]`; teknisi ids=[1,5] ds=5 → `[5]`; `?ds=9` (asing) → jatuh ke `[1,5]`;
+  ids=[] → `AND 1 = 0`; `tenantAktif(ds=0)` → 400.
+* Lewat API nyata sebagai `adminmaster`: ds=1 → `pelanggan_aktif 0` + pesan
+  peringatan berisi 171 milik IVVINET-CBD; ds=2 → 171 pelanggan dan Rp 26.215.000;
+  rekap `/api/data-server` memisahkan angka per ISP; `?ds=all`/`?ds=1` berfungsi
+  untuk pemilik platform dan **diabaikan** untuk teknisi terikat tenant (percobaan
+  pindah tenant oleh teknisi itu berbalas 403).
+* Lewat browser (`bill.ivvinet.my.id/panel`): dasbor tenant 1 = 0 dengan hint,
+  `gantiServer('2')` → 171 / Rp 26.215.000 dengan brand IVVINET-CBD, menu Data Server
+  menampilkan kedua baris + badge "sedang dibuka" di tenant aktif + tombol Kelola,
+  halaman Pengaturan membaca nilai milik tenant. Sesi ditinggalkan di tenant 1.
+* Akun teknisi sementara untuk uji isolasi sudah dihapus lewat SQL (panel belum punya
+  `DELETE /api/pengguna` — catatan, bukan bug rilis ini). `data_server` dan `app_user`
+  terbukti **sama persis** dengan dump sebelum uji (`DATA_SERVER_SAMA_PERSIS`,
+  `APP_USER_SAMA_PERSIS`), `AUTO_INCREMENT` `app_user` dikembalikan 4 → 3, pelanggan
+  171 / tagihan 171 / pembayaran 171 tak berubah.
+* Sisa yang tidak bisa dikembalikan sepenuhnya: `app_user.last_login` adminmaster
+  bergerak karena login verifikasi saya (sudah dikembalikan ke nilai baseline
+  `2026-10-12 09:50:43` dengan `SET time_zone='+00:00'`).
+
+---
+
+## 2026-10-12 — v2.1.0 — Multi-tenant ditegakkan: satu klausul berlangganan (fase A) + ISP menata rumahnya sendiri (fase B)
+
+**Gejala user**
+
+"untuk data server harusnya multi tenant karena nantinya akan banyak data server
+berlangganan aplikasi ini masing2 punya data."
+
+**Penyebab (hasil audit, semua terlihat di kode sebelum rilis ini)**
+
+1. **Dua sumber kebenaran masa langganan.** `scheduler.daftarTenant()` memakai
+   `expaired_date >= CURDATE() - INTERVAL 1 DAY`, sedangkan `configData.habisMasa()`
+   sudah menyatakan ISP itu habis. Jadi satu hari setelah jatuh tempo, penagihan,
+   WhatsApp, peringatan dan isolir tetap jalan atas nama ISP yang berhenti
+   berlangganan.
+2. **`habisMasa()` mencampur dua zona.** Kolom `DATE` bisa datang sebagai `Date`
+   (tengah malam **UTC**, karena `dateStrings`/`timezone:'+00:00'` di `src/db.js`)
+   dan dibandingkan dengan `CURDATE()` yang **WIB** — batas hari meleset 7 jam.
+3. **Default tenant 1 di lapisan layanan.** `billing.buatTagihanBulanan`,
+   `kirimTagihanWajib`, `peringatanTagihan`, `isolirJatuhTempo`, `wa.ambilTemplate`,
+   `wa.enqueue` dan `monitoring.cekPppoePelanggan` semuanya ditulis
+   `idDataServer = 1`. Tugas yang lupa meneruskan id tidak gagal — ia diam-diam
+   bekerja untuk ISP pertama.
+4. **`setting_app` dibaca tanpa menyebut tenant.** Tabelnya ber-PK
+   `(id_data_server, kunci)`, tapi query-nya `WHERE kunci = 'batas_offline_menit'`.
+   Selama hanya tenant 1 yang punya baris, hasilnya "kebetulan benar". Begitu ISP
+   kedua berlangganan, ambang offline / zona waktu / batas gagal login miliknya
+   ditentukan angka pemilik platform — dan di `monitoring` pembacaan itu ada **di
+   dalam** lingkaran pelanggan.
+5. **Gerbang langganan hanya saat login.** Masa aktif habis di tengah hari, sesi
+   12 jam (dan scheduler yang sudah terlanjur membaca daftar tenant) tetap jalan.
+6. **Tidak ada branding per tenant.** Kop invoice dan header panel selalu
+   nama/logo tenant 1, dan placeholder `#lnk` di template WA selalu kosong karena
+   kode membaca `srv.base_url` — kolom itu memang tidak pernah ada di `data_server`.
+
+**Diubah — fase A (sekat & masa aktif)**
+
+* `services/configData.js`: `FILTER_BERLANGGANAN`
+  (`status='Aktif' AND (expaired_date IS NULL OR expaired_date >= CURDATE())`) jadi
+  satu-satunya klausul berlangganan, dipakai scheduler dan gerbang login;
+  `habisMasa()` dibandingkan sebagai string ISO terhadap `waktuSiklus().hari`
+  (dibuktikan untuk kasus 05:00 dan 09:27 WIB); `idTenant(id)` melempar error bila
+  id bukan tenant sah — **default tenant 1 dihapus dari lapisan layanan**
+  (`billing.js`, `wa.js`, `monitoring.js` ikut berubah).
+* `scheduler.js`: `daftarTenant()` = `SELECT … FROM data_server WHERE 1=1
+  ${cfgData.FILTER_BERLANGGANAN}` dan ikut diekspor supaya bisa diuji apa adanya.
+* `middleware/auth.js`: setiap request dari pengguna bertenant memeriksa baris
+  tenant-nya — non-Aktif → 403 "Data server ini sedang dinonaktifkan", habis masa →
+  403 "Masa langganan data server ini sudah berakhir". Pemilik platform (`ids = null`)
+  sengaja tidak digiring ke gerbang ini: ia justru harus bisa masuk ke tenant mati
+  untuk menagih perpanjangan.
+* `services/configApp.js` (**berkas baru**, 128 baris): `setting_app` per tenant,
+  `idWajib()` menolak id kosong, `DEFAULT_APLIKASI` sebagai nilai bawaan — kunci yang
+  belum diisi tenant memakai bawaan aplikasi, **bukan** baris tenant 1, supaya ISP
+  baru tidak diam-diam mewarisi pengaturan pemilik platform; cache 15 detik per tenant.
+* `monitoring.js`: ambang offline dibaca sekali per tenant (`cfgApp.angka`), tidak
+  lagi di dalam lingkaran pelanggan.
+
+**Diubah — fase B (penataan mandiri per tenant)**
+
+* `configData.merek(id)` → `{ nama, logo, prefix }` dengan aturan
+  `nama_tampilan` (setting_app) bila diisi, kalau belum pakai `nama_server`;
+  dibawa oleh `/api/auth/login`, `/api/auth/me` dan `/api/auth/server`.
+* `public/assets/app.js`: `terapkanMerek()` menulis `brandName`, `brandMark` dan
+  `brandImg` — header panel, agen, teknisi, pelanggan (keempat `index.html` ikut
+  diubah).
+* Logo per ISP: `POST/DELETE /api/setting/logo` (`lain.js`), multer 300 KB,
+  PNG/JPG/WEBP, **SVG ditolak** (isinya markup dan berkas upload disajikan tanpa
+  login), disimpan di `storage/uploads/<idDataServer>/` lewat `folderTenant()` dan
+  path-nya disimpan di `data_server.logo` (kolomnya sudah ada di skema, jadi tidak
+  perlu migrasi).
+* `GET/PUT /api/setting` memakai `tenantAktif(req)` dan mengembalikan `app` milik
+  tenant itu + `penyiapan`. Kunci yang boleh ditulis sendiri: `nama_tampilan`,
+  `base_url`, `batas_offline_menit`, `interval_issue_menit`, `batas_gagal_login`.
+* Tautan bayar per ISP: `billing.js` mengambil `#lnk` dari
+  `cfgApp.nilai(id, 'base_url')`.
+
+**Verifikasi di produksi**
+
+* Fase A: `expaired_date` tenant 2 dipindah ke kemarin lewat SQL, lalu `daftarTenant()`
+  yang sungguhan (fungsi yang dipanggil tick scheduler) dan `daftarServer()` melalui
+  API sama-sama kehilangan tenant 2; setelah nilainya dikembalikan, tenant 2 muncul
+  lagi. `data_server` terbukti identik dengan dump sebelum uji — `updated_at` sempat
+  meleset karena `mysqldump` menulis `SET TIME_ZONE='+00:00'` sementara sesi CLI +07,
+  dipulihkan dengan `SET time_zone='+00:00'` sebelum UPDATE.
+* Fase B (lewat HTTP nyata sebagai `adminmaster` di tenant 1):
+  `POST /api/setting/logo` → `{"ok":true,"logo":"/uploads/1/logo-…png"}`;
+  `GET /api/auth/me` → `merek.logo` mengembalikan path itu;
+  `GET /uploads/1/logo-…png` → `200 image/png 70 byte`; sesudah reload, `brandImg`
+  di header panel = `display:block` dengan src logo tenant; `DELETE /api/setting/logo`
+  → `{ok:true}` dan `GET /api/setting` kembali `logo: null`. Berkas uji hilang dari disk
+  (`storage/uploads/1/` tinggal kosong), baris `audit_log` uji dihapus, dan
+  `data_server` + `app_user` kembali **sama persis** terhadap dump baseline.
+* **Belum diuji sampai WhatsApp terkirim:** `base_url` per tenant (placeholder `#lnk`)
+  — tenant 2 belum mengisinya, jadi jalur itu baru terbukti sampai level rendering.
+
+**Catatan yang sengaja ditinggalkan untuk keputusan Anda**
+
+* Unggahan **kwitansi/bukti bayar** masih ditampung datar di `storage/uploads/kwitansi/`
+  — baru logo yang punya folder per tenant.
+* `app_user.username` masih unik **global**, bukan per tenant: dua ISP tidak bisa
+  sama-sama memakai nama `admin`.
+* Pemilik tenant belum bisa menghapus akun lewat panel (tidak ada `DELETE /api/pengguna`).
+
+---
+
 ## 2026-10-12 — v2.0.2 — NOC "Ping Test" akhirnya benar-benar mem-ping: parameter `timeout` ditolak RouterOS 7
 
 **Gejala user**

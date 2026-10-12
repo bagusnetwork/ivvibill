@@ -27,14 +27,28 @@ const wa = require('./services/wa');
 const monitor = require('./services/monitoring');
 const olt = require('./services/olt');
 const onu = require('./services/onu');
+const cfgData = require('./services/configData');
 const { waktuSiklus } = require('./util/tanggal');
 
-/** Daftar ISP aktif; kolom jadwal dipilih eksplisit agar rahasia gateway tidak terbawa. */
+/**
+ * Daftar ISP yang berhak disiklus; kolom jadwal dipilih eksplisit agar rahasia
+ * gateway tidak terbawa. Termasuk gerbang masa aktif: dulu hanya status='Aktif',
+ * jadi ISP yang sudah habis expaired_date-nya tetap dibuatkan tagihan,
+ * tetap dikirim WhatsApp, dan tetap di-isolir pelanggannya oleh scheduler.
+ *
+ * Klause langganannya dipakai dari configData (FILTER_BERLANGGANAN) supaya
+ * scheduler dan gerbang login tidak bisa lagi punya aturan yang berbeda.
+ * expaired_date = hari TERAKHIR yang masih berlaku, jadi `>= CURDATE()`:
+ * sebelumnya di sini ada kelonggaran INTERVAL 1 DAY sehingga ISP yang
+ * configData.habisMasa() sudah nyatakan berakhir masih ikut disiklus.
+ */
 async function daftarTenant() {
   return db.q(
     `SELECT id, nama_server, jadwal_buat_hari, jadwal_kirim_hari, jadwal_limit_hari,
             jam_kirim, jam_peringatan, jam_isolir
-     FROM data_server WHERE status = 'Aktif' ORDER BY id`
+     FROM data_server
+     WHERE 1=1${cfgData.FILTER_BERLANGGANAN}
+     ORDER BY id`
   );
 }
 
@@ -249,4 +263,4 @@ function berhenti() {
   timers = [];
 }
 
-module.exports = { mulai, berhenti, tugasWa, tugasRouter, tugasOlt, tugasBilling, tugasIssue, tugasVoucher };
+module.exports = { mulai, berhenti, tugasWa, tugasRouter, tugasOlt, tugasBilling, tugasIssue, tugasVoucher, daftarTenant };

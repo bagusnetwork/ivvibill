@@ -52,6 +52,10 @@ async function loadDashboard() {
       else if (sisa <= 30) peringatan.push(`<div class="peringatan">Masa aktif ${esc(t.nama_server || 'data server')} tinggal ${sisa} hari (${esc(tgl(t.expaired_date))}).</div>`);
     }
     if (Number(r.pppoe_offline) > 0) peringatan.push(`<div class="peringatan">${r.pppoe_offline} pelanggan aktif sedang tidak terhubung ke router.</div>`);
+    // v2.1.1 — halaman hanya menampilkan satu data server. Untuk pemilik
+    // platform yang memilih tenant tanpa pelanggan sendiri, server mengirim
+    // kalimat penjelas supaya deretan 0 tidak disalahtafsirkan sebagai data hilang.
+    if (d.kosong) peringatan.push(`<div class="peringatan">${esc(d.kosong)}</div>`);
     document.getElementById('dashPeringatan').innerHTML = peringatan.join('');
 
     const kartu = [
@@ -1765,7 +1769,10 @@ async function loadSetting() {
   try {
     const d = await API.get('/api/setting');
     const s = d.data_server || {};
+    const a = d.app || {};
     document.getElementById('sNama').value = s.nama_server || '';
+    document.getElementById('sNamaTagihan').value = a.nama_tampilan || '';
+    document.getElementById('sEmail').value = s.email || '';
     document.getElementById('sWa').value = s.nomor_whatsapp || '';
     document.getElementById('sAlamat').value = s.alamat || '';
     document.getElementById('sBuat').value = s.jadwal_buat_hari || 1;
@@ -1775,6 +1782,10 @@ async function loadSetting() {
     document.getElementById('sJamPeri').value = s.jam_peringatan || '08:00';
     document.getElementById('sJamIso').value = s.jam_isolir || '09:00';
     document.getElementById('sPpn').value = Number(s.ppn_persen || 0);
+    document.getElementById('sBatasOff').value = Number(a.batas_offline_menit || 15);
+    document.getElementById('sBaseUrl').value = a.base_url || '';
+    isiLogo(s.logo);
+    renderPenyiapan(d.penyiapan);
 
     const g = await API.get('/api/gateway');
     const gw = g.data || {};
@@ -1798,6 +1809,7 @@ async function simpanSetting() {
   try {
     await API.put('/api/setting', {
       nama_server: document.getElementById('sNama').value,
+      email: document.getElementById('sEmail').value,
       nomor_whatsapp: document.getElementById('sWa').value,
       alamat: document.getElementById('sAlamat').value,
       jadwal_buat_hari: document.getElementById('sBuat').value,
@@ -1808,11 +1820,78 @@ async function simpanSetting() {
       // tersimpan walau field-nya terlihat bisa diisi di form
       jam_peringatan: (document.getElementById('sJamPeri') || {}).value,
       jam_isolir: (document.getElementById('sJamIso') || {}).value,
-      ppn_persen: document.getElementById('sPpn').value
+      ppn_persen: document.getElementById('sPpn').value,
+      // pengaturan milik tenant ini sendiri (dahulu hanya bisa dibaca)
+      app: {
+        nama_tampilan: document.getElementById('sNamaTagihan').value,
+        base_url: document.getElementById('sBaseUrl').value,
+        batas_offline_menit: document.getElementById('sBatasOff').value
+      }
     });
     toast('Pengaturan tersimpan');
+    await muatSesi();          // header langsung memakai nama tagihan baru
   } catch (e) { toast(e.message, true); }
 }
+
+/** Pratinjau logo di halaman Pengaturan. */
+function isiLogo(logo) {
+  const img = document.getElementById('sLogoPreview');
+  if (!img) return;
+  if (logo) { img.src = logo; img.style.display = ''; }
+  else { img.removeAttribute('src'); img.style.display = 'none'; }
+}
+
+async function unggahLogo() {
+  const input = document.getElementById('sLogoFile');
+  const f = input && input.files && input.files[0];
+  if (!f) return toast('Pilih berkas logo dulu', true);
+  if (f.size > 300 * 1024) return toast('Logo maksimal 300 KB', true);
+  try {
+    const fd = new FormData();
+    fd.append('logo', f);
+    const r = await API.post('/api/setting/logo', fd, true);
+    isiLogo(r.logo);
+    await muatSesi();
+    toast('Logo tersimpan');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function hapusLogo() {
+  try {
+    await API.del('/api/setting/logo');
+    isiLogo(null);
+    const input = document.getElementById('sLogoFile');
+    if (input) input.value = '';
+    await muatSesi();
+    toast('Logo dihapus');
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Checklist "masih ada yang belum" — ISP baru sering lupa rekening/profile/grup. */
+function renderPenyiapan(p) {
+  const box = document.getElementById('siapBox');
+  if (!box || !p) return;
+  const baris = [
+    ['Paket layanan', p.paket, true, 'Menu Paket — tarif yang ditagihkan'],
+    ['Profile Tagihan', p.profil_tagihan, true, 'Menu Profile Tagihan — tanggal buat/kirim/isolir'],
+    ['Rekening transfer', p.rekening, true, 'Menu Pembayaran › Rekening — tercetak di kwitansi'],
+    ['Pelanggan', p.pelanggan, false, 'Menu Pelanggan / Impor Excel'],
+    ['Perangkat MikroTik', p.perangkat, false, 'Menu Perangkat — tanpa ini tidak ada remote ONU/isolir'],
+    ['Grup akses', p.grup, false, 'Menu Group Akses — pembagian hak staf'],
+    ['Pengguna staf', p.pengguna, false, 'Menu Pengguna — akun agen/teknisi'],
+    ['Template "tagihan"', p.template_tagihan, true, 'Menu Pengaturan › Template WhatsApp']
+  ];
+  const kurang = baris.filter(b => b[2] && !b[1]);
+  box.innerHTML = `<p class="hint">${kurang.length
+    ? `<span class="badge bad">${kurang.length}</span> hal wajib belum diisi — tagihan/WA/kwitansi jalan tapi bentuknya belum seperti milik Anda.`
+    : '<span class="badge ok">lengkap</span> semua hal wajib sudah diisi.'}</p>` +
+    `<table><thead><tr><th>Yang perlu diisi</th><th>Status</th><th>Di mana</th></tr></thead><tbody>` +
+    baris.map(([n, v, wajib, di]) => `<tr><td>${esc(n)}${wajib ? ' <span class="badge warn">wajib</span>' : ''}</td>
+      <td>${v ? `<span class="badge ok">${v}</span>` : `<span class="badge ${wajib ? 'bad' : 'mute'}">kosong</span>`}</td>
+      <td class="hint">${esc(di)}</td></tr>`).join('') +
+    `</tbody></table>`;
+}
+
 async function simpanGateway() {
   try {
     await API.put('/api/gateway', {
@@ -2434,18 +2513,37 @@ async function loadTenant() {
     const d = await API.get('/api/data-server');
     TENANT_ROWS = d.data || [];
     document.getElementById('tbTenant').innerHTML = TENANT_ROWS.map((t, i) => `
-      <tr><td>${esc(t.id)}</td><td><b>${esc(t.nama_server)}</b></td>
+      <tr><td>${esc(t.id)}</td>
+        <td><b>${esc(t.nama_server)}</b>${t.tenantAktif ? ' <span class="badge info">sedang dibuka</span>' : ''}</td>
         <td>${esc(t.nama_pemilik || '-')}</td>
         <td>${t.username ? esc(t.username) : '<span class="badge mute">tanpa login master</span>'}</td>
-        <td>${esc(t.prefix_invoice || '-')}</td>
-        <td class="hint">buat ${esc(t.jadwal_buat_hari)} · kirim ${esc(t.jadwal_kirim_hari)} · tempo ${esc(t.jadwal_limit_hari)} · ${esc(t.jam_kirim || '00:00')}</td>
-        <td>${t.expaired_date ? esc(String(t.expaired_date).slice(0, 10)) : '-'}</td>
+        <td class="hint">${esc(t.prefix_invoice || '-')} · buat ${esc(t.jadwal_buat_hari)} · kirim ${esc(t.jadwal_kirim_hari)} · tempo ${esc(t.jadwal_limit_hari)} · ${esc(t.jam_kirim || '00:00')}</td>
+        <td>${esc(t.pelanggan_aktif || 0)} aktif / ${esc(t.pelanggan_total || 0)}<br>
+            <span class="hint">${esc(t.pengguna || 0)} pengguna · ${esc(t.perangkat || 0)} perangkat · ${esc(t.profil_tagihan || 0)} profil</span></td>
+        <td>${rupiah(t.pemasukan_bulan)}<br>
+            <span class="hint">${esc(t.tagihan_terbuka || 0)} belum lunas · ${rupiah(t.piutang)}</span></td>
+        <td>${t.expaired_date ? esc(String(t.expaired_date).slice(0, 10)) : '<span class="hint">tanpa batas</span>'}
+            ${t.habis ? '<br><span class="badge bad">masa aktif habis</span>' : ''}</td>
         <td><span class="badge ${t.status === 'Aktif' ? 'ok' : 'mute'}">${esc(t.status)}</span></td>
         <td class="t-actions">
+          <button class="btn sm secondary" onclick="kelolaTenant(${t.id})">Kelola</button>
           <button class="btn sm secondary" onclick="formTenant(${i})">Ubah</button>
           ${Number(t.id) === 1 ? '' : `<button class="btn sm danger" onclick="hapusTenant(${t.id})">Hapus</button>`}
         </td></tr>`).join('')
-      || '<tr><td colspan="9" class="empty">Belum ada data server</td></tr>';
+      || '<tr><td colspan="10" class="empty">Belum ada data server</td></tr>';
+  } catch (e) { toast(e.message, true); }
+}
+
+/**
+ * Pindah ke satu data server dari tabel rekap. Sejak v2.1.1 semua halaman
+ * hanya menampilkan tenant yang sedang dipilih, jadi rekap di tabel ini perlu
+ * jalan pintas ke isi datanya — dan tombolnya sekaligus mengingatkan bahwa
+ * ISP tanpa login master hanya bisa dibuka lewat akun platform.
+ */
+async function kelolaTenant(id) {
+  try {
+    await API.post('/api/auth/server', { id: Number(id) });
+    location.reload();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -2562,7 +2660,15 @@ async function muatLabelTenant() {
 /** Isi dropdown grup (modal pengguna) + dropdown tenant (modal grup & pengguna). */
 async function isiOpsiGrup() {
   let grup = { data: [] };
-  try { grup = await API.get('/api/group-akses'); } catch (_) {}
+  try {
+    // v2.1.1: daftar grup sekarang sekatnya satu tenant. Untuk pemilik platform
+    // yang membuat pengguna milik data server lain (kolom "data server" di form),
+    // dropdown grup harus tetap berisi grup semua ISP — itu satu-satunya tempat
+    // ?ds=all dipakai, dan hanya berlaku untuk akun tenantSemua.
+    const s = sesi();
+    const url = s && s.tenantSemua ? '/api/group-akses?ds=all' : '/api/group-akses';
+    grup = await API.get(url);
+  } catch (_) {}
   MENU_LIST = grup.menus || MENU_LIST;
   GRUP_SEMUA = grup.data || [];
   const servers = (sesi() && sesi().servers) || [];

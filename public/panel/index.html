@@ -53,7 +53,8 @@
 <div class="layout" id="layout">
 
   <aside class="sidebar">
-    <div class="logo"><span class="mark">iV</span> ivvibill</div>
+    <div class="logo"><span class="mark" id="brandMark">iV</span><img id="brandImg" alt="logo"
+      style="display:none;max-height:26px;max-width:110px;object-fit:contain"><span id="brandName">ivvibill</span></div>
     <div class="nav-group">Utama</div>
     <nav class="nav">
       <a data-page="dashboard" data-menu="dashboard"><span class="ic">📊</span> Dashboard</a>
@@ -564,15 +565,21 @@
           <tbody id="tbAudit"><tr><td colspan="4" class="empty">Kosong</td></tr></tbody></table></div></div>
       </div>
 
-      <!-- ================= DATA SERVER (ISP) ================= -->
+      <!-- ================= DATA SERVER (ISP) =================
+          v2.1.1: halaman ini juga jadi rekap lintas tenant. Semua halaman panel
+          lain hanya menampilkan satu data server (pemilihan di kanan atas), jadi
+          angka "semua ISP" dihitung per baris di sini — kolom Isi & Keuangan
+          datang dari GET /api/data-server, tombol Kelola memindahkan tenant
+          aktif lewat POST /api/auth/server. -->
       <div data-view="tenant" data-onload="loadTenant" style="display:none">
         <div class="toolbar"><div class="spacer"></div>
           <button class="btn" onclick="formTenant()">+ Tambah Data Server</button></div>
         <div class="panel"><div class="panel-body" style="padding:0">
           <table><thead><tr><th>ID</th><th>Nama server</th><th>Pemilik</th><th>Login master</th>
-            <th>Prefix</th><th>Jadwal tagihan</th><th>Kedaluwarsa</th><th>Status</th>
+            <th>PREFIX &amp; JADWAL</th><th>Isi data server</th><th>Keuangan bulan ini</th>
+            <th>Kedaluwarsa</th><th>Status</th>
             <th class="t-actions">Aksi</th></tr></thead>
-          <tbody id="tbTenant"><tr><td colspan="9" class="empty">Memuat…</td></tr></tbody></table>
+          <tbody id="tbTenant"><tr><td colspan="10" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
         <p class="hint">Satu data server = satu ISP. Username &amp; password pada barisnya adalah login
           master ISP itu. Seluruh datanya (paket, pelanggan, tagihan, perangkat, gateway, WhatsApp,
@@ -625,8 +632,25 @@
           <div class="panel"><div class="panel-head"><h2>Identitas & jadwal tagihan</h2></div>
             <div class="panel-body">
               <div class="form-row"><label>Nama server</label><input id="sNama"></div>
+              <div class="form-row"><label>Nama billing (label tagihan)</label>
+                <input id="sNamaTagihan" placeholder="kosong = pakai nama server">
+                <p class="hint">Ini yang tampil di header aplikasi dan di kop dokumen. Nama tagihan/isi
+                  invoice tetap memakai <b>nama server</b> sampai Anda mengubahnya di sini.</p></div>
+              <div class="form-row"><label>Email</label><input id="sEmail"></div>
               <div class="form-row"><label>Nomor WhatsApp</label><input id="sWa" placeholder="628xx"></div>
               <div class="form-row"><label>Alamat</label><input id="sAlamat"></div>
+              <div class="form-row"><label>Logo</label>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                  <img id="sLogoPreview" alt="logo"
+                    style="max-height:46px;max-width:150px;object-fit:contain;border:1px solid #2a2f3a;border-radius:8px;padding:4px;display:none">
+                  <input id="sLogoFile" type="file" accept="image/png,image/jpeg,image/webp">
+                </div>
+                <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+                  <button class="btn sm" type="button" onclick="unggahLogo()">Unggah logo</button>
+                  <button class="btn sm secondary" type="button" onclick="hapusLogo()">Hapus logo</button>
+                </div>
+                <p class="hint">PNG/JPG/WEBP maksimal 300 KB. Tersimpan di folder milik data server ini
+                  dan dipakai kop invoice; logo SVG ditolak karena halaman cetak membacanya tanpa login.</p></div>
               <div class="form-grid">
                 <div class="form-row"><label>Tgl buat tagihan</label><input id="sBuat" type="number" min="1" max="28"></div>
                 <div class="form-row"><label>Tgl kirim WA</label><input id="sKirim" type="number" min="1" max="28"></div>
@@ -635,6 +659,11 @@
                 <div class="form-row"><label>Jam pengingat H-3</label><input id="sJamPeri" placeholder="08:00"></div>
                 <div class="form-row"><label>Jam isolir otomatis</label><input id="sJamIso" placeholder="09:00"></div>
                 <div class="form-row"><label>PPN %</label><input id="sPpn" type="number" min="0" max="100" step="0.5"></div>
+                <div class="form-row"><label>Batas offline (menit)</label><input id="sBatasOff" type="number" min="1" max="1440">
+                  <p class="hint">Milik data server ini — dulu angka ini dibaca dari pemilik platform.</p></div>
+                <div class="form-row"><label>Tautan bayar pelanggan</label><input id="sBaseUrl" placeholder="https://… (kosong = tanpa tautan)">
+                  <p class="hint">Isi bila ISP ini punya alamat portal sendiri; placeholder <b>#lnk</b> di
+                    template WA akan terisi <i>alamat/pelanggan</i>. Biarkan kosong untuk seperti sekarang.</p></div>
               </div>
               <p class="hint">Jam di atas adalah jam dinding ISP (zona server, WIB) dan siklusnya
                 dicoba tiap menit sejak jam itu — jadi jadwal yang tertunda karena server restart tetap
@@ -662,6 +691,9 @@
               <button class="btn" onclick="simpanGateway()">Simpan gateway</button>
             </div></div>
         </div>
+
+        <div class="panel"><div class="panel-head"><h2>Penyiapan awal data server ini</h2></div>
+          <div class="panel-body" id="siapBox"><p class="hint">Memuat…</p></div></div>
 
         <div class="panel"><div class="panel-head"><h2>Template pesan WhatsApp</h2></div>
           <div class="panel-body" id="tplBox">

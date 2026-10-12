@@ -67,8 +67,10 @@ async function requireLogin(roles) {
     if (el) el.textContent = `${u.nama} · ${u.role}`;
     SESI = {
       user: u, ds: r.ds, servers: r.servers || [],
-      akses: r.akses || { menu: 'all' }, tenantSemua: !!r.tenantSemua
+      akses: r.akses || { menu: 'all' }, tenantSemua: !!r.tenantSemua,
+      merek: r.merek || null
     };
+    terapkanMerek(SESI.merek);
     terapkanAksesMenu();
     isiPickerTenant();
     return u;
@@ -216,9 +218,35 @@ async function muatSesi() {
     const r = await API.get('/api/auth/me');
     SESI = {
       user: r.user, ds: r.ds, servers: r.servers || [],
-      akses: r.akses || { menu: 'all' }, tenantSemua: !!r.tenantSemua
+      akses: r.akses || { menu: 'all' }, tenantSemua: !!r.tenantSemua, merek: r.merek || null
     };
     terapkanAksesMenu();
+    terapkanMerek(r.merek);
     isiPickerTenant();
   } catch (_) {}
+}
+
+/**
+ * Merek tenant aktif — nama tagihan + logo yang ISP atur sendiri di
+ * halaman Pengaturan. Dipanggil setelah sesi/tenant berubah sehingga
+ * satu sesi browser yang berpindah ISP langsung berganti wajah.
+ */
+function terapkanMerek(m) {
+  const merek = m || (SESI && SESI.merek) || null;
+  if (!merek) return;
+  const nama = document.getElementById('brandName');
+  if (nama) nama.textContent = merek.nama || 'ivvibill';
+  const mark = document.getElementById('brandMark');
+  const img = document.getElementById('brandImg');
+  if (mark && img) {
+    if (merek.logo) {
+      img.src = merek.logo;
+      img.style.display = '';
+      mark.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      img.removeAttribute('src');
+      mark.style.display = '';
+    }
+  }
 }

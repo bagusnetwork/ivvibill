@@ -10,6 +10,9 @@ const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const v = require('../util/validate');
 const config = require('../config');
+const cfgData = require('../services/configData');
+const cfgApp = require('../services/configApp');
+const { daftarTenant } = require('../util/scope');
 const {
   signToken, setAuthCookie, clearAuthCookie, requireAuth,
   muatMaster, muatAppUser
@@ -73,7 +76,13 @@ router.post('/login', loginLimiter, async (req, res, next) => {
       if (!ok) {
         const gagal = (user.gagal_login || 0) + 1;
         await db.run('UPDATE app_user SET gagal_login = ? WHERE id = ?', [gagal, user.id]);
-        if (gagal >= config.security.maxLoginFail) {
+        // Ambang kunci dibaca dari setting_app milik tenant akun ini. Sebelumnya
+        // angka global config/security dipakai untuk semua ISP, sehingga kunci
+        // 'batas_gagal_login' yang diisi ISP tidak pernah benar-benar berlaku.
+        const ambang = await cfgApp.angka(
+          pilihTenant(daftarTenant(user.id_data_server), dsDiminta),
+          'batas_gagal_login', config.security.maxLoginFail);
+        if (gagal >= ambang) {
           await db.run(`UPDATE app_user SET status='blokir' WHERE id=?`, [user.id]);
         }
         return res.status(401).json({ error: 'Username atau password salah' });
@@ -93,6 +102,22 @@ router.post('/login', loginLimiter, async (req, res, next) => {
           error: `Akun ${identitas.role} belum ditautkan ke data ${identitas.role === 'agen' ? 'agen' : 'pelanggan'}, hubungi admin` });
       }
       const ds = pilihTenant(identitas.ids, dsDiminta);
+      // Staff ISP yang berlangganannya habis tidak boleh masuk (403 yang jelas),
+      // sama seperti jalur master di bawah. Pemilik platform tidak dicek.
+      if (identitas.ids) {
+        const srv = await cfgData.getServer(ds).catch(() => null);
+        const alasanSrv = !srv ? 'server_tidak_ada'
+          : srv.status !== 'Aktif' ? 'server_nonaktif'
+          : cfgData.habisMasa(srv) ? 'langganan_habis' : 'sukses';
+        if (alasanSrv !== 'sukses') {
+          await catatLogin(username, ip, alasanSrv);
+          return res.status(403).json({
+            error: alasanSrv === 'langganan_habis'
+              ? 'Masa langganan data server ini sudah berakhir, hubungi pemilik platform'
+              : 'Data server tidak aktif'
+          });
+        }
+      }
       await db.insert(
         'INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
         [identitas.id, ds, 'login', `Login ${identitas.role}`, ip]);
@@ -104,7 +129,8 @@ router.post('/login', loginLimiter, async (req, res, next) => {
           id: identitas.id, username: identitas.username, nama: identitas.nama,
           role: identitas.role, tipe: identitas.tipe, id_ref: identitas.id_ref,
           ds, ids: identitas.ids, servers: await daftarServerUser(identitas)
-        }
+        },
+        merek: await cfgData.merek(ds)
       });
     }
 
@@ -112,8 +138,7 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     const srv = await db.one('SELECT * FROM data_server WHERE username = ?', [username]);
     // sandi diperiksa sebelum status/expire: akun master yang hidup tapi
     // nonaktif tidak lagi membisikkan kondisinya ke penebak sandi.
-    const habis = srv && srv.expaired_date &&
-      new Date(srv.expaired_date) < new Date(Date.now() - 86400000);
+    const habis = cfgData.habisMasa(srv);
     const alasan = !srv ? 'username_tidak_ada'
       : !srv.password_hash ? 'master_tanpa_sandi'
       : !(await bcrypt.compare(pass, srv.password_hash)) ? 'sandi_salah'
@@ -140,7 +165,8 @@ router.post('/login', loginLimiter, async (req, res, next) => {
         id: identitas.id, username: identitas.username, nama: identitas.nama,
         role: identitas.role, tipe: identitas.tipe, id_ref: null,
         ds, ids: identitas.ids, servers: await daftarServerUser(identitas)
-      }
+      },
+      merek: await cfgData.merek(ds)
     });
   } catch (e) { next(e); }
 });
@@ -157,11 +183,15 @@ router.post('/server', requireAuth, async (req, res, next) => {
     if (req.user.ids && !req.user.ids.includes(id)) {
       return res.status(403).json({ error: 'Anda tidak punya akses ke data server itu' });
     }
-    const ada = await db.one(`SELECT id, nama_server FROM data_server WHERE id = ? AND status = 'Aktif'`, [id]);
+    const ada = await db.one(
+      `SELECT id, nama_server, status, expaired_date FROM data_server WHERE id = ? AND status = 'Aktif'`, [id]);
     if (!ada) return res.status(404).json({ error: 'Data server tidak ada / tidak aktif' });
+    if (cfgData.habisMasa(ada) && !req.tenantSemua) {
+      return res.status(403).json({ error: 'Masa langganan data server itu sudah berakhir' });
+    }
     const token = signToken(req.user, id);
     setAuthCookie(res, token);
-    res.json({ ok: true, ds: id, nama_server: ada.nama_server });
+    res.json({ ok: true, ds: id, nama_server: ada.nama_server, merek: await cfgData.merek(id) });
   } catch (e) { next(e); }
 });
 
@@ -175,7 +205,9 @@ router.get('/me', requireAuth, async (req, res, next) => {
     const { akses, ...ringan } = req.user;
     res.json({
       user: ringan, ds: req.ds, tenantSemua: req.tenantSemua,
-      akses: akses || { menu: 'all' }, servers: await daftarServerUser(req.user)
+      akses: akses || { menu: 'all' }, servers: await daftarServerUser(req.user),
+      // branding tenant aktif — dipakai header/login card tiap aplikasi
+      merek: await cfgData.merek(req.ds)
     });
   } catch (e) { next(e); }
 });

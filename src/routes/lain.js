@@ -6,6 +6,10 @@
 // ============================================================
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const multer = require('multer');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const db = require('../db');
 const v = require('../util/validate');
 const config = require('../config');
@@ -13,6 +17,7 @@ const { requireAuth, requireRole, requirePJ } = require('../middleware/auth');
 const { tenantSql, tenantUserSql, tenantAktif, tenantFrag, daftarTenant, requireMenu } = require('../util/scope');
 const wa = require('../services/wa');
 const cfgData = require('../services/configData');
+const cfgApp = require('../services/configApp');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -58,6 +63,24 @@ router.get('/dashboard', async (req, res, next) => {
          WHERE p.tipe = 'pppoe' AND p.status = 'aktif' AND IFNULL(ps.online, 0) = 0${TP}`);
       jml.pppoe_offline = Number(off.pppoe_offline);
       dasbor.ringkas = jml;
+      // v2.1.1: halaman kini sekatnya satu data server, termasuk untuk pemilik
+      // platform. Tenant 1 (IVVI Network) tidak punya pelanggan sendiri, jadi
+      // tanpa peringatan ini adminmaster melihat deretan angka 0 dan wajar
+      // menyimpulkan datanya hilang.
+      if (req.tenantSemua && Number(jml.pelanggan_aktif) === 0) {
+        const lain = await db.q(
+          `SELECT d.nama_server,
+                  (SELECT COUNT(*) FROM pelanggan p
+                    WHERE p.id_data_server = d.id AND p.status = 'aktif') AS n
+           FROM data_server d
+           WHERE d.status = 'Aktif' AND d.id <> ?
+           HAVING n > 0 ORDER BY n DESC LIMIT 3`, [req.ds]);
+        if (lain.length) {
+          dasbor.kosong = 'Data server ini belum punya pelanggan aktif, jadi angkanya 0 — bukan hilang. '
+            + lain.map((x) => `${x.n} pelanggan di ${x.nama_server}`).join(', ')
+            + '. Ganti pilihan data server di kanan atas, atau buka menu Data Server untuk rekap semua ISP.';
+        }
+      }
       dasbor.tenant = await db.one(
         'SELECT id, nama_server, nama_pemilik, expaired_date, status FROM data_server WHERE id = ?',
         [tenantAktif(req)]);
@@ -434,24 +457,112 @@ router.put('/pengguna/:id', requirePJ(), requireMenu('pengguna', 'ubah'), async 
 });
 
 // -------------------------------------------------- pengaturan
+
+/**
+ * Halaman Pengaturan adalah "rumah" tiap ISP: nama yang tercetak di dokumen,
+ * alamat kantor, rekening transfer, template WhatsApp, jadwal tagihan, logo.
+ * Penanggung jawab tenant (master ISP / superadmin platform) boleh menata
+ * semuanya sendiri untuk tenant-nya; yang tetap menjadi hak superadmin
+ * platform hanyalah prefix invoice, masa aktif dan status berlangganan
+ * (menu Data Server).
+ */
+
+/** apa + berapa yang masih kosong di tenant ini — dijadikan checklist di panel. */
+async function penyiapanTenant(ds) {
+  const [c] = await db.q(
+    `SELECT
+       (SELECT COUNT(*) FROM pelanggan WHERE id_data_server=?) AS pelanggan,
+       (SELECT COUNT(*) FROM paket WHERE id_data_server=?) AS paket,
+       (SELECT COUNT(*) FROM profil_tagihan WHERE id_data_server=?) AS profil_tagihan,
+       (SELECT COUNT(*) FROM rekening WHERE id_data_server=? AND status='aktif') AS rekening,
+       (SELECT COUNT(*) FROM master_perangkat WHERE id_data_server=?) AS perangkat,
+       (SELECT COUNT(*) FROM group_akses WHERE id_data_server=?) AS grup,
+       (SELECT COUNT(*) FROM app_user WHERE FIND_IN_SET(?, id_data_server)) AS pengguna,
+       (SELECT COUNT(*) FROM pesan_template WHERE id_data_server=? AND jenis='tagihan') AS template_tagihan`,
+    [ds, ds, ds, ds, ds, ds, String(ds), ds]);
+  return c;
+}
+
+/** Kunci pengaturan yang boleh ditulis sendiri oleh tenant, + bentuk nilainya. */
+function bersihApp(isi) {
+  const out = {};
+  const angka = (k, min, max) => {
+    const n = Number(isi[k]);
+    if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${k}: angka ${min}-${max} diperlukan`);
+    out[k] = String(n);
+  };
+  const teks = (k, maks, url = false) => {
+    const s = String(isi[k] ?? '').trim().slice(0, maks);
+    if (url && s && !/^https?:\/\//i.test(s)) throw new Error(`${k}: harus diawali http:// atau https://`);
+    out[k] = s;
+  };
+  if (!isi || typeof isi !== 'object') return out;
+  if (isi.nama_tampilan !== undefined) teks('nama_tampilan', 60);
+  if (isi.base_url !== undefined) teks('base_url', 200, true);
+  if (isi.app_name !== undefined) teks('app_name', 40);
+  if (isi.timezone !== undefined) teks('timezone', 40);
+  if (isi.izin_registrasi !== undefined) out.izin_registrasi = String(isi.izin_registrasi) === '1' || isi.izin_registrasi === true ? '1' : '0';
+  if (isi.batas_offline_menit !== undefined) angka('batas_offline_menit', 1, 1440);
+  if (isi.interval_issue_menit !== undefined) angka('interval_issue_menit', 1, 1440);
+  if (isi.batas_gagal_login !== undefined) angka('batas_gagal_login', 1, 20);
+  return out;
+}
+
+/** Folder gambar milik satu tenant; dipakai logo supaya tidak menumpuk datar. */
+function folderTenant(idTenant) {
+  const f = path.join(config.security.uploadDir, String(cfgData.idTenant(idTenant)));
+  fs.mkdirSync(f, { recursive: true });
+  return f;
+}
+
+const unggahLogo = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => { try { cb(null, folderTenant(tenantAktif(req))); } catch (e) { cb(e); } },
+    filename: (req, file, cb) => {
+      const raw = path.extname(file.originalname || '').toLowerCase();
+      const ext = ['.png', '.jpg', '.jpeg', '.webp'].includes(raw) ? raw : '.png';
+      cb(null, `logo-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`);
+    }
+  }),
+  limits: { fileSize: 300 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    // SVG sengaja ditolak: isinya markup, dan berkas upload disajikan tanpa
+    // login — SVG = scripting terselubung di halaman cetak.
+    const ok = /^image\/(png|jpe?g|webp)$/.test(file.mimetype);
+    cb(ok ? null : new Error('Logo harus PNG/JPG/WEBP, maksimal 300 KB'), ok);
+  }
+});
+
+/** Path DB (/uploads/…) → berkas di disk, dengan penjagaan supaya tidak bisa keluar folder. */
+function berkasDariPath(simpan) {
+  const relatif = String(simpan || '').replace(/^\/uploads\//, '');
+  if (!relatif || relatif.includes('..')) return null;
+  const penuh = path.join(config.security.uploadDir, relatif);
+  return penuh.startsWith(config.security.uploadDir) ? penuh : null;
+}
+
 router.get('/setting', requirePJ(), async (req, res, next) => {
   try {
     const ds = tenantAktif(req);
     const srv = await cfgData.getServer(ds, true);
-    const ts = tenantSql(req, 'id_data_server');
-    const rows = await db.q(`SELECT * FROM setting_app WHERE 1=1${ts.sql}`, ts.params);
+    const rows = await db.q('SELECT * FROM setting_app WHERE id_data_server = ?', [ds]);
     const tpl = await db.q('SELECT * FROM pesan_template WHERE id_data_server = ?', [ds]);
     res.json({
       data_server: {
         id: srv.id, nama_server: srv.nama_server, nama_pemilik: srv.nama_pemilik,
         nomor_whatsapp: srv.nomor_whatsapp, email: srv.email, alamat: srv.alamat,
-        prefix_invoice: srv.prefix_invoice,
+        logo: srv.logo, prefix_invoice: srv.prefix_invoice, status: srv.status,
+        expaired_date: srv.expaired_date,
         jadwal_buat_hari: srv.jadwal_buat_hari, jadwal_kirim_hari: srv.jadwal_kirim_hari,
         jadwal_limit_hari: srv.jadwal_limit_hari, jam_kirim: srv.jam_kirim,
         jam_peringatan: srv.jam_peringatan, jam_isolir: srv.jam_isolir,
         ppn_persen: srv.ppn_persen
       },
-      setting: rows, template: tpl
+      // peta = nilai efektif (termasuk bawaan) supaya form tidak menampilkan kosong
+      app: await cfgApp.peta(ds),
+      setting: rows,
+      template: tpl,
+      penyiapan: await penyiapanTenant(ds)
     });
   } catch (e) { next(e); }
 });
@@ -466,6 +577,7 @@ router.put('/setting', requirePJ(), requireMenu('setting', 'ubah'), async (req, 
     if (b.nama_server !== undefined) set('nama_server', v.str(b.nama_server, { min: 2, max: 100 }));
     if (b.nama_pemilik !== undefined) set('nama_pemilik', v.str(b.nama_pemilik, { max: 100, def: null }));
     if (b.nomor_whatsapp !== undefined) set('nomor_whatsapp', v.phone(b.nomor_whatsapp));
+    if (b.email !== undefined) set('email', v.email(b.email));
     if (b.alamat !== undefined) set('alamat', v.str(b.alamat, { max: 255, def: null }));
     if (b.jadwal_buat_hari !== undefined) set('jadwal_buat_hari', v.num(b.jadwal_buat_hari, { min: 1, max: 28, int: true }));
     if (b.jadwal_kirim_hari !== undefined) set('jadwal_kirim_hari', v.num(b.jadwal_kirim_hari, { min: 1, max: 28, int: true }));
@@ -482,6 +594,10 @@ router.put('/setting', requirePJ(), requireMenu('setting', 'ubah'), async (req, 
       await db.run(`UPDATE data_server SET ${patch.join(',')} WHERE id=?`, vals);
       cfgData.invalidate(ds);
     }
+    // Pengaturan aplikasi milik tenant sendiri (nama tagihan, tautan bayar,
+    // ambang offline, …). Dulu halaman ini hanya menampilkan nilainya.
+    const app = bersihApp(b.app);
+    if (Object.keys(app).length) await cfgApp.simpanBanyak(ds, app);
     if (b.template && Array.isArray(b.template)) {
       for (const t of b.template) {
         if (!t.jenis || !t.konten) continue;
@@ -492,10 +608,54 @@ router.put('/setting', requirePJ(), requireMenu('setting', 'ubah'), async (req, 
       }
     }
     await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
-      [req.user.id, ds, 'ubah_setting', `${patch.length} kolom, ${((b.template || []).length)} template`, (req.ip || '').replace('::ffff:', '')]);
+      [req.user.id, ds, 'ubah_setting',
+        `${patch.length} kolom, ${Object.keys(app).length} kunci app, ${((b.template || []).length)} template`,
+        (req.ip || '').replace('::ffff:', '')]);
+    res.json({ ok: true, app: await cfgApp.peta(ds), penyiapan: await penyiapanTenant(ds) });
+  } catch (e) { next(e); }
+});
+
+/** Unggah logo ISP — dipakai kop invoice cetak dan header panel. */
+function terimaLogo(req, res, next) {
+  // Kegagalan multer (ukuran > 300 KB, tipe ditolak) harus jadi 400 yang
+  // terbaca di panel, bukan 500 dari error handler umum.
+  unggahLogo.single('logo')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: String(err.message || err).slice(0, 160) });
+    next();
+  });
+}
+
+router.post('/setting/logo', requirePJ(), requireMenu('setting', 'ubah'), terimaLogo, async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'Pilih berkas logo (PNG/JPG/WEBP)' });
+      const ds = tenantAktif(req);
+      const lama = await db.one('SELECT logo FROM data_server WHERE id = ?', [ds]);
+      const disimpan = `/uploads/${ds}/${req.file.filename}`;
+      await db.run('UPDATE data_server SET logo = ? WHERE id = ?', [disimpan, ds]);
+      cfgData.invalidate(ds);
+      // berkas lama dibuang supaya folder tenant tidak menumpuk versi
+      const hapus = berkasDariPath(lama && lama.logo);
+      if (hapus && hapus !== berkasDariPath(disimpan)) {
+        try { fs.unlinkSync(hapus); } catch (_) { /* tak masalah bila sudah hilang */ }
+      }
+      await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+        [req.user.id, ds, 'ubah_logo', disimpan, (req.ip || '').replace('::ffff:', '')]);
+      res.json({ ok: true, logo: disimpan });
+    } catch (e) { next(e); }
+  });
+
+router.delete('/setting/logo', requirePJ(), requireMenu('setting', 'ubah'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const d = await db.one('SELECT logo FROM data_server WHERE id = ?', [ds]);
+    await db.run('UPDATE data_server SET logo = NULL WHERE id = ?', [ds]);
+    cfgData.invalidate(ds);
+    const hapus = berkasDariPath(d && d.logo);
+    if (hapus) { try { fs.unlinkSync(hapus); } catch (_) { /* berkas boleh tertinggal */ } }
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
+
 
 // ------------------------------------------------------ log WA
 router.get('/wa/log', requirePJ(), async (req, res, next) => {
@@ -561,7 +721,12 @@ router.delete('/rekening/:id', requirePJ(), requireMenu('setting', 'rekening'), 
 // ------------------------------------------------------ audit log
 router.get('/audit', requirePJ(), async (req, res, next) => {
   try {
-    const ts = tenantSql(req, 'id_data_server');
+    // Alias `a.` wajib: query ini LEFT JOIN app_user yang juga punya kolom
+    // id_data_server. Untuk pemilik platform klausa tenant memang dibuang
+    // (kosong), tapi begitu yang membuka akun terikat satu data server —
+    // master ISP atau staf — klausa "AND id_data_server IN (…)" ditempel dan
+    // MariaDB menolaknya: "Column id_data_server is ambiguous" → 500.
+    const ts = tenantSql(req, 'a.id_data_server');
     const rows = await db.q(
       `SELECT a.*, u.username FROM audit_log a LEFT JOIN app_user u ON u.id=a.user_id
        WHERE 1=1${ts.sql} ORDER BY a.id DESC LIMIT 100`, ts.params);

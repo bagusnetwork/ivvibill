@@ -5,6 +5,7 @@
 // ============================================================
 const db = require('../db');
 const cfgData = require('./configData');
+const cfgApp = require('./configApp');
 const wa = require('./wa');
 const mon = require('./monitoring');
 const kwitansi = require('./kwitansi');
@@ -108,7 +109,8 @@ const GABUNG_PROFIL = `LEFT JOIN profil_tagihan pt ON pt.id = p.id_profil_tagiha
  * Jatuh tempo mengikuti tanggal_isolir profil; kalau tidak ada profil,
  * tetap memakai pelanggan.hari_tagihan seperti sebelumnya.
  */
-async function buatTagihanBulanan(idDataServer = 1, force = false) {
+async function buatTagihanBulanan(idDataServer, force = false) {
+  idDataServer = cfgData.idTenant(idDataServer);
   const srv = await cfgData.getServer(idDataServer, true);
   const w = waktuSiklus();
   const periode = w.periode;
@@ -288,11 +290,15 @@ async function buatTagihanSatuan({
 /** Susun + antrekan pesan WA satu tagihan. Dipakai siklus kirim dan tombol manual. */
 async function antrekanWaTagihan(t, srv, idDataServer, jenis = 'tagihan') {
   const tpl = await wa.ambilTemplate(jenis, idDataServer);
+  // Tautan bayar diambil dari pengaturan milik tenant ini (kunci base_url),
+  // bukan dari kolom data_server — kolom itu memang tidak pernah ada, jadi
+  // placeholder #lnk di template selama ini selalu terisi kosong.
+  const basis = String(await cfgApp.nilai(idDataServer, 'base_url', '') || '').replace(/\/+$/, '');
   const pesan = wa.render(tpl, {
     usr: t.nama, inv: t.nomor_invoice, prd: t.periode,
     tot: Number(t.total).toLocaleString('id-ID'),
     lmt: tglIndo(t.jatuh_tempo),
-    lnk: srv && srv.base_url ? `${srv.base_url}/pelanggan` : ''
+    lnk: basis ? `${basis}/pelanggan` : ''
   });
   await wa.enqueue({
     tujuan: t.nomor_whatsapp, jenis, pesan, idRef: t.id, idDataServer
@@ -315,7 +321,8 @@ async function tagihanWa(idTagihan) {
  * (dipakai tombol manual / force), sedangkan angka membatasi hanya profil yang
  * jatuh pada hari itu.
  */
-async function kirimTagihanWajib(idDataServer = 1, limit = 25, hariKirim = null) {
+async function kirimTagihanWajib(idDataServer, limit = 25, hariKirim = null) {
+  idDataServer = cfgData.idTenant(idDataServer);
   const srv = await cfgData.getServer(idDataServer, true);
   const w = waktuSiklus();
   const hari = Number.isInteger(hariKirim) ? hariKirim : null;
@@ -364,7 +371,8 @@ async function kirimTagihanSatuan(idTagihan, idDataServer = null) {
  *  Profil bertanda `kirim_peringatan = 0` dilewati — dipakai untuk golongan
  *  pelanggan yang hanya boleh dihubungi pada hari H.
  */
-async function peringatanTagihan(idDataServer = 1, limit = 25) {
+async function peringatanTagihan(idDataServer, limit = 25) {
+  idDataServer = cfgData.idTenant(idDataServer);
   const tags = await db.q(
     `SELECT t.*, p.nama, p.nomor_whatsapp FROM tagihan t
      JOIN pelanggan p ON p.id = t.id_pelanggan
@@ -507,7 +515,8 @@ async function lunaskanTagihan(idTagihan, metode, { verifiedBy = null, ref = nul
  * walaupun langkah peringatan/H-3 tidak pernah dijalankan (misalnya gateway WA
  * mati, atau cron sempat mati di jam 08:00).
  */
-async function isolirJatuhTempo(idDataServer = 1) {
+async function isolirJatuhTempo(idDataServer) {
+  idDataServer = cfgData.idTenant(idDataServer);
   await db.run(
     `UPDATE tagihan SET status = 'jatuh_tempo'
      WHERE id_data_server = ? AND status IN ('buat','terkirim') AND jatuh_tempo < CURDATE()`,

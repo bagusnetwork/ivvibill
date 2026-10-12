@@ -10,6 +10,7 @@ const crypto = require('../util/crypto');
 const cryptoLib = require('crypto');
 const config = require('../config');
 const wa = require('./wa');
+const cfgApp = require('./configApp');
 
 async function perangkatMikrotik(idSetting) {
   const s = await db.one('SELECT * FROM setting_mikrotik WHERE id = ?', [idSetting]);
@@ -124,7 +125,10 @@ async function pollRouter(idSetting) {
  * Cek status koneksi PPPoE semua pelanggan aktif → tandai offline,
  * buat issue + pesan WA sesuai batas_offline_menit.
  */
-async function cekPppoePelanggan(idDataServer = 1) {
+async function cekPppoePelanggan(idDataServer) {
+  // Tanpa default tenant 1: tugas yang lupa meneruskan id harus gagal keras,
+  // bukan diam-diam memeriksa pelanggan ISP lain.
+  idDataServer = cfgApp.idWajib(idDataServer);
   const aktif = await db.q(
     `SELECT p.id, p.nama, p.username_pppoe, p.nomor_whatsapp, p.id_data_server
      FROM pelanggan p
@@ -164,6 +168,11 @@ async function cekPppoePelanggan(idDataServer = 1) {
   }
 
   let off = 0;
+  // Ambang offline dibaca SEKALI dan milik tenant ini. Dulu query-nya
+  // `WHERE kunci='batas_offline_menit'` tanpa id_data_server (tabel ber-PK
+  // (id_data_server, kunci)) dan dijalankan di dalam lingkaran pelanggan,
+  // jadi nilainya bisa milik ISP mana pun.
+  const batas = await cfgApp.angka(idDataServer, 'batas_offline_menit', 15);
   for (const p of aktif) {
     const isOn = online.has(String(p.username_pppoe).toLowerCase());
     const now = new Date();
@@ -192,9 +201,6 @@ async function cekPppoePelanggan(idDataServer = 1) {
       since = now;
     }
     const menit = Math.round((now - new Date(since)) / 60000);
-    const batas = Number((await db.one(
-      `SELECT nilai FROM setting_app WHERE kunci = 'batas_offline_menit'`
-    ))?.nilai || 15);
     if (menit >= batas) {
       const ada = await db.one(
         `SELECT id FROM issue_pelanggan WHERE id_pelanggan = ? AND tipe = 'offline' AND status = 'open'`,

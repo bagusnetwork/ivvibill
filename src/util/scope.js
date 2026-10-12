@@ -22,35 +22,81 @@ function daftarTenant(nilai) {
 }
 
 /**
+ * Daftar tenant yang menjadi sekat BACA pada request ini — selalu data server
+ * yang sedang dipilih (req.ds), untuk pemilik platform maupun staf.
+ *
+ *   [n]   = satu data server aktif;
+ *   [...] = seluruh tenant milik akun bila tenant aktif tidak ada di daftarnya
+ *           (hanya pertahanan — tidak pernah mengembalikan data orang lain);
+ *   []    = tidak punya tenant sama sekali → tenantSql memberi 'AND 1 = 0'.
+ *
+ * Perubahan v2.1.1: dulu pemilik platform (tenantSemua) sengaja tanpa filter,
+ * sehingga dasbor berlabel "IVVI Network" menampilkan 171 pelanggan dan
+ * Rp 26.215.000 milik IVVINET-CBD — angka gabungan semua ISP dengan label satu
+ * ISP. Rekap lintas ISP sekarang ada di menu Data Server (GET /api/data-server),
+ * yang memang menghitung per tenant, bukan di halaman berlabel satu tenant.
+ *
+ * Kepitisan v2.1.1: pemilik platform boleh meminta cakupan lain SECARA EKSPLISIT
+ * lewat query string — `?ds=all` (semua tenant, bernilai null) atau `?ds=N`.
+ * Dipakai dropdown referensi di form (grup akses, paket) ketika adminmaster
+ * menyetel akun/pelanggan milik tenant yang bukan tenant aktifnya. Tanpa `?ds=`
+ * hasilnya tetap satu tenant aktif, jadi tidak ada halaman yang diam-diam
+ * menampilkan gabungan.
+ */
+function sekatBaca(req) {
+  if (!req.user) throw new Error('sekatBaca: req.user belum ada (butuh requireAuth)');
+  const minta = (req.query || {}).ds;
+  if (req.tenantSemua && minta) {
+    if (String(minta).toLowerCase() === 'all') return null;
+    const n = Number(minta);
+    if (Number.isInteger(n) && n >= 1) return [n];
+  }
+  const ids = (req.user.ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const aktif = Number(req.ds);
+  const sah = Number.isInteger(aktif) && aktif >= 1;
+  if (sah && (!ids.length || ids.includes(aktif))) return [aktif];
+  return ids;
+}
+
+/**
  * Klausa AND untuk kolom tenant.
- * return { sql, params } — sql kosong bila user pemilik platform (semua tenant),
- * sql ' AND 1 = 0' bila tenant-nya tidak ada (jangan pernah bocor data).
+ * return { sql, params } — sql kosong hanya di `?ds=all` milik pemilik
+ * platform; ' AND 1 = 0' bila tenant-nya tidak ada (jangan pernah bocor data).
  */
 function tenantSql(req, kolom = 'id_data_server') {
-  if (!req.user) throw new Error('tenantSql: req.user belum ada (butuh requireAuth)');
-  if (req.tenantSemua) return { sql: '', params: [] };
-  const ids = (req.user.ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0);
-  if (!ids.length) return { sql: ' AND 1 = 0', params: [] };
-  return { sql: ` AND ${kolom} IN (${ids.map(() => '?').join(',')})`, params: ids };
+  const list = sekatBaca(req);
+  if (list === null) return { sql: '', params: [] };
+  if (!list.length) return { sql: ' AND 1 = 0', params: [] };
+  return { sql: ` AND ${kolom} IN (${list.map(() => '?').join(',')})`, params: list };
 }
 
 /** Tenant aktif untuk INSERT/UPDATE — satu angka, bukan daftar. */
 function tenantAktif(req) {
   const ds = Number(req.ds);
-  if (!Number.isInteger(ds) || ds < 1) throw new Error('tenantAktif: tenant aktif tidak valid');
+  if (!Number.isInteger(ds) || ds < 1) {
+    const e = new Error('Tenant aktif tidak valid — pilih satu data server terlebih dahulu');
+    e.status = 400;
+    throw e;
+  }
   return ds;
 }
 
 /**
  * app_user.id_data_server menyimpan CSV ('1,5'), jadi keanggotaan tenant
  * diperiksa dengan FIND_IN_SET, bukan IN.
+ *
+ * Akun platform (id_data_server kosong) ikut terlihat oleh pemilik platform
+ * saja — kalau tidak, setelah sekat diperketat adminmaster tidak bisa lagi
+ * melihat / mengelola sesamanya sendiri di menu Pengguna.
  */
 function tenantUserSql(req, kolom = 'id_data_server') {
-  if (!req.user) throw new Error('tenantUserSql: req.user belum ada');
-  if (req.tenantSemua) return { sql: '', params: [] };
-  const ids = (req.user.ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0);
-  if (!ids.length) return { sql: ' AND 1 = 0', params: [] };
-  return { sql: ` AND (${ids.map(() => `FIND_IN_SET(?, ${kolom})`).join(' OR ')})`, params: ids };
+  const list = sekatBaca(req);
+  if (list === null) return { sql: '', params: [] };
+  if (!list.length && !req.tenantSemua) return { sql: ' AND 1 = 0', params: [] };
+  const frg = list.map(() => `FIND_IN_SET(?, ${kolom})`).join(' OR ');
+  const milikPlatform = req.tenantSemua ? ` OR ${kolom} IS NULL OR ${kolom} = ''` : '';
+  if (!frg) return { sql: ` AND (${kolom} IS NULL OR ${kolom} = '')`, params: [] };
+  return { sql: ` AND (${frg}${milikPlatform})`, params: list };
 }
 
 /**
@@ -59,10 +105,10 @@ function tenantUserSql(req, kolom = 'id_data_server') {
  * lebih rawan salah daripada menyisipkan integer hasil sanitize.
  */
 function tenantFrag(req, kolom = 'id_data_server') {
-  if (req.tenantSemua) return '';
-  const ids = (req.user.ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0);
-  if (!ids.length) return ' AND 1 = 0';
-  return ` AND ${kolom} IN (${ids.join(',')})`;
+  const list = sekatBaca(req);
+  if (list === null) return '';
+  if (!list.length) return ' AND 1 = 0';
+  return ` AND ${kolom} IN (${list.join(',')})`;
 }
 
 /** Parse JSON grant menu; bentuk {"menu":"all"} berarti semua menu. */
@@ -96,6 +142,6 @@ function requireMenu(menu, aksi = null) {
 }
 
 module.exports = {
-  daftarTenant, tenantSql, tenantAktif, tenantUserSql, tenantFrag,
+  daftarTenant, sekatBaca, tenantSql, tenantAktif, tenantUserSql, tenantFrag,
   aksesObjek, bolehMenu, requireMenu
 };
