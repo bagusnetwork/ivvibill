@@ -274,11 +274,13 @@
           <tbody id="tbProfilTagihan"><tr><td colspan="10" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
         <p class="hint"><b>Profile Tagihan menggantikan "Hari Tagihan"</b> per pelanggan. Satu
-           profil dipakai banyak warga: tanggal buat, tanggal kirim WA, tanggal isolir (= jatuh
-           tempo), mode PPN, dan boleh/tidaknya pengingat H-3. Gaji tanggal 25 dan tanggal 10 bisa
-           jalan di satu ISP tanpa saling menggeser.</p>
-        <p class="hint">Pelanggan yang <b>tidak</b> ditautkan ke profil mana pun mengikuti jadwal di
-           menu Pengaturan (jadwal lama) — jadi menambah profil tidak mengubah yang sudah ada.
+           profil dipakai banyak pelanggan: tanggal buat, tanggal kirim WA, tanggal isolir (= jatuh
+           tempo), mode PPN, dan boleh/tidaknya pengingat H-3. Pelanggan yang menagih tanggal 25 dan
+           tanggal 10 bisa jalan di satu ISP tanpa saling menggeser.</p>
+        <p class="hint">Halaman Pengaturan hanya menyimpan <b>jam</b> (kirim/pengingat/isolir) dan PPN
+           yang berlaku untuk seluruh ISP ini — <b>tanggalnya ada di sini</b>. Pelanggan yang <b>tidak</b>
+           ditautkan ke profil mana pun jatuh ke jadwal cadangan data server, yang diatur pemilik
+           platform di menu Data Server — jadi menambah profil tidak mengubah yang sudah ada.
            Kompensasi tersimpan dan tampil di daftar, tapi belum memotong total tagihan.</p>
       </div>
 
@@ -633,7 +635,7 @@
       <!-- ================= SETTING ================= -->
       <div data-view="setting" data-onload="loadSetting" style="display:none">
         <div class="grid2">
-          <div class="panel"><div class="panel-head"><h2>Identitas & jadwal tagihan</h2></div>
+          <div class="panel"><div class="panel-head"><h2>Identitas &amp; jam siklus tagihan</h2></div>
             <div class="panel-body">
               <div class="form-row"><label>Nama server</label><input id="sNama"></div>
               <div class="form-row"><label>Nama billing (label tagihan)</label>
@@ -655,10 +657,14 @@
                 </div>
                 <p class="hint">PNG/JPG/WEBP maksimal 300 KB. Tersimpan di folder milik data server ini
                   dan dipakai kop invoice; logo SVG ditolak karena halaman cetak membacanya tanpa login.</p></div>
+              <div class="form-row"><label>Tanggal penagihan</label>
+                <p class="hint">Tidak diatur di halaman ini. Tanggal <b>buat tagihan</b>, <b>kirim WA</b>,
+                  dan <b>jatuh tempo &amp; isolir</b> adalah milik <b>Profile Tagihan</b> — satu profil dipakai
+                  banyak pelanggan.<br>
+                  <button class="btn sm secondary" type="button" style="margin-top:6px" id="sProfilBtn"
+                    onclick="go('profil-tagihan')">🗓️ Buka Profile Tagihan</button>
+                  <span id="sProfilRingkas" class="hint">memuat…</span></p></div>
               <div class="form-grid">
-                <div class="form-row"><label>Tgl buat tagihan</label><input id="sBuat" type="number" min="1" max="28"></div>
-                <div class="form-row"><label>Tgl kirim WA</label><input id="sKirim" type="number" min="1" max="28"></div>
-                <div class="form-row"><label>Tgl jatuh tempo</label><input id="sLimit" type="number" min="1" max="28"></div>
                 <div class="form-row"><label>Jam kirim</label><input id="sJam" placeholder="07:00"></div>
                 <div class="form-row"><label>Jam pengingat H-3</label><input id="sJamPeri" placeholder="08:00"></div>
                 <div class="form-row"><label>Jam isolir otomatis</label><input id="sJamIso" placeholder="09:00"></div>
@@ -669,8 +675,10 @@
                   <p class="hint">Isi bila ISP ini punya alamat portal sendiri; placeholder <b>#lnk</b> di
                     template WA akan terisi <i>alamat/pelanggan</i>. Biarkan kosong untuk seperti sekarang.</p></div>
               </div>
-              <p class="hint">Jam di atas adalah jam dinding ISP (zona server, WIB) dan siklusnya
-                dicoba tiap menit sejak jam itu — jadi jadwal yang tertunda karena server restart tetap
+              <p class="hint">Jam di atas adalah jam dinding ISP (zona server, WIB) dan berlaku untuk
+                seluruh pelanggan di data server ini — yang per-golongan hanya <b>tanggalnya</b>, dan itu
+                ada di menu Profile Tagihan. Siklusnya dicoba tiap menit sejak jam itu — jadi jadwal yang
+                tertunda karena server restart tetap
                 jalan di menit berikutnya. Isolir otomatis hanya menyentuh pelanggan aktif bertagihan
                 lewat tempo: profile isolir miliknya dipasang (atau secret dimatikan bila kosong) +
                 sesi aktif dibuang + WhatsApp isolir dikirim.</p>
@@ -1083,9 +1091,12 @@
       <div class="form-row"><label>Kedaluwarsa langganan</label><input id="tExp" type="date"></div>
       <div class="form-row"><label>Nomor WhatsApp</label><input id="tWa" placeholder="628xx"></div>
       <div class="form-row"><label>Email</label><input id="tEmail"></div>
-      <div class="form-row"><label>Tgl buat tagihan</label><input id="tBuat" type="number" min="1" max="28"></div>
-      <div class="form-row"><label>Tgl kirim WA</label><input id="tKirim" type="number" min="1" max="28"></div>
-      <div class="form-row"><label>Tgl jatuh tempo</label><input id="tLimit" type="number" min="1" max="28"></div>
+      <div class="form-row"><label>Tgl buat (default)</label><input id="tBuat" type="number" min="1" max="28"></div>
+      <div class="form-row"><label>Tgl kirim (default)</label><input id="tKirim" type="number" min="1" max="28"></div>
+      <div class="form-row"><label>Tempo/limit (default)</label><input id="tLimit" type="number" min="1" max="28"></div>
+      <p class="hint">Tiga angka di atas hanya <b>cadangan</b> untuk pelanggan ISP ini yang belum
+        ditautkan ke profil tagihan mana pun. Tanggal yang sebenarnya dipakai diatur di
+        <b>Profile Tagihan</b> milik ISP tersebut.</p>
       <div class="form-row"><label>Jam kirim</label><input id="tJam" placeholder="07:00"></div>
       <div class="form-row"><label>PPN %</label><input id="tPpn" type="number" min="0" max="100" step="0.5"></div>
       <div class="form-row"><label>Status</label><select id="tStatus">
@@ -1198,6 +1209,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261012c"></script>
+<script src="panel.js?v=20261012d"></script>
 </body>
 </html>

@@ -4,6 +4,64 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-12 — v2.2.2 — Tanggal penagihan hanya di Profile Tagihan, Pengaturan tidak lagi ikut mengatur
+
+**Gejala user**
+
+"kemudian setelah saya analisa di pengaturan itu ada profile tagihan seharusnya tidak ada,
+dikarenakan sudah ada di Menu Profile tagihan — focuskan saja di menu profile tagihan"
+
+**Apa yang sebenarnya terjadi**
+
+Sejak v2.0.0 tanggal siklus (buat / kirim WA / jatuh tempo = isolir) hidup di
+`profil_tagihan` dan angka di `data_server` hanya jadi **cadangan** untuk pelanggan yang
+belum ditautkan. Tapi antarmukanya belum ikut pindah:
+
+1. Form **Pengaturan** masih menampilkan `Tgl buat tagihan`, `Tgl kirim WA`, dan
+   `Tgl jatuh tempo` sebagai kolom yang bisa diedit — dua tempat untuk satu keputusan,
+   dan yang satu terlihat lebih "resmi".
+2. Hint di halaman **Tagihan** memimpin dengan angka tenant (`tagihan dibuat tgl N`),
+   padahal siklus yang berjalan membaca tanggal per profil — jadi teksnya bisa benar
+   untuk sebagian pelanggan dan salah untuk sisanya.
+3. Hint di menu Profile Tagihan masih menyuruh pembaca ke "jadwal di menu Pengaturan".
+
+**Diubah (murni antarmuka — tidak ada skema, tidak ada rute baru)**
+
+* `public/panel/index.html`
+  * Ketiga kolom tanggal **dihapus** dari form Pengaturan; panel head diganti
+    `Identitas & jam siklus tagihan`; posisinya menjadi baris **Tanggal penagihan** yang
+    berisi tombol `🗓️ Buka Profile Tagihan` + ringkasan profil yang berlaku.
+  * Hint bawah diperjelas: **jam** (kirim / pengingat / isolir) dan **PPN** tetap milik
+    seluruh data server, **tanggalnya** yang per profil.
+  * Dialog **Data Server**: label menjadi `Tgl buat (default)`, `Tgl kirim (default)`,
+    `Tempo/limit (default)` + satu hint bahwa tiga angka itu hanya cadangan bagi pelanggan
+    yang belum ditautkan ke profil.
+  * Hint menu Profile Tagihan tidak lagi menunjuk ke Pengaturan.
+  * `panel.js?v=` dinaikkan (`20261012d`) karena berkas ini ikut di-cache.
+* `public/panel/panel.js`
+  * `loadSetting()` tidak membaca dan `simpanSetting()` tidak lagi **mengirim**
+    `jadwal_buat_hari` / `jadwal_kirim_hari` / `jadwal_limit_hari`. Rute `PUT /api/setting`
+    hanya menyentuh kolom yang ada di body, jadi nilai cadangan itu **tidak mungkin
+    tertimpa** oleh save Pengaturan; endpoint tetap menerima field tersebut demi
+    kompatibilitas (dialog Data Server memakainya lewat rute `tenant`).
+  * `muatRingkasProfil()` baru: merangkum profil **aktif** tenant ini (tanggal + jumlah
+    pelanggan) di Pengaturan, dan menyembunyikan tombolnya bila user tidak punya grant
+    `profil_tagihan`.
+  * `muatJadwalTagihan()` ditulis ulang: memimpin dengan angka **per profil** + jam tenant,
+    dan hanya jatuh ke angka cadangan bila tidak ada profil terpakai.
+
+**Verifikasi lewat UI asli (tenant ISP, akun pemilik platform)**
+
+* Halaman Pengaturan tidak lagi memuat ketiga kolom; yang tampil adalah ringkasan profil
+  nyata milik ISP tersebut (tiga profil, jumlah pelanggannya jumlahnya sama dengan total
+  pelanggan aktif) dan tombolnya benar membuka menu Profile Tagihan.
+* `Simpan` di Pengaturan diuji dengan mengubah jam kirim → nilai baru masuk, **tiga angka
+  cadangan tetap 1/2/10**, lalu jam dikembalikan ke nilai semula lewat form yang sama.
+* Halaman Tagihan menampilkan jadwal per profil (tanggal + jumlah aktif tiap profil), bukan
+  satu angka tenant; halaman Profile Tagihan tetap seperti semula; konsol bersih.
+
+---
+
 ## 2026-10-12 — v2.2.1 — Impor pelanggan tidak lagi mati karena bahasa kolom Status
 
 **Gejala user**

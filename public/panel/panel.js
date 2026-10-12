@@ -554,22 +554,24 @@ async function muatJadwalTagihan() {
   if (!el) return;
   try {
     const j = await API.get('/api/tagihan/jadwal');
-    el.innerHTML = `Siklus otomatis <b>${esc(j.zona)}</b> (sekarang ${esc(j.sekarang)}): `
-      + `tagihan dibuat <b>tgl ${esc(j.buat.hari)}</b> (${esc(tgl(j.buat.berikutnya))}) · `
-      + `dikirim WA <b>tgl ${esc(j.kirim.hari)} jam ${esc(j.kirim.jam)}</b> (${esc(tgl(j.kirim.berikutnya))}) · `
-      + `isolir otomatis tiap hari mulai <b>${esc(j.isolir.mulai_jam)}</b> untuk yang lewat tempo.`
-      + ` Belum terkirim: <b>${esc(j.belum_terkirim)}</b> · lewat tempo belum lunas: <b>${esc(j.lewat_tempo)}</b>`
+    // v2.2.2: tanggal siklus dibaca PER PROFIL, bukan dari angka tenant. Angka tenant
+    // (= j.buat.hari / j.kirim.hari) hanya cadangan untuk pelanggan tanpa profil.
+    const p = ((j.profil && j.profil.data) || []).filter(x => Number(x.jumlah_aktif));
+    const jam = (j.kirim && j.kirim.jam) || '07:00';
+    const inti = p.length
+      ? p.map(x => `<b>${esc(x.nama)}</b> (${esc(x.jumlah_aktif)} aktif): dibuat tgl ${esc(x.tanggal_buat)}, `
+        + `kirim WA tgl ${esc(x.tanggal_kirim)}, tempo &amp; isolir tgl ${esc(x.tanggal_isolir)}`).join(' · ')
+      : `<b>belum ada profile tagihan terpakai</b> — sementara ikut jadwal cadangan server: `
+        + `dibuat tgl ${esc(j.buat.hari)}, dikirim tgl ${esc(j.kirim.hari)}`;
+    el.innerHTML = `Siklus otomatis <b>${esc(j.zona)}</b> (sekarang ${esc(j.sekarang)}) — kirim WA jam `
+      + `<b>${esc(jam)}</b>, pengingat H-3 jam <b>${esc((j.isolir && j.isolir.peringatan_jam) || '08:00')}</b>, `
+      + `isolir tiap hari mulai <b>${esc((j.isolir && j.isolir.mulai_jam) || '09:00')}</b>:<br>`
+      + inti
+      + (j.profil && j.profil.tanpa_profil
+        ? ` · <b>${esc(j.profil.tanpa_profil)}</b> pelanggan belum ditautkan ke profil` : '')
+      + `. Belum terkirim: <b>${esc(j.belum_terkirim)}</b> · lewat tempo belum lunas: <b>${esc(j.lewat_tempo)}</b>`
       + ` (yang masih aktif dan akan diisolir: <b>${esc(j.akan_isolir)}</b>).`
-      + ' Pengingat H-3 dikirim satu kali per hari, dan WA pelanggan tanpa nomor tidak memblokir siklus.'
-      // v2.0: hari siklus bukan lagi satu angka per tenant — tampilkan per profil
-      + (((j.profil && j.profil.data) || []).length
-        ? `<br>Per profile tagihan: ` + j.profil.data
-            .filter(x => Number(x.jumlah_aktif))
-            .map(x => `<b>${esc(x.nama)}</b> (${esc(x.jumlah_aktif)} aktif): buat tgl ${esc(x.tanggal_buat)}, `
-              + `kirim tgl ${esc(x.tanggal_kirim)}, tempo/isolir tgl ${esc(x.tanggal_isolir)}`).join(' · ')
-            + (j.profil.tanpa_profil
-              ? ` · ${esc(j.profil.tanpa_profil)} pelanggan tanpa profil ikut jadwal di atas` : '')
-        : '');
+      + ' Tanggal-tanggal di atas diatur di menu Profile Tagihan, bukan di Pengaturan.';
   } catch (e) { el.textContent = ''; }
 }
 
@@ -1819,9 +1821,9 @@ async function loadSetting() {
     document.getElementById('sEmail').value = s.email || '';
     document.getElementById('sWa').value = s.nomor_whatsapp || '';
     document.getElementById('sAlamat').value = s.alamat || '';
-    document.getElementById('sBuat').value = s.jadwal_buat_hari || 1;
-    document.getElementById('sKirim').value = s.jadwal_kirim_hari || 2;
-    document.getElementById('sLimit').value = s.jadwal_limit_hari || 10;
+    // v2.2.2: tanggal buat/kirim/jatuh tempo TIDAK lagi diatur di Pengaturan — itu milik
+    // menu Profile Tagihan (satu profil dipakai banyak pelanggan). Yang tersimpan di sini
+    // hanya jam & PPN yang memang berlaku untuk seluruh data server.
     document.getElementById('sJam').value = s.jam_kirim || '07:00';
     document.getElementById('sJamPeri').value = s.jam_peringatan || '08:00';
     document.getElementById('sJamIso').value = s.jam_isolir || '09:00';
@@ -1830,6 +1832,7 @@ async function loadSetting() {
     document.getElementById('sBaseUrl').value = a.base_url || '';
     isiLogo(s.logo);
     renderPenyiapan(d.penyiapan);
+    muatRingkasProfil();
 
     const g = await API.get('/api/gateway');
     const gw = g.data || {};
@@ -1849,6 +1852,39 @@ async function loadSetting() {
       '<button class="btn mt" onclick="simpanTemplate()">Simpan template</button>';
   } catch (e) { toast(e.message, true); }
 }
+/**
+ * Halaman Pengaturan tidak lagi memuat tanggal penagihan (v2.2.2) — jadi di sini
+ * cuma ditunjukkan profil mana yang sebenarnya berlaku, supaya pemilik ISP tidak
+ * mencari-cari kolom "tgl buat/kirim/jatuh tempo" yang sudah dipindah.
+ */
+async function muatRingkasProfil() {
+  const el = document.getElementById('sProfilRingkas');
+  if (!el) return;
+  const btn = document.getElementById('sProfilBtn');
+  if (btn) btn.style.display = bolehMenu('profil_tagihan') ? '' : 'none';
+  if (!bolehMenu('profil_tagihan')) {
+    el.innerHTML = 'diatur oleh pemilik ISP ini di menu Profile Tagihan.';
+    return;
+  }
+  el.textContent = 'memuat…';
+  try {
+    const d = await API.get('/api/profil-tagihan');
+    const rows = d.data || [];
+    const aktif = rows.filter(r => r.status === 'aktif');
+    if (!aktif.length) {
+      el.innerHTML = '<b>belum ada profil aktif</b> — saat ini semua pelanggan ikut jadwal '
+        + 'cadangan data server (diatur pemilik platform lewat menu Data Server).';
+      return;
+    }
+    el.innerHTML = '<br>' + aktif.map(r =>
+      `<b>${esc(r.nama)}</b> — buat tgl ${esc(r.tanggal_buat)}, kirim tgl ${esc(r.tanggal_kirim)}, `
+      + `tempo &amp; isolir tgl ${esc(r.tanggal_isolir)} `
+      + `<span class="badge mute">${esc(r.jumlah_pelanggan)} pelanggan</span>`).join('<br>')
+      + (rows.length > aktif.length
+        ? `<br><span class="hint">${rows.length - aktif.length} profil nonaktif (pelanggannya kembali ke jadwal cadangan).</span>`
+        : '');
+  } catch (e) { el.textContent = ''; }
+}
 async function simpanSetting() {
   try {
     await API.put('/api/setting', {
@@ -1856,9 +1892,9 @@ async function simpanSetting() {
       email: document.getElementById('sEmail').value,
       nomor_whatsapp: document.getElementById('sWa').value,
       alamat: document.getElementById('sAlamat').value,
-      jadwal_buat_hari: document.getElementById('sBuat').value,
-      jadwal_kirim_hari: document.getElementById('sKirim').value,
-      jadwal_limit_hari: document.getElementById('sLimit').value,
+      // jadwal_buat_hari / jadwal_kirim_hari / jadwal_limit_hari sengaja TIDAK dikirim:
+      // field-nya sudah hilang dari form, dan rute PUT hanya menyentuh kolom yang ada di
+      // body — jadi nilai cadangan di data_server tetap utuh untuk pelanggan tanpa profil.
       jam_kirim: document.getElementById('sJam').value,
       // jam pengingat & isolir ikut dikirim — tanpa ini nilainya tidak pernah
       // tersimpan walau field-nya terlihat bisa diisi di form
