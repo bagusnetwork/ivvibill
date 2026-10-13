@@ -4,6 +4,95 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-13 — v2.4.0 — Payment gateway: TriPay (QRIS) — pelanggan scan QR, tagihan lunas otomatis
+
+**Gejala user**
+
+"saya ada akun treepay yang sudah siap produksi bisakah di pakai" — ivvibill sudah bisa
+Midtrans, tetapi Midtrans menuntut akun/kanal yang sudah aktif; ISP yang pegangannya TriPay
+tidak punya jalur bayar otomatis sama sekali.
+
+**Diubah**
+
+* Kolom baru di `data_server`: `pg_tripay_public` (API key), `pg_tripay_secret` (private key,
+  disimpan **terenkripsi** seperti kunci gateway lain), `pg_tripay_merchant` (merchant code),
+  `pg_tripay_env` (`production`/`sandbox`, default `production`). Nilai `treepay` ditambahkan
+  ke `pg_active` dan ke ENUM `pembayaran.metode`. Migrasi: `scripts/migrate-v22.js` (idempoten,
+  cek `information_schema` dulu; melebar ENUM aman karena hanya menambah nilai).
+* `src/routes/tagihan.js`
+  * `POST /api/gateway/tripay/charge` (superadmin/master/pelanggan): membuat transaksi QRIS
+    `method=QRIS` ke `api…/transaction/create`. `merchant_ref` = `PREFIX-<id tagihan>-<waktu>`,
+    persis konvensi order id Midtrans, supaya webhook menemukan tagihannya. Tanda tangan
+    `HMAC-SHA256(merchant_code + merchant_ref + amount, private_key)`. Yang dikirim ke gateway
+    hanya `customer_name` = **id pelanggan** — nama/HP tidak berangkat.
+    Bila TriPay menolak (HTTP ≥ 400 atau respons tanpa `checkout_url`/`reference`) rute membalas
+    `502` dengan pesan gateway **sebelum** menyentuh database: status/tagihan tidak berubah,
+    tidak ada baris pembayaran, tidak ada audit.
+  * `POST /api/gateway/tripay/tes` (khusus penanggung jawab tenant): membuat satu transaksi
+    QRIS Rp 10.000 bertanda `UJI` untuk membuktikan kunci diterima, tanpa menagih siapa pun.
+  * GET/PUT `/api/gateway` + `/api/gateway/metode` mengenal TriPay (secret selalu dibalut
+    `'****'` ke browser; environment diekspose terbaca sebagai `tripay_env`/`tripay_mode`).
+  * Jumlah yang dicocokkan memakai `total_amount` balasan TriPay, bukan `amount_received` —
+    yang kedua sudah dipotong biaya merchant sehingga tidak akan pernah sama dengan invoice.
+* `src/routes/webhook.js` — `POST /api/webhook/tripay`: memverifikasi
+  `X-Callback-Signature = HMAC-SHA256(byte JSON apa adanya, private key)` dengan
+  `timingSafeEqual`, memakai private key milik tenant **punya tagihan**. `PAID` → cek jumlah →
+  `billing.lunaskanTagihan(id, 'treepay', …)` (tagihan lunas + baris `pembayaran` + baris `kas`,
+  tanpa dobel kalau notifikasi datang dua kali); `EXPIRED`/`FAILED` → `lepasGerbang()` sehingga
+  hanya `menunggu` milik order itu yang dilepas (telat → `jatuh_tempo`); `REFUND` dicatat di
+  `audit_log` tanpa mengubah status. Signature salah → `403` + audit `ditolak`, tagihan utuh.
+* `server.js` — **jebakan parser body**: `express.json()` global berjalan lebih dulu, dan begitu
+  ia menandai `req._body`, `express.raw` di level rute tidak pernah jalan — `req.body` jadi
+  objek dan HMAC atas `"[object Object]"` tidak akan pernah cocok. Karena itu
+  `app.use('/api/webhook/tripay', express.raw({ type: () => true, limit: '256kb' }))` dipasang
+  **di atas** `express.json()`, sama seperti `/api/router/push`. Rutenya sendiri membalas `500`
+  secara terdengar (`BODY BUKAN Buffer`) kalau mount itu sampai hilang, tidak diam-diam menolak
+  semua pembayaran.
+* Panel (`public/panel/index.html`, `panel.js`) — opsi **TriPay (QRIS)** + tiga kolom kunci +
+  dropdown **Lingkungan TriPay**, badge kesiapan (SANDBOX/PRODUCTION atau daftar kunci yang
+  kurang), tombol 🧪 Uji kunci TriPay, dan URL notifikasi yang harus ditempel di
+  **Merchant Settings → Callback URL**. Cache-buster `panel.js?v=20261013c`.
+* Aplikasi pelanggan (`public/pelanggan/*`) — metode **QRIS (TriPay)** hanya ditawarkan bila
+  tenant-nya mengaktifkannya. Sekali QR tampil, tombol berubah jadi **Tutup** sehingga klik
+  kedua tidak diam-diam membuat transaksi kedua; QR dirender dari `qr_string`, `checkout_url`
+  selalu ikut sebagai cadangan, dan daftar tagihan disegar ulang sendiri.
+  Cache-buster `pelanggan.js?v=20261013b`.
+
+**Bukti (jalur asli, bukan sintetis)**
+
+Deploy ke produksi (`bill.ivvinet.my.id`) + `node scripts/migrate-v22.js`; md5 berkas mirror ==
+webroot; service restart bersih. Pengujian lewat HTTP nyata ke `127.0.0.1:3010` (callback
+ditiru dengan HMAC kunci tenant yang sama, seperti Midtrans v2.3.0):
+* Suite webhook/panel/statis **27/27 PASS** — signature salah → `403` tagihan tak berubah;
+  `merchant_ref` asing → `404`; signature benar tapi jumlah beda → diabaikan `amount_mismatch`;
+  `PAID` benar → lunas + `pembayaran.metode='treepay'` + baris `kas` masuk; notifikasi dobel →
+  tidak dobel hitung; `EXPIRED` hanya melepas order-nya sendiri; tagihan lewat tempo →
+  `jatuh_tempo`; `REFUND` tercatat tanpa perubahan; tenant/gateway lain tidak tersentuh;
+  `audit_log.aksi='webhook_tripay'` terisi.
+* Suite rute charge **8/8 PASS** — tagihan sudah lunas → `400`; pelanggan menagih tagihan orang
+  lain → `403 'Akses ditolak'`; kunci palsu → `502` dan tagihan tetap `buat` dengan
+  `ref_gateway NULL` (tidak ada tulis sebelum gateway setuju); **lintas tenant**: dengan tenant
+  aktif 5 ber-TriPay lengkap, tagihan milik tenant 1 ditolak `400 '… konfigurasi belum lengkap'`
+  sedangkan tagihan milik tenant 5 lolos guard dan benar-benar sampai
+  `api-sandbox.tripay.co.id` dan dibalas `400 "Invalid API Key"` — konfigurasi dibaca dari
+  tenant punya tagihan, dan kunci yang benar-benar dipakai adalah kunci tenant itu.
+* Semua baris uji (pelanggan/tagihan/`app_user` sementara + `audit_log`) dibersihkan dan
+  konfigurasi tenant dicadangkan ke tabel bayangan lalu dikembalikan bit-per-bit
+  (`ds5: pg_active=midtrans|pub=NULL|mer=NULL|env=production|secret=NULL`).
+
+**Masih di sisi pengguna (bukan kode)**
+
+* Isi merchant code + API key + private key TriPay (sandbox dulu, lalu production) di
+  **Pengaturan → Payment gateway**, lalu tempel
+  `https://bill.ivvinet.my.id/api/webhook/tripay` di dashboard TriPay
+  (Merchant Settings → Callback URL). Tanpa URL itu, pembayaran QRIS yang sudah masuk tidak akan
+  pernah terdengar oleh ivvibill.
+* Transaksi sandbox yang **berhasil** (QR terbentuk → dibayar → lunas) belum bisa dibuktikan di
+  sisi kami karena kunci sandbox milik ISP belum ada; yang terbukti sampai kini adalah permintaan
+  keluar sampai ke endpoint sandbox TriPay dan balasannya dibaca apa adanya.
+
+---
+
 ## 2026-10-13 — v2.3.1 — Payment gateway: lingkungan Midtrans jadi pilihan eksplisit (kunci sandbox tak lagi salah kirim ke production)
 
 **Gejala user**

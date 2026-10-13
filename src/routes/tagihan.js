@@ -13,6 +13,7 @@ const billing = require('../services/billing');
 const wa = require('../services/wa');
 const cfgData = require('../services/configData');
 const crypto = require('../util/crypto');
+const cryptoLib = require('crypto');
 const http = require('../util/http');
 const multer = require('multer');
 const path = require('path');
@@ -452,6 +453,14 @@ router.get('/gateway', requirePJ(), async (req, res, next) => {
         flip_siap: s.pg_active === 'flip' && !!s.pg_flip_secret_key,
         flip_secret: s.pg_flip_secret_key ? '****' : '',
         flip_public: s.pg_flip_public_key || '',
+        // TriPay butuh tiga hal sekaligus supaya siap: merchant code, API key
+        // publik (Bearer), dan private key (penandatangan). 'siap' memeriksa
+        // ketiganya, bukan hanya pg_active.
+        tripay_siap: s.pg_active === 'treepay' && !!s.pg_tripay_secret && !!s.pg_tripay_public && !!s.pg_tripay_merchant,
+        tripay_public: s.pg_tripay_public || '',
+        tripay_secret: s.pg_tripay_secret ? '****' : '',
+        tripay_merchant: s.pg_tripay_merchant || '',
+        tripay_env: String(s.pg_tripay_env || '').toLowerCase() === 'sandbox' ? 'sandbox' : 'production',
         wa_gateway_url: s.wa_gateway_url || '',
         wa_gateway_key: s.wa_gateway_key ? '****' : '',
         wa_status: s.wa_status,
@@ -459,7 +468,8 @@ router.get('/gateway', requirePJ(), async (req, res, next) => {
         // Notifications). Tanpa ini notifikasi tidak pernah sampai dan tagihan
         // tetap 'menunggu' selamanya meski pelanggan sudah bayar.
         webhook_midtrans: (config.app.baseUrl || '') + '/api/webhook/midtrans',
-        webhook_flip: (config.app.baseUrl || '') + '/api/webhook/flip'
+        webhook_flip: (config.app.baseUrl || '') + '/api/webhook/flip',
+        webhook_tripay: (config.app.baseUrl || '') + '/api/webhook/tripay'
       }
     });
   } catch (e) { next(e); }
@@ -478,6 +488,7 @@ router.get('/gateway/metode', async (req, res, next) => {
       manual: true,
       midtrans: s.pg_active === 'midtrans' && !!s.pg_midtrans_server_key,
       flip: s.pg_active === 'flip' && !!s.pg_flip_secret_key,
+      treepay: s.pg_active === 'treepay' && !!s.pg_tripay_secret && !!s.pg_tripay_public && !!s.pg_tripay_merchant,
       aktif: s.pg_active || 'manual'
     });
   } catch (e) { next(e); }
@@ -505,10 +516,13 @@ router.post('/gateway/wa/start', requirePJ(), requireMenu('setting', 'gateway'),
 router.put('/gateway', requirePJ(), requireMenu('setting', 'gateway'), async (req, res, next) => {
   try {
     const ds = tenantAktif(req);
-    const aktif = v.enumOf(req.body.pg_active, ['manual', 'midtrans', 'flip'], 'manual');
+    const aktif = v.enumOf(req.body.pg_active, ['manual', 'midtrans', 'flip', 'treepay'], 'manual');
     // Lingkungan Midtrans dipilih eksplisit oleh ISP. Default 'production' agar
     // tenant lama tidak berubah perilaku; tenant uji sandbox memilih 'sandbox'.
     const midEnv = v.enumOf(req.body.pg_midtrans_env, ['production', 'sandbox'], 'production');
+    // Lingkungan TriPay juga eksplisit (pelajaran dari 401 Midtrans: jangan tebak
+    // environment dari bentuk kunci). '/api' vs '/api-sandbox'.
+    const tpEnv = v.enumOf(req.body.pg_tripay_env, ['production', 'sandbox'], 'production');
     // Kunci tidak pernah berisi spasi; satu enter yang ikut tersalin saat
     // tempel cukup membuat semua transaksi ditolak gateway, jadi dibuang
     // seluruh whitespace-nya di sini.
@@ -517,15 +531,21 @@ router.put('/gateway', requirePJ(), requireMenu('setting', 'gateway'), async (re
     const mcKey = bersihKey(v.str(req.body.midtrans_client_key, { max: 200, def: null }));
     const fSec = bersihKey(v.str(req.body.flip_secret, { max: 400, def: null }));
     const fPub = bersihKey(v.str(req.body.flip_public, { max: 200, def: null }));
+    const tpPub = bersihKey(v.str(req.body.tripay_public, { max: 255, def: null }));
+    const tpSecret = bersihKey(v.str(req.body.tripay_secret, { max: 400, def: null }));
+    const tpMerchant = bersihKey(v.str(req.body.tripay_merchant, { max: 60, def: null }));
     const waUrl = v.str(req.body.wa_gateway_url, { max: 255, def: null });
     const waKey = v.str(req.body.wa_gateway_key, { max: 400, def: null });
 
-    const patch = ['pg_active = ?', 'pg_midtrans_env = ?'];
-    const vals = [aktif, midEnv];
+    const patch = ['pg_active = ?', 'pg_midtrans_env = ?', 'pg_tripay_env = ?'];
+    const vals = [aktif, midEnv, tpEnv];
     if (msKey && msKey !== '****') { patch.push('pg_midtrans_server_key = ?'); vals.push(crypto.encrypt(msKey)); }
     if (mcKey) { patch.push('pg_midtrans_client_key = ?'); vals.push(mcKey); }
     if (fSec && fSec !== '****') { patch.push('pg_flip_secret_key = ?'); vals.push(crypto.encrypt(fSec)); }
     if (fPub) { patch.push('pg_flip_public_key = ?'); vals.push(fPub); }
+    if (tpPub) { patch.push('pg_tripay_public = ?'); vals.push(tpPub); }
+    if (tpMerchant) { patch.push('pg_tripay_merchant = ?'); vals.push(tpMerchant); }
+    if (tpSecret && tpSecret !== '****') { patch.push('pg_tripay_secret = ?'); vals.push(crypto.encrypt(tpSecret)); }
     if (waUrl !== null) { patch.push('wa_gateway_url = ?'); vals.push(waUrl); }
     if (waKey && waKey !== '****') { patch.push('wa_gateway_key = ?', 'wa_status = ?'); vals.push(crypto.encrypt(waKey), 'Aktif'); }
     vals.push(ds);
@@ -648,14 +668,146 @@ router.post('/gateway/midtrans/tes', requirePJ(), requireMenu('setting', 'gatewa
   } catch (e) { next(e); }
 });
 
+// ------------------------------------------------ TriPay (QRIS) — v2.4.0
+/**
+ * Basis URL TriPay. Seperti Midtrans v2.3.1, environment dipilih EKSPLISIT oleh
+ * ISP lewat `pg_tripay_env` — tidak ditebak dari bentuk kunci. '/api-sandbox/'
+ * untuk uji, '/api/' untuk produksi.
+ */
+function basisTriPay(env) {
+  return String(env || '').toLowerCase() === 'sandbox'
+    ? 'https://tripay.co.id/api-sandbox/'
+    : 'https://tripay.co.id/api/';
+}
+/** Header TriPay: Bearer = API key (public key); body form-urlencoded. */
+function headerTriPay(apiKey) {
+  return {
+    Authorization: 'Bearer ' + String(apiKey || ''),
+    'Content-Type': 'application/x-www-form-urlencoded',
+    Accept: 'application/json'
+  };
+}
+/**
+ * Tanda tangan TriPay = HMAC-SHA256(merchant_code + merchant_ref + amount,
+ * private_key) dalam hex. private_key TIDAK pernah dikirim; hanya dipakai
+ * mencocokkan request di sisi TriPay dan memverifikasi callback.
+ */
+function sigTriPay(merchantCode, merchantRef, amount, privateKey) {
+  return cryptoLib.createHmac('sha256', String(privateKey || ''))
+    .update(String(merchantCode) + String(merchantRef) + String(amount)).digest('hex');
+}
+
+/** Checkout TriPay QRIS — membuat transaksi, mengembalikan checkout_url + QR. */
+router.post('/gateway/tripay/charge', requireRole('superadmin', 'master', 'pelanggan'), async (req, res, next) => {
+  try {
+    const tagihanId = v.num(req.body.tagihan_id, { int: true, min: 1 });
+    const t = await cariTagihan(req, tagihanId);
+    if (!t || t.status === 'lunas') return res.status(400).json({ error: 'Tagihan tidak valid' });
+    if (req.user.role === 'pelanggan' && Number(t.id_pelanggan) !== Number(req.user.id_ref)) {
+      return res.status(403).json({ error: 'Akses ditolak' });
+    }
+    const ds = Number(t.id_data_server);
+    const s = await cfgData.getServer(ds, true);
+    if (s.pg_active !== 'treepay' || !s.pg_tripay_secret || !s.pg_tripay_public || !s.pg_tripay_merchant) {
+      return res.status(400).json({ error: 'TriPay belum diaktifkan atau konfigurasi belum lengkap' });
+    }
+    const privateKey = crypto.decrypt(s.pg_tripay_secret);
+    const apiKey = String(s.pg_tripay_public);
+    const merchantCode = String(s.pg_tripay_merchant);
+    const prefix = String(s.prefix_invoice || 'IVV').replace(/-+$/, '');
+    // merchant_ref memuat id tagihan pada posisi kedua-dari-ujung — sama seperti
+    // order_id Midtrans — sehingga webhook dapat mencari tenant + kuncinya.
+    const order = `${prefix}-${t.id}-${Date.now()}`;
+    const amount = Math.round(Number(t.total));
+    const signature = sigTriPay(merchantCode, order, amount, privateKey);
+    const form = new URLSearchParams({
+      method: 'QRIS',
+      merchant_code: merchantCode,
+      merchant_ref: order,
+      amount: String(amount),
+      // sengaja TANPA nama pelanggan: id pelanggan cukup untuk pencocokan,
+      // dan data pribadi tidak perlu berangkat ke gateway.
+      customer_name: String(t.id_pelanggan),
+      signature
+    });
+    const r = await http.post(`${basisTriPay(s.pg_tripay_env)}transaction/create`,
+      form.toString(), { timeout: 20000, headers: headerTriPay(apiKey) });
+    const d = r.body && r.body.data;
+    if (r.status >= 400 || !d || !(d.checkout_url || d.reference)) {
+      return res.status(502).json({ error: `TriPay: ${pesanGateway(r.body, r.text)}` });
+    }
+    await db.run('UPDATE tagihan SET ref_gateway = ? WHERE id = ?', [order, tagihanId]);
+    await db.run(`UPDATE tagihan SET status='menunggu' WHERE id=? AND status IN ('buat','terkirim','jatuh_tempo')`, [tagihanId]);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'checkout_tripay', `${order} · tagihan ${t.nomor_invoice} Rp ${amount}`,
+       (req.ip || '').replace('::ffff:', '')]);
+    const qr = d.payload && d.payload.qr_string;
+    res.json({
+      checkout_url: d.checkout_url || null,
+      // QRIS: beberapa channel mengirim qr_string langsung (untuk display/embed),
+      // sebagian hanya checkout_url. Keduanya dikembalikan bila ada.
+      qr_string: d.qr_string || qr || null,
+      reference: d.reference || null,
+      merchant_ref: d.merchant_ref || order,
+      expired_time: d.expired_time || null,
+      total_amount: (d.total_amount != null ? d.total_amount : amount),
+      status: d.status || null
+    });
+  } catch (e) { next(e); }
+});
+
+/**
+ * Uji konfigurasi TriPay dari tombol Pengaturan — membuat SATU QRIS kecil yang
+ * tidak ada yang membayar, supaya kesalahan merchant code / API key / private
+ * key / channel QRIS belum aktif terlihat di panel, bukan saat pelanggan bayar.
+ */
+router.post('/gateway/tripay/tes', requirePJ(), requireMenu('setting', 'gateway'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const s = await cfgData.getServer(ds, true);
+    if (!s.pg_tripay_secret || !s.pg_tripay_public || !s.pg_tripay_merchant) {
+      return res.status(400).json({ error: 'Merchant code, API key, dan Private key TriPay harus lengkap' });
+    }
+    const privateKey = crypto.decrypt(s.pg_tripay_secret);
+    const apiKey = String(s.pg_tripay_public);
+    const merchantCode = String(s.pg_tripay_merchant);
+    const prefix = String(s.prefix_invoice || 'IVV').replace(/-+$/, '');
+    const order = `${prefix}-UJI-${Date.now()}`;
+    const amount = 10000;
+    const signature = sigTriPay(merchantCode, order, amount, privateKey);
+    const form = new URLSearchParams({
+      method: 'QRIS', merchant_code: merchantCode, merchant_ref: order,
+      amount: String(amount), customer_name: 'uji-kunci-ivvibill', signature
+    });
+    const r = await http.post(`${basisTriPay(s.pg_tripay_env)}transaction/create`,
+      form.toString(), { timeout: 20000, headers: headerTriPay(apiKey) });
+    const d = r.body && r.body.data;
+    const lolos = r.status < 400 && !!(d && (d.checkout_url || d.reference));
+    const detail = lolos
+      ? 'Kunci diterima TriPay — QRIS siap dipakai pelanggan.'
+      : pesanGateway(r.body, r.text);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'uji_tripay', `HTTP ${r.status} · ${order} · ${detail}`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json({
+      ok: lolos, http: r.status,
+      lingkungan: String(s.pg_tripay_env || '').toLowerCase() === 'sandbox' ? 'sandbox' : 'production',
+      merchant_code: merchantCode,
+      order_id: order,
+      checkout_url: lolos ? (d.checkout_url || null) : null,
+      pesan: detail,
+      peringatan: lolos ? null
+        : 'Periksa Merchant Code, API key (public), dan Private key di dashboard TriPay, dan pastikan channel QRIS sudah diaktifkan untuk merchant ini.'
+    });
+  } catch (e) { next(e); }
+});
+
 router.get('/rekening', async (req, res, next) => {
   try {
     const ts = tenantSql(req, 'id_data_server');
     res.json({ data: await db.q(`SELECT * FROM rekening WHERE status='aktif'${ts.sql}`, ts.params) });
   } catch (e) { next(e); }
-});
-
-// ------------------------------------------------ profil tagihan (v2.0)
+});// ------------------------------------------------ profil tagihan (v2.0)
 // Pengganti "Hari Tagihan" per pelanggan: satu profil = satu kebijakan
 // penagihan (tanggal buat / kirim / isolir, PPN, peringatan, kompensasi).
 // Ganti jadwal satu golongan = edit satu profil, bukan sunat 171 pelanggan.

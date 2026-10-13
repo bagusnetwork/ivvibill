@@ -22,12 +22,16 @@ CREATE TABLE IF NOT EXISTS data_server (
   wa_gateway_url    VARCHAR(255) DEFAULT NULL,
   wa_gateway_key    TEXT,
   wa_status         VARCHAR(20)  DEFAULT 'Belum',
-  pg_active         VARCHAR(30)  DEFAULT 'manual',   -- manual|midtrans|flip
+  pg_active         VARCHAR(30)  DEFAULT 'manual',   -- manual|midtrans|flip|treepay
   pg_midtrans_server_key TEXT,
   pg_midtrans_client_key  VARCHAR(255) DEFAULT NULL,
   pg_midtrans_env         VARCHAR(12)  NOT NULL DEFAULT 'production',  -- production|sandbox (endpoint Midtrans; dashboard baru tak pakai awalan SB-)
   pg_flip_secret_key      TEXT,
   pg_flip_public_key      VARCHAR(255) DEFAULT NULL,
+  pg_tripay_public        VARCHAR(255) DEFAULT NULL,   -- API key (Bearer) TriPay — kunci publik
+  pg_tripay_secret        TEXT,                        -- Private key TriPay (terenkripsi) — sign transaksi + verifikasi callback
+  pg_tripay_merchant      VARCHAR(60)  DEFAULT NULL,   -- Merchant code (mis. TR123456)
+  pg_tripay_env           VARCHAR(12)  NOT NULL DEFAULT 'production',  -- production|sandbox (/api vs /api-sandbox)
   -- jadwal tagihan
   jadwal_buat_hari  TINYINT NOT NULL DEFAULT 1,     -- tgl pembuatan tagihan
   jadwal_kirim_hari TINYINT NOT NULL DEFAULT 2,     -- tgl kirim tagihan WA
@@ -251,7 +255,7 @@ CREATE TABLE IF NOT EXISTS pembayaran (
   id           INT NOT NULL AUTO_INCREMENT,
   id_tagihan   INT NOT NULL,
   jumlah       DECIMAL(15,2) NOT NULL,
-  metode       ENUM('manual','midtrans','flip','saldo_agen') NOT NULL DEFAULT 'manual',
+  metode       ENUM('manual','midtrans','flip','saldo_agen','treepay') NOT NULL DEFAULT 'manual',
   status       ENUM('menunggu','diterima','ditolak') NOT NULL DEFAULT 'menunggu',
   bukti        VARCHAR(150) DEFAULT NULL,      -- file upload bukti transfer
   ref          VARCHAR(100) DEFAULT NULL,      -- id transaksi gateway

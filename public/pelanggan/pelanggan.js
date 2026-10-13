@@ -6,7 +6,7 @@ let PROFIL = null, TAGIHAN = [];
 /* Metode bayar yang benar-benar aktif di ISP ini. Dulu pilihan Midtrans selalu
    muncul walaupun tenant-nya gateway 'manual' — pelanggan menekan Bayar lalu
    menerima "Midtrans belum diaktifkan". Nilainya ditanyakan ke backend. */
-let METODE = { manual: true, midtrans: false, flip: false };
+let METODE = { manual: true, midtrans: false, flip: false, treepay: false };
 
 async function loadDash() {
   try {
@@ -63,7 +63,7 @@ async function loadTagihan() {
         <td class="t-num">${rupiah(t.total)}</td><td>${tgl(t.jatuh_tempo)}</td>
         <td><span class="badge ${badge(t.status)}">${esc(t.status)}</span>
           ${t.status === 'menunggu'
-            ? `<div class="hint">${t.ref_gateway ? 'menunggu pembayaran di Midtrans' : 'menunggu verifikasi admin'}</div>` : ''}</td>
+            ? `<div class="hint">${t.ref_gateway ? 'menunggu pembayaran di gateway' : 'menunggu verifikasi admin'}</div>` : ''}</td>
         <td class="t-actions">${t.status !== 'lunas' && t.status !== 'batal'
           ? `<button class="btn sm" onclick="formBayar(${t.id})">Bayar</button>` : '-'}</td></tr>`).join('')
       || '<tr><td colspan="7" class="empty">Belum ada tagihan</td></tr>';
@@ -77,17 +77,21 @@ async function loadTagihan() {
 /** Tanya metode apa yang diizinkan ISP ini; gagal tanya = manual saja. */
 async function muatMetode() {
   try { const m = await API.get('/api/gateway/metode');
-    METODE = { manual: true, midtrans: !!m.midtrans, flip: !!m.flip }; }
-  catch (_) { METODE = { manual: true, midtrans: false, flip: false }; }
+    METODE = { manual: true, midtrans: !!m.midtrans, flip: !!m.flip, treepay: !!m.treepay }; }
+  catch (_) { METODE = { manual: true, midtrans: false, flip: false, treepay: false }; }
   return METODE;
 }
 
 let bayarId = null;
+// true setelah satu QRIS TriPay berhasil dibuat untuk invoice ini — mencegah
+// klik kedua diam-diam membuat transaksi kedua.
+let qrisSiap = false;
 function formBayar(id) {
   const t = TAGIHAN.find(x => x.id === id);
   if (!t) return;
   bayarId = id;
   const sel = document.getElementById('byMetode');
+  qrisSiap = false;
   // Hanya tawarkan yang benar-benar aktif di tenant ini.
   Array.from(sel.options).forEach(o => {
     const boleh = METODE[o.value] !== false;
@@ -95,16 +99,74 @@ function formBayar(id) {
   });
   sel.value = 'manual';
   const bukti = document.getElementById('byBuktiWrap');
-  if (bukti) bukti.style.display = '';
-  const catatan = METODE.midtrans
-    ? '<div class="hint">Pilih <b>Payment gateway (Midtrans)</b> untuk bayar langsung di halaman Midtrans '
-      + '(VA bank / QRIS / e-wallet); tagihan berubah menjadi <b>lunas</b> otomatis begitu uangnya masuk.</div>'
-    : '';
+  // Bukti transfer hanya relevan untuk metode manual; gateway (Midtrans/TriPay)
+  // mencatat pelunasannya sendiri lewat notifikasi.
+  const aturBukti = () => {
+    if (bukti) bukti.style.display = sel.value === 'manual' ? '' : 'none';
+    // Setelah QRIS tampil, tombol jadi 'Tutup' — kembali ke manual/gateway lain
+    // harus mengembalikan labelnya supaya tidak mengira tinggal menutup.
+    const k = document.getElementById('byKirim');
+    if (k && qrisSiap && sel.value === 'treepay') k.textContent = 'Tutup';
+    else if (k) k.textContent = 'Kirim pembayaran';
+  };
+  sel.onchange = aturBukti;
+  aturBukti();
+  // Panel QRIS disembunyikan sampai transaksi TriPay benar-benar dibuat.
+  const qw = document.getElementById('byQrisWrap');
+  if (qw) qw.style.display = 'none';
+  const qbox = document.getElementById('byQris');
+  if (qbox) qbox.innerHTML = '';
+  const kirim = document.getElementById('byKirim');
+  if (kirim) kirim.textContent = 'Kirim pembayaran';
+  let catatan = '';
+  if (METODE.midtrans) {
+    catatan += '<div class="hint">Pilih <b>Payment gateway (Midtrans)</b> untuk bayar langsung di halaman Midtrans '
+      + '(VA bank / QRIS / e-wallet); tagihan berubah menjadi <b>lunas</b> otomatis begitu uangnya masuk.</div>';
+  }
+  if (METODE.treepay) {
+    catatan += '<div class="hint">Pilih <b>QRIS (TriPay)</b>, pindai QR-nya dengan aplikasi apa pun yang mendukung '
+      + 'QRIS (GoPay, OVO, DANA, ShopeePay, m-banking); tagihan berubah menjadi <b>lunas</b> otomatis begitu uangnya masuk.</div>';
+  }
   document.getElementById('byInfo').innerHTML =
     `Invoice <b>${esc(t.nomor_invoice)}</b> — total <b>${rupiah(t.total)}</b>, jatuh tempo ${tgl(t.jatuh_tempo)}.` + catatan;
   document.getElementById('byBukti').value = '';
   document.getElementById('byKet').value = '';
   modalOpen('mBayar');
+}
+
+/**
+ * Tampilkan QRIS hasil TriPay. `qr_string` adalah payload QR mentah (EMVCo) —
+ * dirender menjadi gambar QR oleh api.qrserver.com supaya bisa dipindai langsung
+ * di halaman ini; `checkout_url` selalu ikut ditawarkan sebagai cadangan bila
+ * gambar gagal dimuat atau pelanggan lebih suka halaman bayar TriPay.
+ */
+function tampilQris(r) {
+  qrisSiap = true;
+  const box = document.getElementById('byQris');
+  if (!box) return;
+  const bagian = [];
+  if (r.qr_string) {
+    const src = 'https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=8&data='
+      + encodeURIComponent(r.qr_string);
+    bagian.push(`<div style="text-align:center;padding:8px 0">
+        <img src="${esc(src)}" alt="QRIS" width="260" height="260"
+          style="max-width:100%;image-rendering:pixelated">
+        <div class="hint" style="word-break:break-all;margin-top:6px">${esc(r.qr_string).slice(0, 120)}…</div>
+      </div>`);
+  }
+  if (r.checkout_url) {
+    bagian.push(`<div class="form-row"><a class="btn" href="${esc(r.checkout_url)}" target="_blank" rel="noopener">Buka halaman bayar TriPay</a></div>`);
+  }
+  if (r.expired_time) {
+    const s = String(r.expired_time);
+    const iso = /^\d+$/.test(s) ? new Date(Number(s) * 1000) : new Date(s.includes('T') ? s : s.replace(' ', 'T'));
+    const umur = Math.round((Number(iso) - Date.now()) / 60000);
+    if (Number.isFinite(umur)) bagian.push(`<div class="hint">Berlaku sampai ${esc(s)} (${umur} menit dari sekarang).</div>`);
+  }
+  if (!bagian.length) bagian.push('<div class="hint">Transaksi dibuat, tapi TriPay tidak mengirim QR. Hubungi ISP Anda.</div>');
+  box.innerHTML = bagian.join('');
+  const wrap = document.getElementById('byQrisWrap');
+  if (wrap) wrap.style.display = '';
 }
 
 async function kirimBayar() {
@@ -120,6 +182,16 @@ async function kirimBayar() {
         return;
       }
       toast('Gateway tidak memberikan tautan bayar — hubungi ISP Anda', true);
+      return;
+    }
+    if (metode === 'treepay') {
+      if (qrisSiap) { modalClose('mBayar'); loadTagihan(); return; }
+      const r = await API.post('/api/gateway/tripay/charge', { tagihan_id: bayarId });
+      tampilQris(r);
+      const kirim = document.getElementById('byKirim');
+      if (kirim) kirim.textContent = 'Tutup';
+      toast('QRIS siap dipindai — tagihan jadi lunas otomatis setelah bayar');
+      setTimeout(loadTagihan, 20000);
       return;
     }
     const fd = new FormData();

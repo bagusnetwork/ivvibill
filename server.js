@@ -62,6 +62,13 @@ app.use(helmet({
 // body-nya harus dibaca mentah SEBELUM parser json/urlencoded global menghabiskan
 // stream. Parser yang sudah menandai req._body membuat parser berikutnya melewat.
 app.use('/api/router/push', express.raw({ type: () => true, limit: '256kb' }));
+// TriPay sama, dan lebih kritis: tanda tangan callback-nya adalah
+// HMAC-SHA256 atas BYTE JSON APA ADANYA (header X-Callback-Signature). Kalau
+// express.json sudah menelan body lebih dulu, req.body tinggal objek dan teks
+// aslinya tidak bisa direkonstruksi — hasil HMAC apa pun jadi salah, dan
+// notifikasi PAID yang sah akan ditolak/dianggap 404. Jadi path ini juga harus
+// di-raw sebelum parser global.
+app.use('/api/webhook/tripay', express.raw({ type: () => true, limit: '256kb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 app.use(cookieParser());

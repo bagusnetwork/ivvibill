@@ -227,6 +227,108 @@ router.post('/webhook/flip', raw, async (req, res) => {
   }
 });
 
+// ------------------------------------------------ TriPay (QRIS) — v2.4.0
+/**
+ * Callback TriPay: POST JSON dengan header X-Callback-Signature =
+ * HMAC-SHA256(raw_body_json, private_key) hex. Kunci private per tenant
+ * (pg_tripay_secret, terenkripsi di DB) — sama seperti Midtrans, tanda tangan
+ * adalah autentikasi sebenarnya, bukan IP pengirim.
+ *
+ * Status TriPay yang datang ke sini: PAID (lunas), EXPIRED / FAILED (mati),
+ * REFUND (dana dikembalikan). 'UNPAID' hanya status awal, tidak di-callback.
+ */
+router.post('/webhook/tripay', async (req, res) => {
+  try {
+    const ip = ipTanpaVest(req);
+    if (SEKAT_IP && !ipTrusted(req)) return res.status(403).json({ error: 'ip not allowed' });
+
+    // Body WAJIB masih berupa Buffer. `raw` TIDAK dipasang di rute ini karena
+    // express.json() global (server.js) sudah menelan stream sebelum router ini
+    // dipakai — parser kedua melihat req._body lalu melewat. Yang membaca
+    // mentah adalah mount `app.use('/api/webhook/tripay', express.raw(...))`
+    // di server.js. Kalau itu sampai hilang, lebih baik jujur 400 daripada
+    // menghitung HMAC atas '[object Object]' dan menolak semua notifikasi sah.
+    const rawBody = Buffer.isBuffer(req.body) ? req.body
+      : (typeof req.body === 'string' ? Buffer.from(req.body) : null);
+    if (!rawBody) {
+      jejak('tripay', '-', '-', '-', { ip, catatan: 'BODY BUKAN Buffer — mount express.raw di server.js hilang' });
+      return res.status(500).json({ error: 'raw body tidak tersedia (konfigurasi parser)' });
+    }
+    let body = {};
+    try { body = JSON.parse(rawBody.toString('utf8') || '{}'); } catch (_) { body = {}; }
+
+    const merchantRef = String(body.merchant_ref || '');
+    const status = String(body.status || '').toUpperCase();
+    const t = await tenantTagihan(merchantRef);
+    if (!t) return res.status(404).json({ error: 'tagihan tidak dikenali' });
+
+    const s = await cfgData.getServer(t.id_data_server, true);
+    if (!s.pg_tripay_secret) return res.status(400).json({ error: 'not configured' });
+    const secret = crypto.decrypt(s.pg_tripay_secret);
+    const expected = cryptoLib.createHmac('sha256', secret).update(rawBody).digest('hex');
+    const given = String(req.headers['x-callback-signature'] || '');
+    // perbandingan waktu-konstan; panjang beda → langsung tolak (timingSafeEqual
+    // melempar bila panjang buffer tidak sama).
+    const sama = expected.length === given.length
+      && cryptoLib.timingSafeEqual(Buffer.from(expected), Buffer.from(given));
+    if (!sama) {
+      jejak('tripay', t.id_data_server, merchantRef, status, { ip, catatan: 'SIGNATURE TIDAK COCOK — ditolak' });
+      await catatAudit(t.id_data_server, 'tripay', merchantRef, 'ditolak',
+        `signature tidak cocok (status ${status || '-'})`, ip);
+      return res.status(403).json({ error: 'signature invalid' });
+    }
+
+    if (status === 'PAID') {
+      // Cocokkan dengan total tagihan memakai total_amount (nominal yang dibayar
+      // pelanggan). amount_received sudah dipotong fee merchant, jadi tidak bisa
+      // dipakai untuk mencocokkan invoice. Selisih → jangan auto-lunas.
+      const masuk = Math.round(Number(body.total_amount));
+      const harus = Math.round(Number(t.total));
+      if (!(masuk > 0) || masuk !== harus) {
+        jejak('tripay', t.id_data_server, merchantRef, status,
+          { ip, catatan: `JUMLAH TIDAK COCOK ${masuk} ≠ ${harus} — TIDAK dilunasi, periksa manual` });
+        await catatAudit(t.id_data_server, 'tripay', merchantRef, 'jumlah beda',
+          `tagihan ${t.nomor_invoice}: masuk ${masuk}, harusnya ${harus}`, ip);
+        return res.json({ ok: true, diabaikan: 'amount_mismatch' });
+      }
+      const r = await billing.lunaskanTagihan(t.id, 'treepay', { ref: String(body.reference || merchantRef), jumlah: masuk });
+      jejak('tripay', t.id_data_server, merchantRef, status,
+        { ip, catatan: r.already ? 'sudah lunas — notifikasi ulang diabaikan' : 'tagihan ' + t.nomor_invoice + ' LUNAS' });
+      if (!r.already) {
+        await catatAudit(t.id_data_server, 'tripay', merchantRef, 'lunas',
+          `tagihan ${t.nomor_invoice} Rp ${masuk} (treepay QRIS)`, ip);
+      }
+      return res.json({ ok: true, lunas: !r.already });
+    }
+
+    if (status === 'EXPIRED' || status === 'FAILED') {
+      const dilepas = await lepasGerbang(t.id, merchantRef);
+      jejak('tripay', t.id_data_server, merchantRef, status,
+        { ip, catatan: dilepas ? 'tagihan dilepas dari status menunggu' : 'tidak ada yang dilepas (bukan menunggu karena gateway ini)' });
+      if (dilepas) {
+        await catatAudit(t.id_data_server, 'tripay', merchantRef, 'batal',
+          `tagihan ${t.nomor_invoice} kembali ke terkirim/jatuh_tempo (${status})`, ip);
+      }
+      return res.json({ ok: true });
+    }
+
+    if (status === 'REFUND') {
+      // TriPay sudah mengembalikan dana ke pelanggan. Ini bukan pelunasan, dan
+      // tidak otomatis membatalkan tagihan 'lunas' — keputusan restitusi jadi
+      // ranah operator. Dicatat agar jejaknya ada.
+      jejak('tripay', t.id_data_server, merchantRef, status, { ip, catatan: 'REFUND — tidak mengubah status, periksa manual' });
+      await catatAudit(t.id_data_server, 'tripay', merchantRef, 'refund',
+        `tagihan ${t.nomor_invoice} refund Rp ${Math.round(Number(body.amount_received || body.total_amount || 0))}`, ip);
+      return res.json({ ok: true, diabaikan: 'refund' });
+    }
+
+    jejak('tripay', t.id_data_server, merchantRef, status, { ip, catatan: 'status antara — tidak mengubah apa pun' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ------------------------------------------------ laporan sesi dari MikroTik
 /**
  * Dikirim /system script 'IvvibillAPI' yang dipasang tombol Test perangkat,

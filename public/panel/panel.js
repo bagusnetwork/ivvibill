@@ -1866,6 +1866,12 @@ async function loadSetting() {
     document.getElementById('gMidEnv').value = gw.midtrans_env === 'sandbox' ? 'sandbox' : 'production';
     document.getElementById('gFs').value = '';
     document.getElementById('gFp').value = gw.flip_public || '';
+    // TriPay: merchant code + public key boleh tampil (bukan rahasia); private
+    // key hanya '****' jadi kolomnya dikosongkan agar tidak tertimpa saat simpan.
+    document.getElementById('gTpMerchant').value = gw.tripay_merchant || '';
+    document.getElementById('gTpPub').value = gw.tripay_public || '';
+    document.getElementById('gTpSecret').value = '';
+    document.getElementById('gTpEnv').value = gw.tripay_env === 'sandbox' ? 'sandbox' : 'production';
     document.getElementById('gWaUrl').value = gw.wa_gateway_url || '';
     document.getElementById('gWaKey').value = '';
     renderGwStatus(gw);
@@ -2007,6 +2013,10 @@ async function simpanGateway() {
       pg_midtrans_env: document.getElementById('gMidEnv').value,
       flip_secret: document.getElementById('gFs').value,
       flip_public: document.getElementById('gFp').value,
+      tripay_merchant: document.getElementById('gTpMerchant').value,
+      tripay_public: document.getElementById('gTpPub').value,
+      tripay_secret: document.getElementById('gTpSecret').value,
+      pg_tripay_env: document.getElementById('gTpEnv').value,
       wa_gateway_url: document.getElementById('gWaUrl').value,
       wa_gateway_key: document.getElementById('gWaKey').value
     });
@@ -2022,7 +2032,7 @@ async function simpanGateway() {
  */
 function renderGwStatus(gw) {
   const el = document.getElementById('gwStatus');
-  const L = { manual: 'Manual (transfer + unggah bukti)', midtrans: 'Midtrans', flip: 'Flip' };
+  const L = { manual: 'Manual (transfer + unggah bukti)', midtrans: 'Midtrans', flip: 'Flip', treepay: 'TriPay (QRIS)' };
   if (el) {
     let b = `Dipilih: <b>${esc(L[gw.pg_active] || gw.pg_active || 'manual')}</b>`;
     if (gw.pg_active === 'midtrans') {
@@ -2032,6 +2042,12 @@ function renderGwStatus(gw) {
     } else if (gw.pg_active === 'flip') {
       b += gw.flip_siap ? ' · <span class="badge ok">secret key terisi</span>'
         : ' · <span class="badge bad">secret key belum diisi</span>';
+    } else if (gw.pg_active === 'treepay') {
+      // TriPay tidak punya awalan kunci yang menandakan sandbox, jadi status
+      // menampilkan environment terpilih + apakah ketiga kunci sudah lengkap.
+      b += gw.tripay_siap
+        ? ` · <span class="badge ${gw.tripay_env === 'sandbox' ? 'warn' : 'ok'}">${gw.tripay_env === 'sandbox' ? 'SANDBOX — uang sungguhan tidak masuk' : 'PRODUCTION'}</span> <span class="hint">merchant ${esc(gw.tripay_merchant || '?')}</span>`
+        : ' · <span class="badge bad">belum lengkap</span> <span class="hint">Merchant Code + API key + Private key harus ketiganya terisi; pelanggan akan ditolak saat menekan Bayar</span>';
     } else {
       b += ' · <span class="hint">tidak ada gerbang otomatis; pembayaran dicatat manual atau lewat verifikasi bukti.</span>';
     }
@@ -2040,7 +2056,8 @@ function renderGwStatus(gw) {
   const w = document.getElementById('gwWebhook');
   if (w) w.innerHTML =
     `<div>Midtrans: <b>${esc(gw.webhook_midtrans || '(BASE_URL belum diatur)')}</b></div>` +
-    `<div>Flip: <b>${esc(gw.webhook_flip || '(BASE_URL belum diatur)')}</b></div>`;
+    `<div>Flip: <b>${esc(gw.webhook_flip || '(BASE_URL belum diatur)')}</b></div>` +
+    `<div>TriPay: <b>${esc(gw.webhook_tripay || '(BASE_URL belum diatur)')}</b></div>`;
 }
 
 /** Tanya langsung ke Midtrans dengan kunci tenant ini; hasilnya mentah-mentah. */
@@ -2062,7 +2079,26 @@ async function ujiMidtrans(btn) {
   } finally { if (btn) btn.disabled = false; }
 }
 
-// ============================================================ PAIRING WHATSAPP GATEWAY
+/** Tanya langsung ke TriPay dengan kunci tenant ini (QRIS Rp 10.000 tak dibayar). */
+async function ujiTriPay(btn) {
+  const box = document.getElementById('gwUji');
+  if (btn) btn.disabled = true;
+  if (box) box.textContent = 'Menghubungi TriPay…';
+  try {
+    const r = await API.post('/api/gateway/tripay/tes', {});
+    if (box) box.innerHTML =
+      (r.ok ? '<span class="badge ok">kunci diterima</span>' : '<span class="badge bad">ditolak TriPay</span>') +
+      `<div>${esc(r.pesan || '')}</div>` +
+      `<div class="hint">Environment: <b>${esc(r.lingkungan || '?')}</b> · merchant ${esc(r.merchant_code || '?')}` +
+      (r.checkout_url ? ` · <a href="${esc(r.checkout_url)}" target="_blank" rel="noopener">lihat QRIS uji</a>` : '') +
+      `</div>` +
+      (r.peringatan ? `<div class="hint">${esc(r.peringatan)}</div>` : '');
+    toast(r.ok ? 'TriPay menerima kunci ini — QRIS siap' : 'TriPay menolak kunci ini', !r.ok);
+  } catch (e) {
+    if (box) box.textContent = e.message;
+    toast(e.message, true);
+  } finally { if (btn) btn.disabled = false; }
+}
 const WA_LABEL = {
   CONNECTED: 'terhubung', PAIRING: 'menunggu pairing',
   SERVICE_SCAN: 'QR siap dipindai', SERVICE_OFF: 'service mati'

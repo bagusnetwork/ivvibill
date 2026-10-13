@@ -97,16 +97,20 @@
     <p id="byInfo" class="hint" style="margin-bottom:12px"></p>
     <div class="form-row"><label>Metode pembayaran</label><select id="byMetode">
       <option value="manual">Transfer bank (unggah bukti)</option>
-      <option value="midtrans">Payment gateway (Midtrans)</option></select></div>
+      <option value="midtrans">Payment gateway (Midtrans)</option>
+      <option value="treepay">QRIS (TriPay)</option></select></div>
     <div class="form-row" id="byBuktiWrap"><label>Bukti transfer (jpg/png, maks 3MB)</label>
       <input type="file" id="byBukti" accept="image/png,image/jpeg,image/webp"></div>
+    <div class="form-row" id="byQrisWrap" style="display:none">
+      <div id="byQris"></div>
+    </div>
     <div class="form-row"><label>Catatan (opsional)</label><input id="byKet" placeholder="Nama bank / no. referensi"></div>
   </div>
   <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mBayar')">Batal</button>
-    <button class="btn" onclick="kirimBayar()">Kirim pembayaran</button></div>
+    <button class="btn" id="byKirim" onclick="kirimBayar()">Kirim pembayaran</button></div>
 </div></div>
 
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="pelanggan.js?v=20261013a"></script>
+<script src="pelanggan.js?v=20261013b"></script>
 </body>
 </html>

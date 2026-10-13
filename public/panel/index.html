@@ -692,7 +692,8 @@
               <div class="form-row"><label>Status gateway</label><div id="gwStatus" class="hint">memuat…</div></div>
               <div class="form-row"><label>Gateway aktif</label>
                 <select id="gAktif"><option value="manual">Manual (transfer)</option>
-                  <option value="midtrans">Midtrans</option><option value="flip">Flip</option></select></div>
+                  <option value="midtrans">Midtrans</option><option value="flip">Flip</option>
+                  <option value="treepay">TriPay (QRIS)</option></select></div>
               <div class="form-row"><label>Midtrans server key</label><input id="gMs" placeholder="(kosongkan bila tak diubah)"></div>
               <div class="form-row"><label>Midtrans client key</label><input id="gMc"></div>
               <div class="form-row"><label>Lingkungan Midtrans</label>
@@ -706,11 +707,27 @@
                   <code>401 Access denied</code>. Kunci lama berawalan <code>SB-</code> tetap otomatis sandbox.</p></div>
               <div class="form-row"><label>Flip secret key</label><input id="gFs"></div>
               <div class="form-row"><label>Flip public key</label><input id="gFp"></div>
+              <div class="form-row"><label>TriPay Merchant Code</label><input id="gTpMerchant" placeholder="T4981..." >
+                <p class="hint">Kode merchant dari dashboard TriPay (Settings → Merchant). Bentuknya seperti
+                  <code>T4981234</code>. Berbeda dengan Midtrans, TriPay butuh <b>tiga</b> nilai sekaligus:
+                  Merchant Code, API Key (public), dan Private Key.</p></div>
+              <div class="form-row"><label>TriPay API Key (public key)</label><input id="gTpPub" placeholder="(kosongkan bila tak diubah)"></div>
+              <div class="form-row"><label>TriPay Private Key</label><input id="gTpSecret" placeholder="(kosongkan bila tak diubah)">
+                <p class="hint">Private key dipakai menandatangani request dan memverifikasi callback. Dismpan
+                  terenkripsi dan <b>tidak pernah</b> dikirim balik ke browser.</p></div>
+              <div class="form-row"><label>Lingkungan TriPay</label>
+                <select id="gTpEnv">
+                  <option value="production">Production (live)</option>
+                  <option value="sandbox">Sandbox (uji)</option>
+                </select>
+                <p class="hint">Sandbox memakai <code>tripay.co.id/api-sandbox</code> dan kunci dari
+                  <b>TriPay Sandbox</b> di dashboard; Production memakai <code>tripay.co.id/api</code> dan akun
+                  merchant yang sudah aktif. Jangan dicampur — kunci sandbox ditolak endpoint production.</p></div>
               <div class="form-row"><label>URL notifikasi gateway (webhook)</label>
                 <p class="hint">Tempel alamat ini di dashboard Midtrans pada <b>Settings → Notifications →
-                  Transaction &amp; expiry notification URL</b> (Flip: <b>Settings → Webhook</b>). ivvibill hanya
-                  menandai tagihan LUNAS bila notifikasi ini datang — selama URL-nya belum dipasang, pembayaran di
-                  gateway tidak akan pernah muncul di sini.</p>
+                  Transaction &amp; expiry notification URL</b> (Flip: <b>Settings → Webhook</b>; TriPay:
+                  <b>Merchant Settings → Callback URL</b>). ivvibill hanya menandai tagihan LUNAS bila notifikasi
+                  ini datang — selama URL-nya belum dipasang, pembayaran di gateway tidak akan pernah muncul di sini.</p>
                 <div id="gwWebhook" class="hint">memuat…</div>
               </div>
               <div class="form-row"><label>WhatsApp gateway</label>
@@ -724,6 +741,8 @@
               <button class="btn" onclick="simpanGateway()">Simpan gateway</button>
               <button class="btn secondary" id="gUjiBtn" onclick="ujiMidtrans(this)"
                 title="Membuat satu transaksi Snap Rp 1.000 yang tidak dibayar, hanya untuk membuktikan kunci diterima Midtrans">🧪 Uji kunci Midtrans</button>
+              <button class="btn secondary" id="gUjiTpBtn" onclick="ujiTriPay(this)"
+                title="Membuat satu QRIS Rp 10.000 yang tidak dibayar, hanya untuk membuktikan Merchant Code + API key + Private key TriPay benar">🧪 Uji kunci TriPay</button>
               <div id="gwUji" class="hint" style="margin-top:8px"></div>
             </div></div>
         </div>
@@ -1241,6 +1260,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261013b"></script>
+<script src="panel.js?v=20261013c"></script>
 </body>
 </html>
