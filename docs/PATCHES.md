@@ -4,6 +4,45 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-13 — v2.4.1 — Halaman unduhan APK dihapus (berkas + rute + tautan)
+
+**Gejala user**
+
+"hilangkan di web unduh aplikasi berikut file apk hilangkan" — landing page menawarkan empat
+APK WebView, dan berkasnya tetap bisa diambil oleh siapa pun yang tahu URL-nya meski tidak
+ada yang mengarahkan ke sana lagi.
+
+**Diubah**
+
+* `server.js`: mount `app.use('/apk', express.static(...))` **dihapus** — tidak ada lagi jalur
+  yang menyajikan folder itu.
+* `public/index.html`: bagian "Unduh Aplikasi Android" (judul, paragrah petunjuk, empat tautan
+  `/apk/*.apk`, dan empat aturan CSS `.apk`) dihapus; landing kini mulai dari blok fitur inti.
+* `public/apk/` (empat berkas, ± 12,8 KB masing-masing) dihapus dari webroot. Cadangan sebelum
+  penghapusan: `/root/apk-arsip-20261013-130719.tar.gz` di server, salinan sama di laptop.
+
+**Bukti**
+
+Dari internet, keempat URL sekarang `HTTP 404` (`/apk/IvviPanel.apk`, `/apk/IvviAgen.apk`,
+`/apk/IvviTeknisi.apk`, `/apk/IvviPelanggan.apk`); `GET /` membalas 200 tanpa kata "unduh
+aplikasi"; `/panel/` 200; `GET /api/gateway` 401 (rute hidup, sesi diperlukan);
+`POST /api/webhook/tripay` dengan body kosong membalas JSON milik aplikasi
+`{"error":"tagihan tidak dikenali"}` — bukan 404 nginx, jadi rantai webhook utuh.
+
+**Yang harus diketahui kalau APK lama masih "bisa diunduh"**
+
+aaPanel memasang `proxy_cache cache_one` secara global (`/www/server/nginx/proxy.conf`,
+`proxy_cache_path /www/server/nginx/proxy_cache_dir …`). `express.static` mengirim
+`Cache-Control: public, max-age=604800`, jadi salinan APK yang sudah dihapus dari disk **masih
+dilayani nginx dari cache** (gejala: node di 127.0.0.1:3010 menjawab 404 tetapi HTTPS menjawab
+200 dengan isi byte-identik; URL yang sama + query string menjawab 404 karena kunci cache
+memuat `$request_uri`). Penanganan: buang hanya entri cache yang mengandung `/apk`
+(`grep -rl "/apk" /www/server/nginx/proxy_cache_dir | xargs -r rm -f`), lalu `nginx -t` dan
+`nginx -s reload`. Jangan menghapus seluruh folder cache — situs lain di server ini ikut
+terkena. `scripts/bersihkan-cache-apk.sh` melakukan itu dan mencetak verifikasi sebelum/sesudah.
+
+---
+
 ## 2026-10-13 — v2.4.0 — Payment gateway: TriPay (QRIS) — pelanggan scan QR, tagihan lunas otomatis
 
 **Gejala user**

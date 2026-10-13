@@ -143,10 +143,7 @@ app.use('/pelanggan', express.static(path.join(pub, 'pelanggan')));
 app.use('/assets', express.static(path.join(pub, 'assets')));
 // halaman cetak invoice (dibuka panel via /cetak/invoice.html?no=…)
 app.use('/cetak', express.static(path.join(pub, 'cetak')));
-// unduhan APK — harus sebelum fallback 404
-app.use('/apk', express.static(path.join(pub, 'apk'), {
-  dotfiles: 'deny', index: false, maxAge: '7d'
-}));
+// (/apk dihapus — aplikasi Android tidak lagi ditawarkan untuk unduhan)
 app.get('/', (req, res) => res.sendFile(path.join(pub, 'index.html')));
 
 // SPA fallback per app

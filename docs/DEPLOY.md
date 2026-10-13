@@ -296,8 +296,8 @@ for u in / /panel/ /agen/ /teknisi/ /pelanggan/; do
   printf '%-14s ' "$u"; curl -s -o /dev/null -w '%{http_code}\n' https://domain-anda.com$u
 done
 
-# 3. APK
-curl -s -o /dev/null -w 'APK %{http_code} %{size_download}\n' https://domain-anda.com/apk/IvviPanel.apk
+# 3. APK tidak lagi disajikan (v2.4.1) — keduanya harus 404
+curl -s -o /dev/null -w 'APKlama %{http_code} (harus 404)\n' https://domain-anda.com/apk/IvviPanel.apk
 
 # 4. login
 curl -s -X POST https://domain-anda.com/api/auth/login \
