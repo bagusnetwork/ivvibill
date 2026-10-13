@@ -398,14 +398,19 @@ router.post('/pembayaran/:id/verifikasi', requirePJ(), requireMenu('pembayaran',
 
 // --------------------------------------------- payment gateway
 /** Bentuk kunci Midtrans — dipakai untuk membedakan "salin tempel rusak" dari
- *  "akun belum boleh transaksi". Nilai aslinya tidak pernah ditampilkan. */
+ *  "akun belum boleh transaksi". Nilai aslinya tidak pernah ditampilkan.
+ *  Label ini sengaja HANYA mendeskripsikan bentuk kunci (jenis + panjang +
+ *  pola), bukan lingkungan. Dashboard Midtrans model baru mengeluarkan kunci
+ *  sandbox tanpa prefiks 'SB-', jadi awalan tidak lagi bisa dipakai untuk
+ *  menebak production/sandbox — environment ditentukan kolom pg_midtrans_env
+ *  dan ditampilkan panel lewat badge midtrans_mode, bukan dari string ini. */
 function bentukKunciMidtrans(k) {
   const s = String(k || '');
   if (!s) return 'kosong';
   const sandbox = s.startsWith('SB-');
   // Kunci asli Midtrans memakai alfabet base64url di belakang prefiks —
   // huruf, angka, serta '-' dan '_' — dan panjang ekornya bervariasi
-  // (client key live = 16 karakter, server key = 24). Karena itu pola yang
+  // (client key = 16 karakter, server key = 24). Karena itu pola yang
   // dipakai [A-Za-z0-9_-] dengan rentang lebar, BUKAN [A-Za-z0-9]{20,24}:
   // varian sempit itu menandai kunci asli sebagai "POLA TIDAK LAZIM",
   // padahal fungsi label ini justru membedakan tempelan rusak dari akun
@@ -414,7 +419,7 @@ function bentukKunciMidtrans(k) {
     ? /^SB-Mid-(server|client)-[A-Za-z0-9_-]{8,64}$/
     : /^Mid-(server|client)-[A-Za-z0-9_-]{8,64}$/;
   const jenis = /server/.test(s.slice(0, 16)) ? 'server' : /client/.test(s.slice(0, 16)) ? 'client' : 'tak dikenal';
-  return `${sandbox ? 'sandbox' : 'live'} · ${jenis} · ${s.length} karakter · ${polanya.test(s) ? 'pola benar' : 'POLA TIDAK LAZIM'}`;
+  return `${jenis} · ${s.length} karakter · ${polanya.test(s) ? 'pola benar' : 'POLA TIDAK LAZIM'}`;
 }
 
 router.get('/gateway', requirePJ(), async (req, res, next) => {
@@ -423,10 +428,16 @@ router.get('/gateway', requirePJ(), async (req, res, next) => {
     const s = await cfgData.getServer(ds, true);
     let mode = 'belum_ada';
     let bentuk = 'kosong';
+    // Lingkungan yang sebenarnya dipakai = pilihan ISP (pg_midtrans_env) ATAU
+    // awalan 'SB-' pada kunci. Dashboard Midtrans terbaru menerbitkan kunci
+    // sandbox TANPA prefiks 'SB-', jadi tanpa kolom env ini kunci sandbox user
+    // salah routed ke endpoint production dan memberi 401 yang mudah
+    // disalahartikan sebagai "akun belum diizinkan".
+    const env = String(s.pg_midtrans_env || '').toLowerCase() === 'sandbox' ? 'sandbox' : 'production';
     if (s.pg_midtrans_server_key) {
       let k = '';
       try { k = crypto.decrypt(s.pg_midtrans_server_key); } catch (_) { k = ''; }
-      mode = k.startsWith('SB-') ? 'sandbox' : (k ? 'live' : 'rusak');
+      mode = midtransSandbox(k, s.pg_midtrans_env) ? 'sandbox' : (k ? 'live' : 'rusak');
       bentuk = bentukKunciMidtrans(k);
     }
     res.json({
@@ -436,6 +447,7 @@ router.get('/gateway', requirePJ(), async (req, res, next) => {
         midtrans_client_key: s.pg_midtrans_client_key || '',
         midtrans_mode: mode,
         midtrans_bentuk: bentuk,
+        midtrans_env: env,
         midtrans_siap: s.pg_active === 'midtrans' && !!s.pg_midtrans_server_key,
         flip_siap: s.pg_active === 'flip' && !!s.pg_flip_secret_key,
         flip_secret: s.pg_flip_secret_key ? '****' : '',
@@ -494,6 +506,9 @@ router.put('/gateway', requirePJ(), requireMenu('setting', 'gateway'), async (re
   try {
     const ds = tenantAktif(req);
     const aktif = v.enumOf(req.body.pg_active, ['manual', 'midtrans', 'flip'], 'manual');
+    // Lingkungan Midtrans dipilih eksplisit oleh ISP. Default 'production' agar
+    // tenant lama tidak berubah perilaku; tenant uji sandbox memilih 'sandbox'.
+    const midEnv = v.enumOf(req.body.pg_midtrans_env, ['production', 'sandbox'], 'production');
     // Kunci tidak pernah berisi spasi; satu enter yang ikut tersalin saat
     // tempel cukup membuat semua transaksi ditolak gateway, jadi dibuang
     // seluruh whitespace-nya di sini.
@@ -505,8 +520,8 @@ router.put('/gateway', requirePJ(), requireMenu('setting', 'gateway'), async (re
     const waUrl = v.str(req.body.wa_gateway_url, { max: 255, def: null });
     const waKey = v.str(req.body.wa_gateway_key, { max: 400, def: null });
 
-    const patch = ['pg_active = ?'];
-    const vals = [aktif];
+    const patch = ['pg_active = ?', 'pg_midtrans_env = ?'];
+    const vals = [aktif, midEnv];
     if (msKey && msKey !== '****') { patch.push('pg_midtrans_server_key = ?'); vals.push(crypto.encrypt(msKey)); }
     if (mcKey) { patch.push('pg_midtrans_client_key = ?'); vals.push(mcKey); }
     if (fSec && fSec !== '****') { patch.push('pg_flip_secret_key = ?'); vals.push(crypto.encrypt(fSec)); }
@@ -522,9 +537,18 @@ router.put('/gateway', requirePJ(), requireMenu('setting', 'gateway'), async (re
   } catch (e) { next(e); }
 });
 
-/** Basis URL Midtrans dari server key: SB- = sandbox, selain itu production. */
-function basisMidtrans(serverKey) {
-  return serverKey.startsWith('SB-') ? 'https://app.sandbox.midtrans.com' : 'https://app.midtrans.com';
+/**
+ * Environment Midtrans efektif. Dashboard Midtrans model baru menampilkan
+ * kunci sandbox TANPA awalan 'SB-', jadi awalan tidak bisa lagi jadi satu-satunya
+ * penanda. `pg_midtrans_env` (dipilih ISP di panel) yang menentukan; awalan 'SB-'
+ * tetap dihormati sebagai kompatibilitas mundur untuk kunci lama.
+ */
+function midtransSandbox(serverKey, env) {
+  return String(env || '').toLowerCase() === 'sandbox' || String(serverKey || '').startsWith('SB-');
+}
+/** Basis URL Midtrans: sandbox bila environment-nya sandbox, selain itu production. */
+function basisMidtrans(serverKey, env) {
+  return midtransSandbox(serverKey, env) ? 'https://app.sandbox.midtrans.com' : 'https://app.midtrans.com';
 }
 function headerMidtrans(serverKey) {
   return {
@@ -565,7 +589,7 @@ router.post('/gateway/midtrans/snap', requireRole('superadmin', 'master', 'pelan
       // pencocokan, dan data pribadi tidak perlu berangkat ke gateway
       customer_details: { first_name: String(t.id_pelanggan), email: null }
     };
-    const r = await http.post(`${basisMidtrans(serverKey)}/snap/v1/transactions`,
+    const r = await http.post(`${basisMidtrans(serverKey, s.pg_midtrans_env)}/snap/v1/transactions`,
       JSON.stringify(payload), { timeout: 20000, headers: headerMidtrans(serverKey) });
     if (r.status >= 400) {
       return res.status(502).json({ error: `Midtrans: ${pesanGateway(r.body, r.text)}` });
@@ -596,7 +620,7 @@ router.post('/gateway/midtrans/tes', requirePJ(), requireMenu('setting', 'gatewa
       return res.status(400).json({ error: 'Server key Midtrans belum disimpan — isi kolomnya dulu' });
     }
     const serverKey = crypto.decrypt(s.pg_midtrans_server_key);
-    const basis = basisMidtrans(serverKey);
+    const basis = basisMidtrans(serverKey, s.pg_midtrans_env);
     const prefix = String(s.prefix_invoice || 'IVV').replace(/-+$/, '');
     const order = `${prefix}-UJI-${Date.now()}`;
     const r = await http.post(`${basis}/snap/v1/transactions`,
@@ -613,7 +637,7 @@ router.post('/gateway/midtrans/tes', requirePJ(), requireMenu('setting', 'gatewa
        (req.ip || '').replace('::ffff:', '')]);
     res.json({
       ok: lolos, http: r.status,
-      lingkungan: serverKey.startsWith('SB-') ? 'sandbox' : 'production',
+      lingkungan: midtransSandbox(serverKey, s.pg_midtrans_env) ? 'sandbox' : 'production',
       bentuk_server_key: bentukKunciMidtrans(serverKey),
       bentuk_client_key: bentukKunciMidtrans(s.pg_midtrans_client_key || ''),
       order_id: order,

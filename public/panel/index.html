@@ -695,6 +695,15 @@
                   <option value="midtrans">Midtrans</option><option value="flip">Flip</option></select></div>
               <div class="form-row"><label>Midtrans server key</label><input id="gMs" placeholder="(kosongkan bila tak diubah)"></div>
               <div class="form-row"><label>Midtrans client key</label><input id="gMc"></div>
+              <div class="form-row"><label>Lingkungan Midtrans</label>
+                <select id="gMidEnv">
+                  <option value="production">Production (live)</option>
+                  <option value="sandbox">Sandbox (uji)</option>
+                </select>
+                <p class="hint">Pilih <b>Sandbox</b> bila kunci berasal dari dashboard.sandbox.midtrans.com.
+                  Dashboard Midtrans model baru menampilkan kunci sandbox <b>tanpa</b> awalan <code>SB-</code>,
+                  jadi environment tidak bisa lagi ditebak dari kunci saja — salah pilih membuat transaksi dibalas
+                  <code>401 Access denied</code>. Kunci lama berawalan <code>SB-</code> tetap otomatis sandbox.</p></div>
               <div class="form-row"><label>Flip secret key</label><input id="gFs"></div>
               <div class="form-row"><label>Flip public key</label><input id="gFp"></div>
               <div class="form-row"><label>URL notifikasi gateway (webhook)</label>
@@ -1232,6 +1241,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261013a"></script>
+<script src="panel.js?v=20261013b"></script>
 </body>
 </html>

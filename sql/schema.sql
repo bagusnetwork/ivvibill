@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS data_server (
   pg_active         VARCHAR(30)  DEFAULT 'manual',   -- manual|midtrans|flip
   pg_midtrans_server_key TEXT,
   pg_midtrans_client_key  VARCHAR(255) DEFAULT NULL,
+  pg_midtrans_env         VARCHAR(12)  NOT NULL DEFAULT 'production',  -- production|sandbox (endpoint Midtrans; dashboard baru tak pakai awalan SB-)
   pg_flip_secret_key      TEXT,
   pg_flip_public_key      VARCHAR(255) DEFAULT NULL,
   -- jadwal tagihan

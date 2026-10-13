@@ -4,6 +4,62 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-13 — v2.3.1 — Payment gateway: lingkungan Midtrans jadi pilihan eksplisit (kunci sandbox tak lagi salah kirim ke production)
+
+**Gejala user**
+
+"ya setup sandbox sekarang" — kunci Midtrans tenant sudah tersimpan dan bentuknya benar,
+tetapi setiap kali pelanggan (atau tombol 🧪 Uji kunci) menyentuh gateway, Midtrans membalas
+`401 Access denied due to unauthorized transaction`. Tenant tersebut sebenarnya memakai
+akun SANDBOX.
+
+**Apa yang sebenarnya terjadi**
+
+Aplikasi memilih endpoint Midtrans HANYA dari awalan server key: `SB-` →
+`app.sandbox.midtrans.com`, selain itu → `app.midtrans.com` (production). Dashboard Midtrans
+model baru (Settings → Access Keys) menampilkan kunci sandbox TANPA awalan `SB-` — bentuknya
+persis `Mid-server-…` seperti kunci production. Akibatnya kunci sandbox dikira production,
+dikirim ke `app.midtrans.com`, dan selalu berbalas `401` — gejala yang mudah salah dibaca
+sebagai "akun production belum diizinkan transaksi", padahal kuncinya sandbox dan endpoint-nya
+yang keliru.
+
+**Diubah**
+
+* Kolom baru `data_server.pg_midtrans_env` (`VARCHAR(12)`, default `'production'`) — environment
+  dipilih eksplisit per tenant. Default dipertahankan `production` supaya ISP yang sudah live
+  tidak berubah perilaku. Migrasi: `scripts/migrate-v21.js` (idempoten, cek `information_schema`).
+* `src/routes/tagihan.js`
+  * `midtransSandbox(serverKey, env)` + `basisMidtrans(serverKey, env)`: environment efektif =
+    pilihan ISP **atau** awalan `SB-` pada kunci (awalan tetap dihormati sebagai kompatibilitas
+    mundur untuk kunci lama). Dipakai oleh rute checkout Snap (`/gateway/midtrans/snap`) dan
+    uji kunci (`/gateway/midtrans/tes`), bukan lagi hanya oleh awalan.
+  * GET `/api/gateway` mengembalikan `midtrans_env` (terbaca) dan menghitung `midtrans_mode`
+    lewat environment efektif; PUT `/api/gateway` menerima & menyimpan `pg_midtrans_env`.
+  * `bentukKunciMidtrans()` tidak lagi menebak "live/sandbox" dari awalan (dulu sumber salah
+    tuduh) — label kini murni bentuk kunci (jenis + panjang + pola); environment ditampilkan
+    terpisah lewat badge `midtrans_mode`.
+* `sql/schema.sql` — kolom `pg_midtrans_env` ditambahkan ke skema baru.
+* Panel (`public/panel/index.html`, `panel.js`) — dropdown **Lingkungan Midtrans**
+  (Production/Sandbox) di form Payment gateway, diisi dari `midtrans_env` dan ikut dikirim saat
+  Simpan; status gateway tetap menandai badge SANDBOX. Cache-buster `panel.js?v=20261013b`.
+
+**Bukti (jalur asli, bukan sintetis)**
+
+Diuji lewat HTTP nyata di tenant pemakai sandbox (login → ganti tenant → panel endpoint):
+* GET `/api/gateway`: `midtrans_mode:"sandbox"`, `midtrans_env:"sandbox"`, `midtrans_siap:true`.
+* POST `/api/gateway/midtrans/tes` (🧪 Uji kunci): **`http:201`, `ok:true`, `lingkungan:"sandbox"`,
+  "Kunci diterima Midtrans — Snap siap dipakai pelanggan."** Kunci yang SAMA mengembalikan 401
+  sebelum kolom environment diisi (tercatat berurutan di `audit_log`: `uji_midtrans HTTP 401 …`
+  lalu `uji_midtrans HTTP 201 …`). Pipeline webhook→lunas sudah terbukti end-to-end di v2.3.0.
+
+**Masih di sisi pengguna (bukan kode)**
+
+Agar tagihan sandbox berubah LUNAS otomatis, URL notifikasi
+`https://bill.ivvinet.my.id/api/webhook/midtrans` wajib ditempel juga di dashboard **sandbox**
+(Settings → Notifications), sama seperti yang sudah dilakukan di dashboard production.
+
+---
+
 ## 2026-10-13 — v2.3.0 — Payment gateway (Midtrans) benar-benar bisa melunasi: gerbang IP dibuka, order id disimpan, panel punya status kunci
 
 **Gejala user**

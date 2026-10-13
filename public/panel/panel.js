@@ -1863,6 +1863,7 @@ async function loadSetting() {
     document.getElementById('gAktif').value = gw.pg_active || 'manual';
     document.getElementById('gMs').value = '';
     document.getElementById('gMc').value = gw.midtrans_client_key || '';
+    document.getElementById('gMidEnv').value = gw.midtrans_env === 'sandbox' ? 'sandbox' : 'production';
     document.getElementById('gFs').value = '';
     document.getElementById('gFp').value = gw.flip_public || '';
     document.getElementById('gWaUrl').value = gw.wa_gateway_url || '';
@@ -2003,6 +2004,7 @@ async function simpanGateway() {
       pg_active: document.getElementById('gAktif').value,
       midtrans_server_key: document.getElementById('gMs').value,
       midtrans_client_key: document.getElementById('gMc').value,
+      pg_midtrans_env: document.getElementById('gMidEnv').value,
       flip_secret: document.getElementById('gFs').value,
       flip_public: document.getElementById('gFp').value,
       wa_gateway_url: document.getElementById('gWaUrl').value,
