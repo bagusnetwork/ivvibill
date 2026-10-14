@@ -439,7 +439,7 @@ function classify(rx, { rx_min_dbm, att_max_db }, oltTx) {
 async function pollOlt(dev, amb) {
   const driver = BRANDS[String(dev.brand || '').toLowerCase()];
   if (!driver) throw new Error(`Brand OLT tidak didukung: ${dev.brand}`);
-  // Kolom alamat sering terisi "103.242.105.199:2423" sementara field port juga
+  // Kolom alamat sering terisi "<IP-publik-OLT>:2423" sementara field port juga
   // terisi; gabung keduanya menghasilkan URL cacat (Failed to parse URL). Pisahkan
   // host dan port, dan pakai port bawaan alamat hanya bila field port kosong.
   let host = String(dev.alamat || '').trim().replace(/^https?:\/\//, '');
