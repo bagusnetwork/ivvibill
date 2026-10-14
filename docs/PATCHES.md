@@ -33,7 +33,7 @@ mungkin terisi, sekuat apa pun pollingnya.
   dulu murah karena `redaman_log` selalu kosong; sejak polling berjalan tabel itu
   bertambah ± 28 ribu baris/hari per OLT dan indeksnya hanya
   `(id_perangkat, cek_at)`, sehingga setiap baris daftar memindai seluruh log
-  perangkat itu. Sekarang nilunya dibaca dari baris ONU-nya sendiri.
+  perangkat itu. Sekarang nilainya dibaca dari baris ONU-nya sendiri.
 * `public/panel/panel.js` + `public/teknisi/teknisi.js` — sel Redaman jadi badge
   berwarna menurut `status_redaman` (hijau `ok` / kuning `warning` / merah `kritis`),
   sama seperti kolom Redaman di daftar Pelanggan. `panel.js?v=20261015a`,
@@ -43,9 +43,13 @@ mungkin terisi, sekuat apa pun pollingnya.
 
 * Migrasi: `Backfill redaman: 99 baris master_onu terisi dari redaman_log`,
   `12 baris masih tanpa redaman` (memang tidak punya pembacaan RX).
-* `GET /api/olt/onu?perangkat_id=4` → 99 baris, **87 di antaranya punya `redaman_db`**,
-  komposisi status `{kritis:52, warning:28, ok:19}` — sama persis dengan yang
-  dikembalikan poll.
+* `GET /api/olt/onu` (ds5, setelah `POST /api/auth/server {"id":5}`) → 99 baris,
+  **87 di antaranya punya `redaman_db`**. Komposisi status untuk 99 baris itu
+  `{kritis:52, warning:28, ok:19}` — sama persis dengan yang dikembalikan poll;
+  16 warning berredaman (25,38–27,82 dB) dan 12 warning tanpa RX sama sekali
+  (11 di antaranya `status_online=0`), sehingga selnya tetap `-`.
+* Poll ulang waktu itu (00:35 WIB) mengonfirmasi angka di atas tidak bergeser dan
+  `pons` membaca TX modul 7,4997 / 9,5624 dBm.
 * Poll manual sesudah deploy (`POST /api/olt/poll/1`, jalur tulis dengan kolom baru):
   99 dibaca / 99 tersimpan, `gagal: []`, `master_onu.updated_at` bergerak.
 * `GET /api/pelanggan?limit=200` (ds5) → 200, 79 baris, **62 baris berisi redaman**;
