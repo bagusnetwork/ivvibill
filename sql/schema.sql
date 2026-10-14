@@ -384,6 +384,12 @@ CREATE TABLE IF NOT EXISTS master_onu (
   nama_onu       VARCHAR(120) DEFAULT NULL,        -- HSGQ: name/description/onu_name (LOID)
   rx_dbm         DECIMAL(6,2) DEFAULT NULL,
   tx_dbm         DECIMAL(6,2) DEFAULT NULL,
+  -- pembacaan TERAKHIR, bukan riwayat. redaman_db = daya TX modul port − rx ONU.
+  -- Kolom ini yang dibaca daftar ONU di panel & aplikasi teknisi; selama hanya
+  -- redaman_log yang berisi, kolom Redaman di layar selalu '-' meski polling
+  -- sukses (migrasi v23 menambahkan kolomnya + backfill dari log).
+  redaman_db     DECIMAL(6,2) DEFAULT NULL,
+  status_redaman VARCHAR(10) DEFAULT NULL,        -- ok|warning|kritis
   status_online  TINYINT NOT NULL DEFAULT 0,
   id_pelanggan   INT DEFAULT NULL,
   match_by       VARCHAR(20) DEFAULT NULL,       -- mac|loid|akun|nama|manual

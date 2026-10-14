@@ -1316,11 +1316,14 @@ async function loadOlt() {
           <button class="btn sm" onclick="pollOlt(${x.id})">Poll</button></td></tr>`).join('')
       || '<tr><td colspan="8" class="empty">Belum ada OLT — daftarkan di menu Perangkat</td></tr>';
 
+    const lencana = (s) => ({ ok: 'ok', warning: 'warn', kritis: 'bad' }[s] || 'mute');
     document.getElementById('tbOnu').innerHTML = (o.data || []).slice(0, 80).map(x => `
       <tr><td>${esc(x.nama_olt)}</td><td>${esc(x.pon || '-')}</td><td>${esc(x.sn || '-')}</td>
         <td>${esc(x.nama_onu || x.nama_pelanggan || '-')}</td>
         <td class="t-num">${x.rx_dbm != null ? esc(x.rx_dbm) : '-'}</td>
-        <td class="t-num">${x.redaman_db != null ? esc(x.redaman_db) + ' dB' : '-'}</td>
+        <td>${x.redaman_db != null
+          ? `<span class="badge ${lencana(x.status_redaman)}">${esc(x.redaman_db)} dB</span>`
+          : '<span class="badge mute">-</span>'}</td>
         <td><span class="badge ${x.status_online ? 'ok' : 'mute'}">${x.status_online ? 'online' : 'off'}</span></td></tr>`).join('')
       || '<tr><td colspan="7" class="empty">Belum ada ONU</td></tr>';
   } catch (e) { toast(e.message, true); }

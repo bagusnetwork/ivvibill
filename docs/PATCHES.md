@@ -4,6 +4,63 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-15 — v2.4.3 — Kolom Redaman pada daftar ONU akhirnya terisi (migrasi v23)
+
+**Gejala (lanjutan v2.4.2, dilaporkan sendiri saat verifikasi)**
+
+Setelah polling benar-benar membaca 99 ONU, daftar "Redaman OLT" di panel **tetap**
+menampilkan `-` di kolom Redaman untuk semua baris. Ini bagian keluhan user yang
+belum selesai: "list ONU dan redaman belum terbaca".
+
+**Akar masalah**
+
+`public/panel/panel.js` (menu OLT) dan `public/teknisi/teknisi.js` membaca
+`x.redaman_db` dari `GET /api/olt/onu`, sedangkan rute itu hanya
+`SELECT o.*` dari **`master_onu` — yang tidak pernah punya kolom `redaman_db`**.
+Nilai redaman hanya hidup di `redaman_log`. Jadi kolom itu secara struktural tidak
+mungkin terisi, sekuat apa pun pollingnya.
+
+**Diubah**
+
+* `scripts/migrate-v23.js` (idempoten, `--dry-run` tersedia) menambah dua kolom di
+  `master_onu`: `redaman_db DECIMAL(6,2)` dan `status_redaman VARCHAR(10)`
+  (`ok|warning|kritis`), lalu **backfill dari pembacaan terakhir `redaman_log`**
+  per `(id_perangkat, sn)` — hanya untuk baris yang masih NULL.
+* `src/services/onu.js` — `simpan()` ikut menulis kedua kolom pada upsert, sehingga
+  `master_onu` = keadaan terakhir, `redaman_log` = riwayat.
+* `src/routes/pelanggan.js` (2 tempat: daftar + detail) — redaman tidak lagi diambil
+  lewat `LEFT JOIN redaman_log rd ON rd.id = (SELECT MAX(r2.id) …)`. Subquery itu
+  dulu murah karena `redaman_log` selalu kosong; sejak polling berjalan tabel itu
+  bertambah ± 28 ribu baris/hari per OLT dan indeksnya hanya
+  `(id_perangkat, cek_at)`, sehingga setiap baris daftar memindai seluruh log
+  perangkat itu. Sekarang nilunya dibaca dari baris ONU-nya sendiri.
+* `public/panel/panel.js` + `public/teknisi/teknisi.js` — sel Redaman jadi badge
+  berwarna menurut `status_redaman` (hijau `ok` / kuning `warning` / merah `kritis`),
+  sama seperti kolom Redaman di daftar Pelanggan. `panel.js?v=20261015a`,
+  `teknisi.js?v=20261015a`.
+
+**Verifikasi (2026-10-15, jalur panel asli)**
+
+* Migrasi: `Backfill redaman: 99 baris master_onu terisi dari redaman_log`,
+  `12 baris masih tanpa redaman` (memang tidak punya pembacaan RX).
+* `GET /api/olt/onu?perangkat_id=4` → 99 baris, **87 di antaranya punya `redaman_db`**,
+  komposisi status `{kritis:52, warning:28, ok:19}` — sama persis dengan yang
+  dikembalikan poll.
+* Poll manual sesudah deploy (`POST /api/olt/poll/1`, jalur tulis dengan kolom baru):
+  99 dibaca / 99 tersimpan, `gagal: []`, `master_onu.updated_at` bergerak.
+* `GET /api/pelanggan?limit=200` (ds5) → 200, 79 baris, **62 baris berisi redaman**;
+  detail `GET /api/pelanggan/210` → `rx=-12.49, redaman=19.99, status=ok, sn=P3O20`;
+  pelanggan tanpa ONU (`#211`) → `null`, bukan error.
+* Sekat tenant tetap berlaku: setelah kembali ke ds=1, `GET /api/olt/onu` 0 baris dan
+  `GET /api/pelanggan` total 0 (tenant 1 memang tanpa pelanggan).
+* Berkas yang tersaji sudah versi baru (`/panel/` menunjuk `panel.js?v=20261015a` dan
+  isi `panel/panel.js` memuat `lencana(x.status_redaman)`) — URL query baru ini juga
+  menghindarkan berkas dari `proxy_cache` aaPanel yang melayani URI lama.
+
+Cadangan sebelum pasang: `/root/bak-v242b-20261015-002714/` (7 berkas).
+
+---
+
 ## 2026-10-15 — v2.4.2 — Monitoring OLT HSGQ: daftar ONU & redaman benar-benar terbaca
 
 **Gejala user**
@@ -88,6 +145,10 @@ alur panel sungguhan lewat `https://bill.ivvinet.my.id` dengan akun `adminmaster
 
 Cadangan sebelum pasang: `/root/bak-v242-20261014-235744/`. Keempat berkas webroot identik md5
 dengan master lokal dan `systemctl is-active ivvibill` = `active`.
+
+> **Masih ada satu lapis lagi:** sesudah polling hidup, kolom Redaman di layar tetap `-`
+> karena `master_onu` tidak punya kolom yang dibaca panel. Itu dikerjakan terpisah di
+> **v2.4.3** (entri di atas).
 
 **Catatan untuk pemilik tenant (tidak diubah tanpa izin)**
 

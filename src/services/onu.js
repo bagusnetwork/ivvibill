@@ -64,11 +64,14 @@ async function simpan(idPerangkat, onus) {
     else if (o.status_redaman === 'warning') warning++;
     if (!o.sn) continue;
     await db.run(
-      `INSERT INTO master_onu (id_perangkat, pon, sn, mac, nama_onu, rx_dbm, tx_dbm, status_online)
-       VALUES (?,?,?,?,?,?,?,?)
+      `INSERT INTO master_onu (id_perangkat, pon, sn, mac, nama_onu, rx_dbm, tx_dbm,
+                               redaman_db, status_redaman, status_online)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
        ON DUPLICATE KEY UPDATE pon=VALUES(pon), mac=VALUES(mac), nama_onu=VALUES(nama_onu),
-         rx_dbm=VALUES(rx_dbm), tx_dbm=VALUES(tx_dbm), status_online=VALUES(status_online)`,
-      [Number(idPerangkat), o.pon, o.sn, o.mac || null, o.nama || null, o.rx, o.tx, o.online ? 1 : 0]
+         rx_dbm=VALUES(rx_dbm), tx_dbm=VALUES(tx_dbm), redaman_db=VALUES(redaman_db),
+         status_redaman=VALUES(status_redaman), status_online=VALUES(status_online)`,
+      [Number(idPerangkat), o.pon, o.sn, o.mac || null, o.nama || null, o.rx, o.tx,
+       o.redaman === undefined ? null : o.redaman, o.status_redaman || null, o.online ? 1 : 0]
     );
     await db.insert(
       'INSERT INTO redaman_log (id_perangkat, sn, pon, rx_dbm, redaman_db, status) VALUES (?,?,?,?,?,?)',

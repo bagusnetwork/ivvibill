@@ -334,7 +334,7 @@ router.get('/pelanggan', async (req, res, next) => {
          pt.nama AS profil_tagihan, pt.tanggal_isolir AS profil_tanggal_isolir,
          mt.nama AS nama_topologi, mt.titik_koordinat, md.nama AS nama_desa,
          o.mac AS mac_onu, o.sn AS sn_onu,
-         rd.rx_dbm, rd.redaman_db, rd.status AS status_redaman
+         o.rx_dbm, o.redaman_db, o.status_redaman
        FROM pelanggan p
        LEFT JOIN paket pk ON pk.id = p.id_paket
        LEFT JOIN profil_tagihan pt ON pt.id = p.id_profil_tagihan
@@ -343,8 +343,6 @@ router.get('/pelanggan', async (req, res, next) => {
        LEFT JOIN master_topologi mt ON mt.id = p.id_master_topologi
        LEFT JOIN master_desa md ON md.id = p.id_master_desa
        LEFT JOIN master_onu o ON o.id = (SELECT MAX(o2.id) FROM master_onu o2 WHERE o2.id_pelanggan = p.id)
-       LEFT JOIN redaman_log rd ON rd.id = (SELECT MAX(r2.id) FROM redaman_log r2
-         WHERE r2.id_perangkat = o.id_perangkat AND (o.sn IS NULL OR r2.sn = o.sn))
        WHERE ${f.where}
        ORDER BY p.id DESC LIMIT ? OFFSET ?`,
       [...f.params, limit, offset]
@@ -890,7 +888,7 @@ router.get('/pelanggan/:id', async (req, res, next) => {
          pt.nama AS profil_tagihan, pt.tanggal_isolir AS profil_tanggal_isolir,
          mt.nama AS nama_topologi, md.nama AS nama_desa,
          o.mac AS mac_onu, o.sn AS sn_onu,
-         rd.rx_dbm, rd.redaman_db, rd.status AS status_redaman
+         o.rx_dbm, o.redaman_db, o.status_redaman
        FROM pelanggan p
        LEFT JOIN paket pk ON pk.id = p.id_paket
        LEFT JOIN profil_tagihan pt ON pt.id = p.id_profil_tagihan
@@ -899,8 +897,6 @@ router.get('/pelanggan/:id', async (req, res, next) => {
        LEFT JOIN master_topologi mt ON mt.id = p.id_master_topologi
        LEFT JOIN master_desa md ON md.id = p.id_master_desa
        LEFT JOIN master_onu o ON o.id = (SELECT MAX(o2.id) FROM master_onu o2 WHERE o2.id_pelanggan = p.id)
-       LEFT JOIN redaman_log rd ON rd.id = (SELECT MAX(r2.id) FROM redaman_log r2
-         WHERE r2.id_perangkat = o.id_perangkat AND (o.sn IS NULL OR r2.sn = o.sn))
        WHERE p.id = ?${ts.sql}`, [id, ...ts.params]);
     if (!p) return res.status(404).json({ error: 'Pelanggan tidak ada' });
     if (req.user.role === 'pelanggan' && Number(p.id) !== Number(req.user.id_ref)) {
