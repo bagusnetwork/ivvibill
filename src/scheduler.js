@@ -28,6 +28,7 @@ const monitor = require('./services/monitoring');
 const olt = require('./services/olt');
 const onu = require('./services/onu');
 const cfgData = require('./services/configData');
+const crypto = require('./util/crypto');
 const { waktuSiklus } = require('./util/tanggal');
 
 /**
@@ -89,7 +90,8 @@ async function tugasOlt() {
   running.olt = true;
   try {
     const due = await db.q(
-      `SELECT d.*, s.olt_tx_dbm, s.rx_min_dbm, s.att_max_db, s.interval_menit, s.last_check_at, s.id AS sid
+      `SELECT d.*, s.olt_tx_dbm, s.rx_min_dbm, s.att_max_db, s.interval_menit,
+              s.last_check_at, s.last_check_msg, s.id AS sid
        FROM setting_olt s JOIN master_perangkat d ON d.id = s.id_perangkat
        WHERE s.status = 'aktif' AND d.status = 'aktif'`
     );
@@ -97,16 +99,30 @@ async function tugasOlt() {
     for (const dev of due) {
       const interval = Number(dev.interval_menit || 5) * 60000;
       const last = dev.last_check_at ? new Date(dev.last_check_at).getTime() : 0;
-      if (now - last < interval) continue;
+      // "Password check failed" dari perangkat = kredensialnya yang salah, bukan
+      // jaringannya. Banyak firmware mengunci akun admin setelah sejumlah percobaan
+      // gagal, jadi mundur minimal 15 menit daripada menembak tiap interval dan
+      // mengunci akun yang justru dibutuhkan teknisi.
+      const ditolak = /password|login ditolak|4031|4034|unauth|not login/i
+        .test(String(dev.last_check_msg || ''));
+      if (now - last < (ditolak ? Math.max(interval, 15 * 60000) : interval)) continue;
       try {
-        const hasil = await olt.pollOlt(dev, dev);
+        // Kolom di DB adalah password_enc (AES-GCM) sedangkan driver membaca
+        // dev.password. Dulu baris hasil query dikirim apa adanya, sehingga SETIAP
+        // polling otomatis login dengan md5("user:undefined") dan selalu ditolak
+        // perangkat — list ONU dan redaman tidak pernah terisi.
+        const hasil = await olt.pollOlt(
+          { ...dev, password: crypto.decrypt(dev.password_enc) }, dev);
         const s = await onu.simpan(dev.id, hasil.onus);
+        const pesan = s.tersimpan
+          ? `ONU:${s.tersimpan} kritis:${s.kritis} warning:${s.warning}`
+          : `Nol ONU tersimpan${(hasil.gagal || []).length ? ' — ' + hasil.gagal.join('; ') : ''}`;
         await db.run(
           `UPDATE setting_olt SET last_check_at = NOW(), last_check_msg = ? WHERE id = ?`,
-          [`ONU:${hasil.onus.length} kritis:${s.kritis} warning:${s.warning}`, dev.sid]
+          [pesan, dev.sid]
         );
         await db.run(`UPDATE master_perangkat SET last_check = NOW(), last_msg = ? WHERE id = ?`,
-          [`OK ${hasil.onus.length} ONU`, dev.id]);
+          [`OK ${s.tersimpan} ONU`, dev.id]);
         // redaman baru berarti baris ONU baru; pengikatan ke pelanggan mengikuti
         const c = await onu.cocokkan({ idPerangkat: dev.id });
         if (c.berubah) log(`Cocok ONU ${dev.nama}:`, JSON.stringify(c));

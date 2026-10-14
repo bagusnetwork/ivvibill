@@ -4,6 +4,106 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-15 — v2.4.2 — Monitoring OLT HSGQ: daftar ONU & redaman benar-benar terbaca
+
+**Gejala user**
+
+"Saya sudah terapkan perangkat OLT HSGQ id dataserver pasnet apakah kamu bisa cek ada
+kejanggalan disana list ONU dan redaman belum terbaca" — perangkat `#4 HSGQ-PASNETSGN`
+(tenant `PASNET-SGN`, ds=5, alamat OLT disamarkan di sini) sudah aktif di menu Perangkat, tetapi
+daftar ONU kosong dan tidak ada satu pun nilai redaman.
+
+**Akar masalah (empat, semuanya nyata)**
+
+1. **Scheduler tidak pernah bisa login.** `tugasOlt()` mengirim *baris database apa adanya*
+   ke `olt.pollOlt()`, sementara sandi tersimpan di kolom `password_enc` (AES-256-GCM).
+   Field `dev.password` ketika itu `undefined` → driver HSGQ mengirim `md5("root:undefined")`
+   dan perangkat menjawab `{"code":4031,"message":"Password check failed"}`. Rute
+   (`/perangkat/:id/test`, `/olt/poll/:id`) sudah mendekripsi — hanya jalur otomatis yang salah.
+   Karena itu `last_check_msg` berisi "Login OLT ditolak" sejak hari pertama.
+2. **Token sesi tidak pernah dikirim ke request data.** `src/util/http.js` menerima opsi
+   `token` tetapi tidak pernah memakainya, jadi walaupun login berhasil, seluruh GET
+   (`/board?info=pon`, `/onu_allow_list`, `/ponmgmt`) datang tanpa kredensial dan
+   membalas `not login`. Semua driver brand kena, bukan hanya HSGQ.
+3. **Pemetaan respons firmware tidak cocok.** Firmware ini **tidak mengirim serial number**
+   pada `onu_allow_list?form=onucfg`, sedangkan `onu.simpan()` melewati baris tanpa `sn`
+   — akibatnya 99 ONU yang terbaca menjadi 0 baris tersimpan. Daya optik juga terpisah dari
+   halaman identitas, dan kolomnya bervariasi (`receive_power`, "RX Power", `&nbsp;`, `-inf`,
+   koma desimal).
+4. **Klasifikasi redaman selalu salah.** `classify()` mendekonstruksi `{ rx_min, att_max }`
+   padahal `setting_olt` memakai `rx_min_dbm` / `att_max_db` → semua perbandingan `NaN` dan
+   setiap ONU dilaporkan `ok`. Selain itu redaman dihitung dari asumsi tetap 4 dBm,
+   sedangkan modul SFP perangkat ini benar-benar mengirim **7,50 / 9,58 dBm** → galat ±3,5 dB.
+
+**Diubah**
+
+* `src/util/http.js` — `terapkanToken()` memasang header dari nilai `token`: `X-Token` (default,
+  sesuai WebFig HSGQ), `BEARER:…` → `Authorization`, `COOKIE:…` → `Cookie`; token dibersihkan
+  dari `\r\n`. Opsi `token` kini benar-benar dipakai oleh `request()`.
+* `src/scheduler.js` — sandi didekripsi sebelum poll
+  (`{ ...dev, password: crypto.decrypt(dev.password_enc) }`); kegagalan autentikasi
+  (`password|login ditolak|4031|4034|unauth|not login`) diberi **backoff ≥ 15 menit** agar
+  akun admin OLT tidak kena kunci *rate-limit* (`code 4032` — ini benar-benar terjadi selama
+  bug no. 1 aktif, perangkat mengunci login berulang); poll yang mengembalikan nol ONU kini
+  menulis `Nol ONU tersimpan — <sebab>` alih-alih melaporkan keberhasilan hampa.
+* `src/services/olt/index.js`
+  * Normalisator bersama: `KEYS` (daftar nama kolom kandidat per field), `normalNama()`
+    (`"RX Power"` ≡ `rx_power`), `pick()`, `rowsOf()` (membuka pembungkus `data`/`list`,
+    bentuk object-of-rows, dan tabel string-koma **hanya bila baris header dikenal** — baris
+    tanpa header dibuang supaya tidak menghasilkan field kosong), `parseDbm()` (`&nbsp;`,
+    `-inf`, koma desimal), `onlineOf()` (`Initial`/`Offline` → 0), `cekKode()` yang mengubah
+    respons non-JSON menjadi pesan "periksa alamat/port/HTTPS perangkat" dan kode ≠ 1 menjadi
+    "kode N — message".
+  * Adapter HSGQ: SN fallback `P<port>O<onu_id>` (sama dengan driver produksi
+    `hsgq_olt.class.php`) dengan serial asli tetap disimpan di `sn_asli`; RX diambil dari
+    halaman optik hanya bila tidak ada satu pun RX di halaman identitas.
+  * `pons()` membaca daya TX modul dari `/ponmgmt?form=optical_poninfo` dan memakainya sebagai
+    acuan redaman per port (`txAcuan = p.tx ?? amb.olt_tx_dbm`).
+  * `pollOlt()`: alamat yang diketik `IP:port` dipecah benar (sebelumnya menghasilkan URL
+    `http://<ip>:2423:2424/…`), melempar error bila port PON tidak terbaca,
+    mengumpulkan kegagalan per port di `hasil.gagal` (maksimal 3) dan tetap mengembalikan ONU dari
+    port yang hidup.
+  * `classify(rx, { rx_min_dbm, att_max_db }, oltTx)` — nama kolom dibetulkan; ini juga
+    menghilangkan `ReferenceError: rx_min is not defined` yang muncul di jalur hasil perubahan
+    sebagian.
+* `src/routes/monitoring.js` — `POST /api/olt/poll/:id` menyimpan dan mengembalikan `gagal`,
+  sehingga panel melihat *sebabnya*, bukan sekadar angka nol.
+
+**Verifikasi (2026-10-15, jalur asli)**
+
+Uji replay payload nyata perangkat (harness lokal) lebih dulu, lalu perangkat hidup, lalu
+alur panel sungguhan lewat `https://bill.ivvinet.my.id` dengan akun `adminmaster`:
+
+* `POST /api/auth/server {"id":5}` → `ds:5 PASNET-SGN`; `GET /api/olt/setting` →
+  `sid=1 perangkat=4 HSGQ-PASNETSGN`.
+* `POST /api/olt/poll/1` → `pons: [{pon:1,online:29,tx:7.4997},{pon:2,online:20,tx:9.5807},
+  {pon:3,online:22,tx:7.4997},{pon:4,online:17,tx:7.4997}]`, **99 ONU dibaca, 87 di antaranya
+  punya RX**, `tersimpan {tersimpan:99,kritis:52,warning:28}`, `gagal: []`.
+* Database: `master_onu` 99 baris (87 `rx_dbm` terisi, 88 `status_online=1`), `redaman_log`
+  terisi per poll dengan `redaman_db` 11,82–36,71 dB.
+* `GET /api/olt/onu?perangkat_id=4` → 99 baris; `GET /api/olt/redaman` → baris redaman
+  berstatus; sebagian ONU sudah terpaut ke pelanggan (`nama_pelanggan` terisi lewat MAC).
+* `setting_olt.last_check_msg` → `manual: 99 ONU tersimpan cocok:0` (sebelumnya
+  `Login OLT ditolak: {"code":4031…}`).
+
+Cadangan sebelum pasang: `/root/bak-v242-20261014-235744/`. Keempat berkas webroot identik md5
+dengan master lokal dan `systemctl is-active ivvibill` = `active`.
+
+**Catatan untuk pemilik tenant (tidak diubah tanpa izin)**
+
+* Ambang PASNET masih `olt_tx_dbm=4, rx_min_dbm=-27, att_max_db=28`. Karena modul sebenarnya
+  kirim 7,5–9,6 dBm, 52 dari 87 ONU yang punya pembacaan RX masuk `kritis` (19 `ok`) —
+  ambang ini yang perlu ditinjau, bukan alat ukurnya. Catatan: sejak v2.4.2 acuan redaman
+  adalah daya TX modul yang terukur per port, sehingga `olt_tx_dbm` di menu Perangkat hanya
+  dipakai sebagai cadangan bila firmware tidak mengirimnya.
+* 28 baris `warning` per poll terdiri dari 12 ONU yang tidak mengirim pembacaan RX sama sekali
+  (11 di antaranya `status_online=0`) dan 16 ONU dengan redaman 25,38–27,82 dB — pita warning
+  3 dB di bawah `att_max_db=28`.
+* `redaman_log` tumbuh tanpa retensi (± 28,5 ribu baris/hari untuk satu OLT interval 5 menit);
+  belum ada tugas pembersih untuk tabel log mana pun di proyek ini.
+
+---
+
 ## 2026-10-13 — v2.4.1 — Halaman unduhan APK dihapus (berkas + rute + tautan)
 
 **Gejala user**

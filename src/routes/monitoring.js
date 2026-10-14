@@ -308,9 +308,10 @@ router.post('/olt/poll/:id', requirePJ(), requireMenu('perangkat', 'poll'), asyn
     // simpan seperti polling scheduler: tombol manual dulu hanya menampilkan
     const disimpan = await onu.simpan(d.id, hasil.onus);
     const cocok = await onu.cocokkan({ idPerangkat: d.id });
+    const gagal = hasil.gagal || [];
     await db.run('UPDATE setting_olt SET last_check_at=NOW(), last_check_msg=? WHERE id=?',
-      [`manual: ${hasil.onus.length} ONU tersimpan:${disimpan.tersimpan} cocok:${cocok.berubah}`, id]);
-    res.json({ ok: true, pons: hasil.pons, onus: hasil.onus, disimpan, cocok });
+      [`manual: ${disimpan.tersimpan} ONU tersimpan cocok:${cocok.berubah}${gagal.length ? ' — ' + gagal.join('; ').slice(0, 160) : ''}`, id]);
+    res.json({ ok: true, pons: hasil.pons, onus: hasil.onus, disimpan, cocok, gagal });
   } catch (e) { next(e); }
 });
 
