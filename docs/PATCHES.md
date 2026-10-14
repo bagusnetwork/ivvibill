@@ -4,6 +4,94 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-15 — v2.5.0 — Tab Pelanggan Unmanage: status/IP/MAC/redaman terbaca + Remote ONU + Input Billing
+
+**Gejala (laporan user)**
+
+"cek menu pelanggan unmanage ada bug status ip, mac, redaman tidak terbaca serta
+Aksi tidak ada tombol ONU Remote lalu tambahkan juga Tombol Input Billing".
+Di panel, tabel sesi tak terkelola hanya menampilkan nama akun + uptime dengan
+kolom IP/MAC kosong, tanpa status, tanpa redaman, dan kolom Aksinya kosong
+melulu.
+
+**Akar masalah**
+
+Satu baris penyebab hampir semua kolom kosong: `RouterOS.pppoeActive()` memakai
+`=.proplist=.id,name,service,user,address,uptime,caller-id`. Properti **`user`
+tidak ada di `/ppp/active`** — tidak di RouterOS 6.49.17 maupun 7.19.2 (yang ada
+`name`). Router API memotong balasan tepat pada posisi nama properti yang tidak
+dikenal, jadi `address`, `uptime`, dan `caller-id` **tidak pernah dikirim** oleh
+router. Client menatap field yang memang tidak datang.
+
+Selanjutnya: (1) `sesiTakTerkenal()` hanya membaca sesi hidup, sehingga akun yang
+baru putus tak muncul sama sekali; (2) redaman/ONU tidak pernah dicari untuk akun
+unmanage karena pencocokan ONU hanya dilakukan di jalur pelanggan terdaftar;
+(3) tombol Remote ONU di panel teknisi dikirim dengan `ip` dari baris tabel — dan
+karena `ip` kosong, rute `/remote-onu` langsung menolak.
+
+**Diubah**
+
+* `src/services/routeros.js` — `proplist` jadi
+  `=.proplist=.id,name,service,address,uptime,caller-id,comment`; `name` juga
+  dipetakan ke `user` agar pemakai lama tidak berubah. Komentar di kode mencatat
+  perilaku pemotongan balasan ini supaya tidak diulang.
+* `src/services/monitoring.js` — `sinkronMacPelanggan()` ikut dikoreksi
+  (`name,service,caller-id,address,uptime`), dan `sesiTakTerkenal()` ditulis ulang:
+  baris = sesi hidup ∪ snapshot `sesi_router` (15 menit terakhir) sehingga akun
+  yang sedang offline tetap terlihat dengan status `offline`; IP/uptime fallback dari
+  snapshot; MAC untuk sesi offline diambil lewat `macDariSecret()` (profile PPPoE);
+  setiap baris dibawa ke `petaOnuTenant(ds)` + `cariOnuTenant(peta, mac, akun)`
+  sehingga muncul `sn_onu, pon_onu, nama_onu, rx_dbm, redaman_db, status_redaman,
+  onu_online, cocok_onu, perangkat_onu` + `setting_id` untuk tombol aksi.
+* `src/routes/monitoring.js` — `POST /remote-onu` kini menerima `akun` dan
+  `router_id`/`setting_id`; bila IP tidak dikirim/invalid, server resolve sendiri
+  lewat `ipDariAkun()` (live `/ppp/active/print … ?name=<akun>` → fallback
+  `sesi_router` 15 menit) sebelum membuat rule NAT. Pesan error eksplisit bila
+  akun memang tidak sedang tersambung.
+* `src/routes/pelanggan.js` — **`POST /pelanggan/dari-sesi`** (Input Billing):
+  daftarkan akun PPPoE yang belum bertagihan menjadi pelanggan (status `baru`,
+  `catatan` "Didata dari sesi router: <sumber>") lalu — bila `tagih` true —
+  terbitkan tagihan periode berjalan lewat `billing.buatTagihanSatuan()`.
+  Guard duplikat: akun yang sudah menjadi pelanggan ditolak 400 dengan
+  `{sudah_ada:true, id_pelanggan}` dan **tidak** membuat baris kedua.
+  `tanggal_masuk` memakai `billing.waktuSiklus().hari` (tanggal **WIB**), bukan
+  tanggal server UTC. Tidak ada penulisan ke router dan tidak ada antrean WA:
+  aktivasi secret tetap keputusan PJ lewat tombol ⚡ Aktivasi.
+* `public/panel/index.html` + `public/panel/panel.js` (`?v=20261015b`) — header
+  tabel Unmanage jadi `Router · Akun PPPoE · Status · IP · MAC · ONU · Redaman ·
+  Uptime · Aksi`; baris dirender dari `UN_ROWS` agar bisa dibaca balik oleh aksi;
+  kolom Status menampilkan asal sesi (🟢 online sesi router / 🟡 hanya snapshot
+  `sesi_router`), ONU · Redaman menampilkan SN + PON + nama ONU + `rx_dbm` +
+  `redaman_db` dengan badge warna + cara pencocokan; Aksi berisi **Remote ONU** dan
+  **Input Billing**. Modal baru `mInputBilling` = formulasi lengkap (nama, paket,
+  Profile Tagihan, WhatsApp, email, agen, password, profil isolir, alamat, topologi
+  + port ODP, desa, lat/long, bulan tagihan, jumlah, diskon, jatuh tempo,
+  keterangan) dengan akun/IP/MAC/ONU terisi dari baris sesi. `muatOpsi()` ikut
+  mengisi dropdown modal ini.
+
+**Verifikasi (2026-10-15, jalur asli lewat nginx + MariaDB produksi)**
+
+- Tenant 2 (RO-IVVI): 46/46 baris sesi unmanage punya IP **dan** MAC (sebelumnya
+  0/46). Uptime ikut terisi.
+- Tenant 5 (PASNET, baca saja): 15 sesi, 13 MAC terisi, 2 baris berasal dari
+  snapshot (offline), 6 baris terpasang ONU, 5 di antaranya bernilai redaman.
+- Remote ONU diuji di tenant 2: jalur `via: live` berhasil (rule NAT dst-port 88
+  diarahkan ke IP akun), dan jalur penolakan terbukti — akun tanpa sesi aktif
+  dibalas 400 dengan pesan "IP … tidak ditemukan". Rule NAT + `user_remote` /
+  `last_remote` dikembalikan persis seperti semula.
+- Input Billing diuji di tenant 2: pelanggan **#301** + tagihan **#283**
+  `IVV-202610-40562` total **Rp 1.197**, `tanggal_masuk` **2026-10-15** (WIB).
+  Pengiriman kedua dengan akun yang sama ditolak 400 `sudah_ada` tanpa membuat
+  pelanggan kedua. Seluruh baris uji dihapus; jumlah produksi kembali ke
+  **198 pelanggan** dan **172 tagihan** di tenant 2, tenant 5 tetap **79 pelanggan**
+  dan **tidak** ditulis sama sekali (keputusan user: jangan sentuh PASNET).
+- Panel: `panel.js?v=20261015b` tersaji lewat nginx (cache dibersihkan), tab
+  Unmanage dan modal Input Billing dirender benar di browser nyata.
+- Dua baris `audit_log` bertuliskan uji (`input_billing_sesi`) **dibiarkan**
+  sebagai jejak jujur, bukan disapu.
+
+---
+
 ## 2026-10-15 — v2.4.3 — Kolom Redaman pada daftar ONU akhirnya terisi (migrasi v23)
 
 **Gejala (lanjutan v2.4.2, dilaporkan sendiri saat verifikasi)**

@@ -434,25 +434,58 @@ router.post('/pelanggan/:id/remote-onu', requireRole('superadmin', 'master', 'te
 
 /**
  * Remote ONU sesi unmanage (PPPoE aktif yang tidak ada di daftar pelanggan).
- * IP sudah dibawa dari daftar unmanage, jadi tidak perlu resolve apa pun —
- * ini yang membuat gratisinaja bisa remote dari daftar yang sama.
+ * IP biasanya ikut dibawa dari daftar; bila sesi sedang offline atau router
+ * tidak mengirim address, IP-nya dicari dari akun: tanya /ppp/active lalu
+ * laporan push terakhir (15 menit) di sesi_router.
  */
 router.post('/remote-onu', requireRole('superadmin', 'master', 'teknisi'),
   requireMenu('pelanggan', 'ubah'), async (req, res, next) => {
   try {
-    const ip = v.str(req.body && req.body.ip, { max: 45, def: '' });
-    if (!/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(ip)) {
-      return res.status(400).json({ error: 'IP target tidak valid' });
-    }
+    const body = req.body || {};
+    const akun = v.str(body.akun, { max: 60, def: '' }).replace(/[^\w.@:-]/g, '');
+    let ip = v.str(body.ip, { max: 45, def: '' });
     const ts = tenantSql(req, 's.id_data_server');
-    const idRouter = v.num(req.body && req.body.router_id, { int: true, min: 1, def: null });
+    const idRouter = v.num(body.router_id || body.setting_id, { int: true, min: 1, def: null });
     const s = await routerRemote(idRouter, ts);
     if (!s) return res.status(400).json({ error: 'Router MikroTik tidak ditemukan di tenant ini' });
-    const akun = v.str(req.body && req.body.akun, { max: 60, def: '' });
+    let via = ip ? 'unmanage' : null;
+    if (!cekIp(ip)) {
+      const temu = await ipDariAkun(s, akun);
+      if (!temu) {
+        return res.status(400).json({
+          error: `IP ${akun || 'sesi'} tidak ditemukan — akun PPPoE-nya belum/terputus dari `
+            + 'router, jadi web ONU tidak bisa dituju. Nyalakan koneksi perangkat pelanggan lalu ulangi.'
+        });
+      }
+      ip = temu.ip; via = temu.via;
+    }
     const r = await bukaRemote({ req, s, ipUser: ip, label: `unmanage ${akun || ip}` });
-    res.json({ ...r, akun, via: 'unmanage' });
+    res.json({ ...r, akun, via });
   } catch (e) { next(e); }
 });
+
+const POLA_IP = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+function cekIp(v) { return POLA_IP.test(String(v || '')); }
+
+/** IP PPPoE satu akun di router ini: sesi live dulu, lalu laporan push terbaru. */
+async function ipDariAkun(s, akun) {
+  if (!akun) return null;
+  const api = new RouterOS({
+    host: s.alamat_api, port: s.port_api || 8728,
+    user: s.user_api, password: crypto.decrypt(s.password_enc), timeout: 6000
+  });
+  try {
+    const rows = await api.run(['/ppp/active/print', '=.proplist=name,address', `?name=${akun}`]);
+    if (rows[0] && cekIp(rows[0].address)) return { ip: rows[0].address, via: 'live' };
+  } catch (_) { /* router sedang tidak bisa diajak bicara — coba laporan push */ }
+  finally { api.close(); }
+  const snap = await db.one(
+    `SELECT ip FROM sesi_router
+     WHERE id_perangkat = ? AND tipe = 'pppoe' AND akun = ?
+       AND seen_at >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+     ORDER BY seen_at DESC LIMIT 1`, [Number(s.id_perangkat), akun]);
+  return snap && cekIp(snap.ip) ? { ip: snap.ip, via: 'push' } : null;
+}
 
 /** Profile hotspot yang tersedia di router tenant — untuk dropdown form paket. */
 router.get('/hotspot/profil', async (req, res, next) => {

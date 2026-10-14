@@ -6,6 +6,7 @@
 // ============================================================
 const db = require('../db');
 const { RouterOS } = require('./routeros');
+const onu = require('./onu');
 const crypto = require('../util/crypto');
 const cryptoLib = require('crypto');
 const config = require('../config');
@@ -490,41 +491,138 @@ async function sinkronStatus(p, status, idDataServer) {
 /**
  * Sesi PPPoE yang sedang aktif di router tenant tetapi usernya tidak ada di
  * tabel pelanggan — akun internet yang tidak akan pernah tertagih.
+ *
+ * Barisnya dilengkapi data yang dibutuhkan tab Unmanage: MAC (caller-id sesi,
+ * lalu last-caller-id secret untuk yang sedang offline), status online/offline,
+ * IP/uptime cadangan dari laporan push router, dan ONU + redaman hasil
+ * pencocokan master_onu per tenant (MAC dulu, lalu LOID/nama ONU = akun).
  */
 async function sesiTakTerkenal(idDataServer) {
+  const ds = Number(idDataServer);
   const akun = new Set((await db.q(
     `SELECT username_pppoe FROM pelanggan WHERE id_data_server = ?
        AND username_pppoe IS NOT NULL AND username_pppoe != ''`,
-    [Number(idDataServer)]
+    [ds]
   )).map(r => String(r.username_pppoe).toLowerCase()));
+  const peta = await petaOnuTenant(ds);
   const out = [];
   const routerGagal = [];
-  for (const r of await routerTenant(idDataServer)) {
+  const terlihat = new Set();
+
+  for (const r of await routerTenant(ds)) {
     let c;
+    const simpan = (u, x) => {
+      const kunci = `${r.id}|${u.toLowerCase()}`;
+      if (terlihat.has(kunci)) return;
+      terlihat.add(kunci);
+      const temuan = cariOnuTenant(peta, x.mac, u);
+      const o = temuan && temuan.o;
+      out.push({
+        router: x.router, setting_id: r.id, id_perangkat: r.id_perangkat,
+        user: u, address: x.address || '', uptime: x.uptime || '',
+        mac: x.mac || '', comment: x.comment || '',
+        status: x.status, dari: x.dari, seen_at: x.seen_at || null,
+        sn_onu: o ? o.sn : null, pon_onu: o ? o.pon : null,
+        nama_onu: o ? o.nama_onu : null, rx_dbm: o ? o.rx_dbm : null,
+        redaman_db: o ? o.redaman_db : null,
+        status_redaman: o ? o.status_redaman : null,
+        onu_online: o ? Number(o.status_online) : null,
+        cocok_onu: temuan ? temuan.cara : null, perangkat_onu: o ? o.perangkat : null
+      });
+    };
+    const dariSnapshot = async () => {
+      for (const s of await sesiSnapshot(r.id_perangkat)) {
+        const u = String(s.akun || '').trim();
+        if (!u || akun.has(u.toLowerCase())) continue;
+        simpan(u, { router: r.nama, address: s.ip || '', uptime: s.uptime || '',
+          status: 'offline', dari: 'push', seen_at: s.seen_at });
+      }
+    };
     try {
       const { dev } = await perangkatMikrotik(r.id);
       c = klien(dev);
       await sambungkan(c);
+      const macSecret = await macDariSecret(c);
+      // laporan push router: cadangan IP/uptime + sumber baris yang sudah offline
+      const snap = new Map();
+      try {
+        for (const s of await sesiSnapshot(r.id_perangkat)) {
+          const k = String(s.akun || '').trim().toLowerCase();
+          if (k) snap.set(k, s);
+        }
+      } catch (_) { /* push belum terpasang di router ini */ }
       for (const a of await c.pppoeActive()) {
         const u = String(a.user || '').trim();
         if (!u || akun.has(u.toLowerCase())) continue;
-        out.push({ router: dev.nama, user: u, address: a.address || '', uptime: a.uptime || '' });
+        const lk = u.toLowerCase();
+        const known = macSecret.get(lk) || {};
+        const la = snap.get(lk) || {};
+        simpan(u, {
+          router: dev.nama,
+          address: a.address || la.ip || '',
+          uptime: a.uptime || la.uptime || '',
+          mac: normalMac(a.mac) || known.mac || '',
+          comment: a.comment || known.comment || '',
+          status: 'online', dari: a.address ? 'api' : (la.ip ? 'push' : 'api')
+        });
       }
+      // sesi yang masih tercatat di push tapi sudah tidak naik — tetap perlu
+      // didata, hanya saja statusnya offline dan IP-nya bisa basi.
+      try { await dariSnapshot(); } catch (_) { /* push belum terpasang */ }
     } catch (e) {
       routerGagal.push(`${r.nama}: ${String(e.message).slice(0, 120)}`);
       // API router sedang tidak bisa diajak bicara — laporan 40 detik terakhir dari
       // router sendiri masih lebih berguna daripada daftar kosong.
-      try {
-        for (const s of await sesiSnapshot(r.id_perangkat)) {
-          const u = String(s.akun || '').trim();
-          if (!u || akun.has(u.toLowerCase())) continue;
-          out.push({ router: r.nama, user: u, address: s.ip || '', uptime: s.uptime || '',
-            dari: 'snapshot', seen_at: s.seen_at });
-        }
-      } catch (_) { /* snapshot ikut tidak terbaca — biarkan kosong */ }
+      try { await dariSnapshot(); } catch (_) { /* snapshot ikut tidak terbaca */ }
     } finally { if (c) c.close(); }
   }
   return { data: out, router_gagal: routerGagal, tercatat: akun.size };
+}
+
+/** MAC + catatan dari /ppp/secret: menjangkau akun yang sedang offline. */
+async function macDariSecret(c) {
+  const peta = new Map();
+  let rows = [];
+  try {
+    rows = await c.run(['/ppp/secret/print',
+      '=.proplist=name,caller-id,last-caller-id,comment']);
+  } catch (_) { return peta; }
+  for (const s of rows) {
+    const u = String(s.name || '').trim().toLowerCase();
+    const m = normalMac(s['caller-id']) || normalMac(s['last-caller-id']);
+    if (u && m && !peta.has(u)) peta.set(u, { mac: m, comment: s.comment || '' });
+  }
+  return peta;
+}
+
+/** Peta ONU milik satu tenant: MAC -> ONU, lalu LOID/nama ONU -> ONU. */
+async function petaOnuTenant(idDataServer) {
+  const byMac = new Map(), byAkun = new Map();
+  let rows = [];
+  try {
+    rows = await db.q(
+      `SELECT o.sn, o.pon, o.mac, o.nama_onu, o.rx_dbm, o.redaman_db, o.status_redaman,
+              o.status_online, p.nama AS perangkat
+       FROM master_onu o
+       JOIN master_perangkat p ON p.id = o.id_perangkat
+       WHERE p.id_data_server = ?`, [Number(idDataServer)]);
+  } catch (_) { return { byMac, byAkun }; }   // tabel ONU belum ada
+  for (const o of rows) {
+    const m = onu.normMac(o.mac);
+    if (m && !byMac.has(m)) byMac.set(m, o);
+    const a = onu.normAkun(o.nama_onu);
+    if (a && !byAkun.has(a)) byAkun.set(a, o);
+  }
+  return { byMac, byAkun };
+}
+
+/** Tingkatan pencocokan ONU: MAC dulu, baru LOID/nama ONU = akun PPPoE. */
+function cariOnuTenant(peta, mac, akun) {
+  const m = onu.normMac(mac);
+  if (m && peta.byMac.has(m)) return { o: peta.byMac.get(m), cara: 'mac' };
+  const a = onu.normAkun(akun);
+  if (a && peta.byAkun.has(a)) return { o: peta.byAkun.get(a), cara: 'akun' };
+  return null;
 }
 
 // ------------------------------------------------- user hotspot (voucher)
@@ -1015,12 +1113,14 @@ async function sinkronMacPelanggan(idDataServer) {
         if (u && m) peta.set(u, { mac: m, dari: 'secret' });
       }
       // Sesi yang sedang naik lebih baru daripada last-caller-id secret.
+      // Properti `user` tidak ada di /ppp/active (6.49 maupun 7.19) — menyebutnya
+      // di proplist memotong balasan sehingga caller-id tidak ikut terkirim.
       const act = await c.run(['/ppp/active/print',
-        '=.proplist=name,user,service,caller-id']);
+        '=.proplist=name,service,caller-id,address,uptime']);
       for (const a of act) {
-        const u = String(a.user || a.name || '').trim().toLowerCase();
+        const u = String(a.name || '').trim().toLowerCase();
         const m = normalMac(a['caller-id']);
-        if (u && m) peta.set(u, { mac: m, dari: 'sesi' });
+        if (u && m) peta.set(u, { mac: m, dari: 'sesi', ip: a.address || '', uptime: a.uptime || '' });
       }
       terbaca++;
     } catch (e) {

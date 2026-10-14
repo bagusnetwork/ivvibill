@@ -184,11 +184,16 @@
           <div class="panel-head"><h2>PPPoE aktif tanpa tagihan</h2>
             <button class="btn sm secondary" onclick="muatUnmanage()">Muat ulang</button></div>
           <div class="panel-body" style="padding:0">
-            <table><thead><tr><th>Router</th><th>Username</th><th>IP</th><th>Uptime</th><th>Aksi</th></tr></thead>
-            <tbody id="tbUnmanage"><tr><td colspan="5" class="empty">Belum dimuat</td></tr></tbody></table>
+            <table><thead><tr><th>Router</th><th>Akun PPPoE</th><th>Status</th><th>IP</th>
+              <th>MAC</th><th>ONU · Redaman</th><th>Uptime</th><th>Aksi</th></tr></thead>
+            <tbody id="tbUnmanage"><tr><td colspan="8" class="empty">Belum dimuat</td></tr></tbody></table>
           </div>
           <div class="panel-body"><p class="hint" id="unmanageHint">
-            Sesi PPPoE di router yang usernya tidak ada di daftar pelanggan — perlu didata atau dimatikan manual.</p></div>
+            Sesi PPPoE di router yang usernya tidak ada di daftar pelanggan — perlu didata atau dimatikan manual.
+            Tombol <b>Input Billing</b> mendaftarkannya jadi pelanggan sekaligus membuat tagihan periode berjalan;
+            <b>Remote ONU</b> memindahkan rule dst-nat router ke IP akun ini (IP diambil dari sesi live,
+            laporan push router, atau /ppp/secret bila sesi sedang turun). Redaman hanya terisi bila OLT tenant
+            ini sudah di-poll dan ONU-nya dikenali dari MAC atau LOID.</p></div>
         </div>
       </div>
 
@@ -807,6 +812,55 @@
     <button class="btn" onclick="simpanPelanggan()">Simpan</button></div>
 </div></div>
 
+<div class="modal-bg" id="mInputBilling"><div class="modal">
+  <div class="modal-head"><h2 id="mInputBillingTitle">Input Billing — sesi tanpa tagihan</h2>
+    <button class="btn sm ghost" onclick="modalClose('mInputBilling')">✕</button></div>
+  <div class="modal-body">
+    <div id="ibSesiInfo" class="peringatan"></div>
+    <input type="hidden" id="ibAkun"><input type="hidden" id="ibIp">
+    <input type="hidden" id="ibMac"><input type="hidden" id="ibSumber">
+    <div class="form-grid">
+      <div class="form-row"><label>Nama pelanggan *</label><input id="ibNama" placeholder="Nama pemilik/lokasi"></div>
+      <div class="form-row"><label>Paket</label><select id="ibPaket"></select></div>
+      <div class="form-row"><label>Profile Tagihan</label>
+        <select id="ibProfilTagihan" onchange="fProfilTagihanInfo('ibProfilTagihan','ibProfilTagihanInfo')"></select>
+        <div class="hint" id="ibProfilTagihanInfo">memuat…</div></div>
+      <div class="form-row"><label>WhatsApp</label><input id="ibWa" placeholder="08xx"></div>
+      <div class="form-row"><label>Email</label><input id="ibEmail"></div>
+      <div class="form-row"><label>Agen</label><select id="ibAgen"></select></div>
+      <div class="form-row"><label>Password PPPoE</label><input id="ibPass"
+        placeholder="kosongkan bila secret sudah ada di router"></div>
+      <div class="form-row"><label>Profile isolir (khusus PPPoE)</label>
+        <input id="ibIsolir" list="dlIsolir"></div>
+    </div>
+    <div class="form-row"><label>Alamat</label><input id="ibAlamat"></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Topologi ODP</label><select id="ibTopo"></select></div>
+      <div class="form-row"><label>Port ODP</label><input id="ibPortOdp" placeholder="mis. 3"></div>
+      <div class="form-row"><label>Desa</label><select id="ibDesa"></select></div>
+      <div class="form-row"><label>Latitude</label><input id="ibLat" placeholder="-7.2575"></div>
+      <div class="form-row"><label>Longitude</label><input id="ibLong" placeholder="112.7521"></div>
+    </div>
+    <div class="form-row" style="margin-top:10px">
+      <label><input type="checkbox" id="ibTagih" checked onchange="ibKotakTagih()">
+        Buat tagihan sekarang</label></div>
+    <div class="form-grid" id="ibBlokTagihan">
+      <div class="form-row"><label>Bulan tagihan</label>
+        <input id="ibPeriode" type="month">
+        <div class="hint">Periode yang ditagih — default bulan berjalan.</div></div>
+      <div class="form-row"><label>Jumlah (Rp)</label><input id="ibJumlah" placeholder="kosong = harga paket">
+        <div class="hint">Isi hanya untuk harga nego/proyek.</div></div>
+      <div class="form-row"><label>Diskon (Rp)</label><input id="ibDiskon" placeholder="0"></div>
+      <div class="form-row"><label>Jatuh tempo</label><input id="ibJatuhTempo" type="date">
+        <div class="hint">Kosong = mengikuti Profile Tagihan / jadwal data server.</div></div>
+      <div class="form-row" style="grid-column:1/-1"><label>Uraian tagihan</label>
+        <input id="ibKeterangan" placeholder="mis. Langganan internet 10 Mbps"></div>
+    </div>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mInputBilling')">Batal</button>
+    <button class="btn" onclick="simpanInputBilling()">Simpan + Tagihkan</button></div>
+</div></div>
+
 <div class="modal-bg" id="mTopologi"><div class="modal">
   <div class="modal-head"><h2 id="mTopoTitle">Tambah Topologi ODP</h2>
     <button class="btn sm ghost" onclick="modalClose('mTopologi')">✕</button></div>
@@ -1260,6 +1314,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261015a"></script>
+<script src="panel.js?v=20261015b"></script>
 </body>
 </html>

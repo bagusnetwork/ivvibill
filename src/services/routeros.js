@@ -265,18 +265,27 @@ class RouterOS {
     };
   }
 
-  /** Status koneksi PPPoE aktif (untuk deteksi offline pelanggan). */
+  /**
+   * Status koneksi PPPoE aktif (untuk deteksi offline pelanggan).
+   * Atributnya `name` (= username PPPoE), BUKAN `user`: baik RouterOS 6.49.17
+   * maupun 7.19.2 tidak punya properti `user` di /ppp/active, dan proplist yang
+   * menyebut properti asing memotong balasan di posisi itu — akibatnya
+   * `address`/`uptime` tidak pernah ikut dan tab Unmanage tampil kosong.
+   * `caller-id` = MAC perangkat yang naik, `comment` = catatan di router.
+   */
   async pppoeActive() {
     try {
       const rows = await this.run(['/ppp/active/print',
-        '=.proplist=.id,name,user,service,address,uptime']);
+        '=.proplist=.id,name,service,address,uptime,caller-id,comment']);
       return rows.map(r => ({
-        // pada beberapa router, kolom user kosong dan nama koneksi = username PPPoE
+        // nama koneksi = username PPPoE
         name: r.name || '',
-        user: r.user || r.name || '',
+        user: r.name || '',
         address: r.address || '',
         uptime: r.uptime || '',
-        service: r.service || ''
+        service: r.service || '',
+        mac: r['caller-id'] || '',
+        comment: r.comment || ''
       })).filter(r => (r.service || '').toLowerCase() === 'pppoe' || r.service === '');
     } catch (e) {
       return [];

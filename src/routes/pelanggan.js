@@ -985,6 +985,122 @@ router.post('/pelanggan', requireRole('superadmin', 'master', 'teknisi'),
   } catch (e) { next(e); }
 });
 
+/**
+ * Input Billing dari tab Unmanage (v2.5.0) — satu kali klik mengubah sesi PPPoE
+ * "liar" menjadi pelanggan terdaftar PLUS tagihan periode berjalan.
+ *
+ * Isian datang dari form lengkap yang sudah terisi otomatis oleh sesi: akun,
+ * IP, MAC, ONU/redaman. Sengaja TIDAK menulis apa pun ke router: akun ini sudah
+ * hidup di sana (secret dibuat manual/di luar aplikasi), jadi pembatasan
+ * bandwidth tetap lewat tombol ⚡ Aktivasi seperti pendaftaran biasa — supaya
+ * "menyalakan layanan" tetap keputusan penanggung jawab ISP.
+ * Tagihan memakai jalur yang sama dengan menu Tagihan (buatTagihanSatuan),
+ * sehingga dedupe per periode, PPN, kode unik, dan jatuh temponya identik.
+ */
+router.post('/pelanggan/dari-sesi',
+  requireRole('superadmin', 'master', 'teknisi'),
+  requireMenu('pelanggan', 'tambah'), requireMenu('tagihan', 'tambah'),
+  async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const body = req.body || {};
+
+    const username = v.str(body.username_pppoe, { min: 2, max: 50 });
+    const nama = v.str(body.nama, { min: 2, max: 100 });
+    const tipe = v.enumOf(body.tipe, ['pppoe', 'hotspot'], 'pppoe');
+    const alamat = v.str(body.alamat, { max: 255, def: null });
+    const nowa = v.phone(body.nomor_whatsapp);
+    const email = v.email(body.email);
+    const idPaket = v.num(body.id_paket, { int: true, min: 1, def: null });
+    const passPppoe = v.str(body.password_pppoe, { max: 50, def: null });
+    const ip = v.str(body.ip_address, { max: 40, def: null });
+    const mac = v.str(body.mac_address, { max: 40, def: null });
+    const tglMasuk = v.tgl(body.tanggal_masuk, billing.waktuSiklus().hari);
+    const idAgen = v.num(body.id_agen, { int: true, min: 1, def: null });
+    const profilIsolir = v.str(body.profile_isolir, { max: 64, def: null });
+    const catatan = v.str(body.catatan, { max: 5000, def: null });
+
+    const tagih = !(body.buat_tagihan === false || body.buat_tagihan === '0'
+      || body.buat_tagihan === 'false' || body.buat_tagihan === '');
+    const periode = v.str(body.periode, { max: 7, def: '' });
+    if (tagih && periode && !/^\d{4}-\d{2}$/.test(periode)) {
+      return res.status(400).json({ error: 'Periode harus YYYY-MM' });
+    }
+    const jumlah = body.jumlah === '' || body.jumlah == null
+      ? null : v.num(body.jumlah, { min: 0, max: 1e9 });
+    const diskon = v.num(body.diskon, { min: 0, max: 1e9, def: 0 });
+    const ketTagihan = v.str(body.keterangan, { max: 255, def: null });
+    const jatuhTempo = v.tgl(body.jatuh_tempo, null);
+
+    let jadwal;
+    try { jadwal = await kebijakanTagihanPelanggan(ds, body, null); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    let lok;
+    try { lok = await validasiLokasi(req, body, null); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+
+    const dup = await db.one(
+      'SELECT id, nama, status FROM pelanggan WHERE username_pppoe = ? AND id_data_server = ?',
+      [username, ds]);
+    if (dup) {
+      return res.status(400).json({
+        error: `Akun ${username} sudah menjadi pelanggan #${dup.id} (${dup.nama}, ${dup.status})`,
+        sudah_ada: true, id_pelanggan: Number(dup.id)
+      });
+    }
+    if (idPaket) {
+      const pk = await db.one('SELECT id FROM paket WHERE id = ? AND id_data_server = ?', [idPaket, ds]);
+      if (!pk) return res.status(400).json({ error: 'Paket tidak ada di data server ini' });
+    }
+
+    const [{ prefix_invoice }] = await db.q(
+      'SELECT prefix_invoice FROM data_server WHERE id = ?', [ds]);
+    const kode = `${prefix_invoice || 'IVV'}${Date.now().toString(36).toUpperCase()}`;
+    const asalSesi = v.str(body.sumber_sesi, { max: 120, def: null });
+    const id = await db.insert(
+      `INSERT INTO pelanggan (id_data_server, kode, nama, alamat, nomor_whatsapp, email, tipe,
+        id_paket, id_agen, username_pppoe, password_pppoe, ip_address, mac_address,
+        tanggal_masuk, hari_tagihan, id_profil_tagihan, status, profile_isolir,
+        id_master_topologi, id_master_desa, port_odp, latitude, longitude, catatan)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'baru', ?,?,?,?,?,?,?)`,
+      [ds, kode, nama, alamat, nowa, email, tipe, idPaket, idAgen, username, passPppoe, ip, mac,
+        tglMasuk, jadwal.hariTagihan, jadwal.idProfilTagihan,
+        tipe === 'pppoe' ? profilIsolir : null,
+        lok.idMasterTopologi, lok.idMasterDesa, lok.portOdp, lok.latitude, lok.longitude,
+        [catatan, asalSesi ? `Didata dari sesi router: ${asalSesi}` : null]
+          .filter(Boolean).join(' | ') || null]
+    );
+
+    let hasilTagihan = null;
+    if (tagih) {
+      try {
+        hasilTagihan = await billing.buatTagihanSatuan({
+          idDataServer: ds, idPelanggan: id,
+          periode: periode || billing.waktuSiklus().periode,
+          keterangan: ketTagihan, jumlah, diskon, jatuhTempo
+        });
+      } catch (e) {
+        // pelanggan sudah terdaftar — jangan gagal total: tagihannya bisa dibuat
+        // ulang dari menu Tagihan, dan ini yang mau dibaca operator di layar.
+        hasilTagihan = { error: String(e.message).slice(0, 200) };
+      }
+    }
+
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'input_billing_sesi',
+        `${nama} (#${id}) ${username}${hasilTagihan && hasilTagihan.id
+          ? ` → tagihan #${hasilTagihan.id}` : ''}`,
+        (req.ip || '').replace('::ffff:', '')]);
+
+    res.json({
+      id, kode, status: 'baru', username,
+      tagihan: hasilTagihan,
+      petunjuk: 'Pelanggan tercatat sebagai BARU — tekan ⚡ Aktivasi di daftar Pelanggan'
+        + ' supaya secret PPPoE-nya memakai profil paket dan layanannya resmi aktif.'
+    });
+  } catch (e) { next(e); }
+});
+
 router.put('/pelanggan/:id', requireRole('superadmin', 'master', 'teknisi', 'agen'),
   requireMenu('pelanggan', 'ubah'), async (req, res, next) => {
   try {

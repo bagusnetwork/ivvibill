@@ -327,28 +327,166 @@ function plgUnmanage() {
   if (tampil) muatUnmanage();
 }
 
-/** Lihat saja: sesi PPPoE di router yang tidak ada di daftar pelanggan. */
+/** Sesi yang sedang ditampilkan di tab Unmanage — tombol memakai indeks baris. */
+let UN_ROWS = [];
+
+/** Lihat + tagih: sesi PPPoE di router yang tidak ada di daftar pelanggan. */
 async function muatUnmanage() {
   const tb = document.getElementById('tbUnmanage');
-  tb.innerHTML = '<tr><td colspan="4" class="empty">Menghubungi router…</td></tr>';
+  tb.innerHTML = '<tr><td colspan="8" class="empty">Menghubungi router…</td></tr>';
   try {
     const d = await API.get('/api/pelanggan/unmanage');
-    document.getElementById('jnUnmanage').textContent = (d.data || []).length;
-    tb.innerHTML = (d.data || []).length ? d.data.map(s => `
-      <tr><td>${esc(s.router)}</td><td><b>${esc(s.user)}</b></td>
-        <td>${esc(s.address || '-')}</td>
-        <td>${esc(s.uptime || '-')}${s.dari === 'snapshot' ? ' <span class="hint">(laporan router)</span>' : ''}</td>
-        <td class="t-actions">${s.address
-          ? `<button class="btn sm" onclick="remoteOnuIp('${esc(s.address)}','${esc(s.user)}')">Remote ONU</button>`
-          : '<span class="hint">tanpa IP</span>'}</td></tr>`).join('')
-      : '<tr><td colspan="5" class="empty">Semua sesi PPPoE tercatat sebagai pelanggan</td></tr>';
-    if ((d.router_gagal || []).length) {
-      document.getElementById('unmanageHint').textContent =
-        `Router gagal disentuh: ${d.router_gagal.join(' | ')}`;
+    UN_ROWS = d.data || [];
+    document.getElementById('jnUnmanage').textContent = UN_ROWS.length;
+    const lencanaRedaman = (s) => ({ ok: 'ok', warning: 'warn', kritis: 'bad' }[s] || 'mute');
+    tb.innerHTML = UN_ROWS.length ? UN_ROWS.map((s, i) => `
+      <tr>
+        <td>${esc(s.router)}</td>
+        <td><b>${esc(s.user)}</b>${s.comment ? `<div class="hint">📝 ${esc(s.comment)}</div>` : ''}</td>
+        <td><span class="badge ${s.status === 'online' ? 'ok' : 'mute'}">${s.status === 'online' ? '🟢 online' : '⚪ offline'}</span>
+          <div class="hint">${s.dari === 'api' ? 'sesi router' : `laporan push${s.seen_at ? ' · ' + esc(String(s.seen_at).replace('T', ' ').slice(0, 16)) : ''}`}</div></td>
+        <td>${esc(s.address || '-')}${s.address ? '' : '<div class="hint">tidak ada IP</div>'}</td>
+        <td>${s.mac ? `<span class="hint">${esc(s.mac)}</span>` : '<span class="badge mute">-</span>'}</td>
+        <td>${s.sn_onu
+          ? `<b>${esc(s.sn_onu)}</b><div class="hint">${esc(s.pon_onu || '-')} · ${esc(s.nama_onu || 'tanpa LOID')}`
+            + ` · cocok via ${esc(s.cocok_onu)}${s.perangkat_onu ? ' · ' + esc(s.perangkat_onu) : ''}</div>`
+            + `<div class="hint">${s.rx_dbm != null ? esc(s.rx_dbm) + ' dBm · ' : ''}`
+            + (s.redaman_db != null
+              ? `<span class="badge ${lencanaRedaman(s.status_redaman)}">${esc(s.redaman_db)} dB</span>`
+              : '<span class="badge mute">redaman -</span>') + '</div>'
+          : '<span class="badge mute">ONU tidak dikenali</span>'}</td>
+        <td>${esc(s.uptime || '-')}</td>
+        <td class="t-actions">
+          <button class="btn sm" onclick="remoteOnuUnmanage(${i})"
+            title="Pindahkan rule dst-nat router ke IP akun ini supaya http://router:port membuka web ONU">Remote ONU</button>
+          <button class="btn sm secondary" onclick="formInputBilling(${i})"
+            title="Daftarkan akun ini menjadi pelanggan + buat tagihan periode berjalan">Input Billing</button>
+        </td>
+      </tr>`).join('')
+      : '<tr><td colspan="8" class="empty">Semua sesi PPPoE tercatat sebagai pelanggan</td></tr>';
+    const catatan = [];
+    if ((d.router_gagal || []).length) catatan.push(`Router gagal disentuh: ${d.router_gagal.join(' | ')}`);
+    if (UN_ROWS.length && UN_ROWS.every(s => !s.sn_onu)) {
+      catatan.push('Redaman kosong di semua baris — poll OLT tenant ini belum berjalan atau MAC/LOID ONU tidak sama dengan sesi router.');
     }
+    document.getElementById('unmanageHint').textContent = catatan.length
+      ? catatan.join(' ')
+      : `${UN_ROWS.length} sesi tanpa tagihan · ${d.tercatat} akun terdaftar di tenant ini`;
   } catch (e) {
-    tb.innerHTML = `<tr><td colspan="5" class="empty">${esc(e.message)}</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="8" class="empty">${esc(e.message)}</td></tr>`;
   }
+}
+
+/** Remote ONU dari baris Unmanage: IP boleh kosong, server yang mencarinya. */
+async function remoteOnuUnmanage(i) {
+  const s = UN_ROWS[i];
+  if (!s) return;
+  await remoteOnuIp(s.address, s.user, s.setting_id);
+}
+
+function bulanIni() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function ibKotakTagih() {
+  const on = document.getElementById('ibTagih').checked;
+  document.getElementById('ibBlokTagihan').style.display = on ? '' : 'none';
+}
+
+/**
+ * Form lengkap Input Billing — terisi otomatis dari sesi: akun, IP, MAC,
+ * dan ONU/redaman ikut tercatat supaya pelanggan baru tidak perlu disurvei ulang.
+ */
+async function formInputBilling(i) {
+  const s = UN_ROWS[i];
+  if (!s) return;
+  await muatOpsi();
+  await muatProfilIsolir();
+  document.getElementById('mInputBillingTitle').textContent =
+    `Input Billing — ${s.user} (${s.router})`;
+  document.getElementById('ibSesiInfo').innerHTML = `
+    Akun PPPoE <b>${esc(s.user)}</b> · ${esc(s.router)} · IP <b>${esc(s.address || 'belum ada')}</b>
+    · MAC <b>${esc(s.mac || 'belum ada')}</b>
+    ${s.sn_onu ? ` · ONU <b>${esc(s.sn_onu)}</b> (${esc(s.pon_onu || '-')}, LOID ${esc(s.nama_onu || '-')}`
+      + `${s.redaman_db != null ? `, redaman ${esc(s.redaman_db)} dB` : ''})` : ' · ONU belum dikenali'}`;
+  document.getElementById('ibAkun').value = s.user;
+  document.getElementById('ibIp').value = s.address || '';
+  document.getElementById('ibMac').value = s.mac || '';
+  document.getElementById('ibSumber').value =
+    `${s.router} · ${s.status} · IP ${s.address || '-'} · MAC ${s.mac || '-'}`
+    + `${s.sn_onu ? ` · ONU ${s.sn_onu}${s.redaman_db != null ? ` ${s.redaman_db} dB` : ''}` : ''}`;
+  document.getElementById('ibNama').value = s.comment || s.nama_onu || s.user;
+  document.getElementById('ibAlamat').value = s.comment && s.comment !== s.nama_onu ? s.comment : '';
+  document.getElementById('ibWa').value = '';
+  document.getElementById('ibEmail').value = '';
+  document.getElementById('ibPass').value = '';
+  document.getElementById('ibIsolir').value = '';
+  document.getElementById('ibPortOdp').value = '';
+  document.getElementById('ibLat').value = '';
+  document.getElementById('ibLong').value = '';
+  document.getElementById('ibPaket').value = '';
+  document.getElementById('ibAgen').value = '';
+  document.getElementById('ibTopo').value = '';
+  document.getElementById('ibDesa').value = '';
+  IB_PROFIL_TERPILIH = '';
+  const b = document.getElementById('ibProfilTagihan');
+  if (b) b.value = '';
+  fProfilTagihanInfo('ibProfilTagihan', 'ibProfilTagihanInfo');
+  document.getElementById('ibTagih').checked = true;
+  document.getElementById('ibPeriode').value = bulanIni();
+  document.getElementById('ibJumlah').value = '';
+  document.getElementById('ibDiskon').value = '';
+  document.getElementById('ibJatuhTempo').value = '';
+  document.getElementById('ibKeterangan').value = '';
+  ibKotakTagih();
+  modalOpen('mInputBilling');
+  document.getElementById('ibNama').focus();
+  document.getElementById('ibNama').select();
+}
+
+/** Daftarkan pelanggan dari sesi + langsung buat tagihan periode terpilih. */
+async function simpanInputBilling() {
+  const body = {
+    nama: document.getElementById('ibNama').value.trim(),
+    username_pppoe: document.getElementById('ibAkun').value,
+    tipe: 'pppoe',
+    id_paket: document.getElementById('ibPaket').value || null,
+    id_agen: document.getElementById('ibAgen').value || null,
+    id_profil_tagihan: document.getElementById('ibProfilTagihan').value || null,
+    nomor_whatsapp: document.getElementById('ibWa').value.trim(),
+    email: document.getElementById('ibEmail').value.trim(),
+    password_pppoe: document.getElementById('ibPass').value,
+    profile_isolir: document.getElementById('ibIsolir').value.trim() || null,
+    alamat: document.getElementById('ibAlamat').value,
+    id_master_topologi: document.getElementById('ibTopo').value || null,
+    id_master_desa: document.getElementById('ibDesa').value || null,
+    port_odp: document.getElementById('ibPortOdp').value || null,
+    latitude: document.getElementById('ibLat').value || null,
+    longitude: document.getElementById('ibLong').value || null,
+    ip_address: document.getElementById('ibIp').value,
+    mac_address: document.getElementById('ibMac').value,
+    sumber_sesi: document.getElementById('ibSumber').value,
+    buat_tagihan: document.getElementById('ibTagih').checked,
+    periode: document.getElementById('ibPeriode').value || null,
+    jumlah: document.getElementById('ibJumlah').value,
+    diskon: document.getElementById('ibDiskon').value || 0,
+    jatuh_tempo: document.getElementById('ibJatuhTempo').value || null,
+    keterangan: document.getElementById('ibKeterangan').value.trim() || null
+  };
+  if (body.buat_tagihan && !body.nama) { toast('Nama pelanggan wajib diisi', true); return; }
+  try {
+    const r = await API.post('/api/pelanggan/dari-sesi', body);
+    const t = r.tagihan || {};
+    toast(`#${r.id} ${r.kode} terdaftar dari sesi ${body.username_pppoe}`
+      + (t.sudah_ada ? ` · tagihan ${t.id} sudah ada untuk periode ini`
+        : t.id ? ` · tagihan ${t.nomor} Rp ${Number(t.total).toLocaleString('id-ID')}`
+        : t.error ? ` · tagihan gagal: ${t.error}` : ' · tanpa tagihan'));
+    if (r.petunjuk) toast(r.petunjuk);
+    modalClose('mInputBilling');
+    muatUnmanage();
+    muatJumlah();
+  } catch (e) { toast(e.message, true); }
 }
 
 async function muatOpsi() {
@@ -374,12 +512,15 @@ async function muatOpsi() {
     const oProfilTagihan = '<option value="">— tanpa profil (ikut jadwal server) —</option>'
       + PROFIL_TAGIHAN_LIST.map(x =>
         `<option value="${x.id}">${esc(x.nama)} · tempo tgl ${esc(x.tanggal_isolir)}</option>`).join('');
-    ['fPaket', 'vPaket'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = oPaket; });
-    const fA = document.getElementById('fAgen'); if (fA) fA.innerHTML = oAgen;
-    const fT = document.getElementById('fTopo'); if (fT) fT.innerHTML = oTopo;
-    const fD = document.getElementById('fDesa'); if (fD) fD.innerHTML = oDesa;
+    ['fPaket', 'vPaket', 'ibPaket'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = oPaket; });
+    ['fAgen', 'ibAgen'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = oAgen; });
+    ['fTopo', 'ibTopo'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = oTopo; });
+    ['fDesa', 'ibDesa'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = oDesa; });
     const fPT = document.getElementById('fProfilTagihan');
-    if (fPT) { fPT.innerHTML = oProfilTagihan; terapkanOpsiProfil(); }
+    if (fPT) fPT.innerHTML = oProfilTagihan;
+    const iPT = document.getElementById('ibProfilTagihan');
+    if (iPT) iPT.innerHTML = oProfilTagihan;
+    terapkanOpsiProfil();
     const bPT = document.getElementById('plgBulkProfil');
     if (bPT) bPT.innerHTML = '<option value="">pindahkan ke profil…</option>'
       + PROFIL_TAGIHAN_LIST.map(x => `<option value="${x.id}">${esc(x.nama)}</option>`).join('');
@@ -392,17 +533,28 @@ let PLG_PROFIL_TERPILIH = '';
 /** Setelah dropdown profil terisi, pasang lagi pilihan yang sedang aktif. */
 function terapkanOpsiProfil() {
   const el = document.getElementById('fProfilTagihan');
-  if (!el) return;
-  el.value = PLG_PROFIL_TERPILIH || '';
-  fProfilTagihanInfo();
+  if (el) {
+    el.value = PLG_PROFIL_TERPILIH || '';
+    fProfilTagihanInfo();
+  }
+  const ib = document.getElementById('ibProfilTagihan');
+  if (ib) {
+    ib.value = IB_PROFIL_TERPILIH || '';
+    fProfilTagihanInfo('ibProfilTagihan', 'ibProfilTagihanInfo');
+  }
 }
 
+/** Nilai profil yang sedang dipilih form Input Billing. */
+let IB_PROFIL_TERPILIH = '';
+
 /** Ringkasan jadwal profil terpilih, supaya operator melihat "tempo tgl X" sebelum menyimpan. */
-function fProfilTagihanInfo() {
-  const el = document.getElementById('fProfilTagihanInfo');
-  if (!el) return;
-  const id = document.getElementById('fProfilTagihan').value;
-  PLG_PROFIL_TERPILIH = id;
+function fProfilTagihanInfo(selectId = 'fProfilTagihan', infoId = 'fProfilTagihanInfo') {
+  const el = document.getElementById(infoId);
+  const sel = document.getElementById(selectId);
+  if (!el || !sel) return;
+  const id = sel.value;
+  if (selectId === 'fProfilTagihan') PLG_PROFIL_TERPILIH = id;
+  else IB_PROFIL_TERPILIH = id;
   const x = PROFIL_TAGIHAN_LIST.find(p => String(p.id) === String(id));
   if (!x) {
     el.textContent = 'belum dipilih — pelanggan ikut jadwal data server dan memakai Hari Tagihan lama';
@@ -2612,16 +2764,19 @@ async function remoteOnu(id) {
   } catch (e) { tutupTab(w); toast(e.message, true); }
 }
 
-/** Versi tab Unmanage: IP sudah dikenal dari sesi PPPoE, tidak ada baris pelanggan. */
-async function remoteOnuIp(ip, akun) {
+/** Versi tab Unmanage: IP dicari oleh server bila sesi sedang turun. */
+async function remoteOnuIp(ip, akun, settingId) {
   const w = tabSementara();
   toast('Menyiapkan remote ONU…');
   try {
-    const r = await API.post('/api/remote-onu', { ip, akun });
+    const r = await API.post('/api/remote-onu', { ip: ip || '', akun, router_id: settingId || null });
     document.getElementById('roInfo').innerHTML = `
       <div class="form-grid">
         <div><div class="hint">Akun PPPoE (unmanage)</div><b>${esc(akun || '-')}</b></div>
         <div><div class="hint">IP pelanggan</div><b>${esc(r.ip_pelanggan)}</b></div>
+        <div><div class="hint">IP dari</div><b>${r.via === 'live' ? 'sesi router saat ini'
+          : r.via === 'push' ? 'laporan push router — pastikan akun ini sedang online, IP bisa sudah pindah'
+          : 'dibawa dari daftar unmanage'}</b></div>
         <div><div class="hint">Router · port remote</div><b>${esc(r.router)} · ${r.port_remote}</b></div>
         <div><div class="hint">NAT rule</div><b>${r.nat === 'update' ? 'to-addresses diupdate' : 'rule baru dibuat'}</b></div>
       </div>`;
