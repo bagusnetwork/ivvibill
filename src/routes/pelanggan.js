@@ -886,7 +886,7 @@ router.get('/pelanggan/:id', async (req, res, next) => {
       `SELECT p.*, pk.nama_paket, pk.harga, ps.online AS pppoe_online, ps.last_seen,
          ps.ip_address AS ip_lokal,
          pt.nama AS profil_tagihan, pt.tanggal_isolir AS profil_tanggal_isolir,
-         mt.nama AS nama_topologi, md.nama AS nama_desa,
+         mt.nama AS nama_topologi, mt.titik_koordinat, md.nama AS nama_desa,
          o.mac AS mac_onu, o.sn AS sn_onu,
          o.rx_dbm, o.redaman_db, o.status_redaman
        FROM pelanggan p

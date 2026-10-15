@@ -146,44 +146,27 @@ async function loadPelanggan() {
     PLG_ROWS = d.data || [];
     PLG_TOTAL = Number(d.total || 0);
     const badgeRedaman = (s) => ({ ok: 'ok', warning: 'warn', kritis: 'bad' }[s] || 'mute');
-    const koor = (p) => {
-      const lat = p.latitude, long = p.longitude;
-      if (lat && long) return `<a href="https://google.com/maps/?q=${esc(lat)},${esc(long)}" target="_blank" rel="noopener" title="${esc(lat)}, ${esc(long)}">📍 koordinat</a>`;
-      if (p.titik_koordinat) return `<a href="https://google.com/maps/?q=${encodeURIComponent(p.titik_koordinat)}" target="_blank" rel="noopener" title="${esc(p.titik_koordinat)}">📍 ODP</a>`;
-      return '<span class="hint">-</span>';
-    };
     document.getElementById('tbPelanggan').innerHTML = PLG_ROWS.map(p => `
       <tr>
-        <td><input type="checkbox" class="plgSel" value="${p.id}" onchange="plgPilihBaris()"></td>
-        <td>${esc(p.kode)}</td>
-        <td><b>${esc(p.nama)}</b><div class="hint">${koor(p)}</div></td>
-        <td><span class="badge ${p.tipe === 'pppoe' ? 'info' : 'warn'}">${esc(p.tipe)}</span>
-          <div class="hint">${esc(p.nama_paket || '-')}</div>
-          <div class="hint">🗓️ ${p.profil_tagihan ? esc(p.profil_tagihan) : '<i>tanpa profil</i>'} · tempo tgl ${esc(p.hari_tagihan)}</div></td>
-        <td>${esc(p.nama_topologi || '-')}${p.port_odp ? ' · port ' + esc(p.port_odp) : ''}
-          <div class="hint">${esc(p.nama_desa || '')}</div></td>
-        <td>${esc(p.username_pppoe || '-')}</td>
-        <td>${esc(p.ip_lokal || '-')}
-          <div class="hint">MAC: ${esc(p.mac_onu || p.mac_address || '-')}</div></td>
-        <td>${esc(p.nomor_whatsapp || '-')}
-          ${p.nomor_whatsapp ? `<br><a class="btn sm wa" style="background:#16a34a;color:#fff" target="_blank" rel="noopener" href="https://wa.me/${esc(p.nomor_whatsapp)}">WA</a>` : ''}</td>
-        <td>${p.redaman_db != null
+        <td class="plg-nama"><div class="plg-cell">
+          <input type="checkbox" class="plgSel" value="${p.id}" onchange="plgPilihBaris()">
+          <div><b>${esc(p.nama)}</b><div class="hint">${esc(p.kode || '-')}</div></div>
+        </div></td>
+        <td class="plg-id" data-label="ID">#${esc(p.id)}</td>
+        <td data-label="Status"><span class="badge ${p.status === 'aktif' ? 'ok' : p.status === 'isolir' ? 'bad' : 'mute'}">${esc(p.status)}</span>
+          ${p.tipe === 'pppoe' ? `<span class="hint">${p.pppoe_online ? '🟢' : '⚪'}</span>` : ''}
+          ${p.status === 'isolir' && p.profile_isolir ? `<div class="hint">🔒 ${esc(p.profile_isolir)}</div>` : ''}</td>
+        <td data-label="No. HP">${p.nomor_whatsapp
+          ? `<a href="https://wa.me/${esc(p.nomor_whatsapp)}" target="_blank" rel="noopener">${esc(p.nomor_whatsapp)}</a>`
+          : '<span class="hint">-</span>'}</td>
+        <td class="plg-redaman" data-label="Redaman">${p.redaman_db != null
           ? `<span class="badge ${badgeRedaman(p.status_redaman)}">${esc(p.redaman_db)} dB</span>`
           : '<span class="badge mute">-</span>'}</td>
-        <td><span class="badge ${p.status === 'aktif' ? 'ok' : p.status === 'isolir' ? 'bad' : 'mute'}">${esc(p.status)}</span>
-          ${p.tipe === 'pppoe' ? `<div class="hint">${p.pppoe_online ? '🟢 online' : '⚪ offline'}</div>` : ''}
-          ${p.status === 'isolir' && p.profile_isolir ? `<div class="hint">🔒 ${esc(p.profile_isolir)}</div>` : ''}</td>
         <td class="t-actions">
-          <button class="btn sm" onclick="remoteOnu(${p.id})" title="Auto-generate NAT MikroTik → web ONU">Remote ONU</button>
-          <button class="btn sm secondary" onclick="formPelanggan(${esc(JSON.stringify(p))})">Ubah</button>
-          ${p.status === 'baru'
-            ? `<button class="btn sm" onclick="aktivasiPelanggan(${p.id})" title="Cetak secret PPPoE di router, status jadi aktif, kabari pelanggan lewat WA">⚡ Aktivasi</button>`
-            : p.status !== 'aktif' ? `<button class="btn sm" onclick="plgStatus(${p.id},'aktif')">Aktifkan</button>` : ''}
-          ${p.status !== 'isolir' ? `<button class="btn sm secondary" onclick="plgStatus(${p.id},'isolir')">Isolir</button>` : ''}
-          ${p.status !== 'nonaktif' ? `<button class="btn sm secondary" onclick="plgStatus(${p.id},'nonaktif')">Nonaktif</button>` : ''}
-          <button class="btn sm ghost" onclick="plgHapus(${p.id})">Hapus</button>
+          <button class="btn sm" onclick="remoteOnu(${p.id})" title="Auto-generate NAT MikroTik → web ONU"><span class="btx">Remote ONU</span><span class="bti">📡</span></button>
+          <button class="btn sm secondary" onclick="plgDetail(${p.id})" title="Semua data pelanggan + riwayat tagihan"><span class="btx">Detail</span><span class="bti">📋</span></button>
         </td>
-      </tr>`).join('') || '<tr><td colspan="11" class="empty">Belum ada pelanggan</td></tr>';
+      </tr>`).join('') || '<tr><td colspan="6" class="empty">Belum ada pelanggan</td></tr>';
 
     const halaman = Math.floor(PLG_OFFSET / PLG_LIMIT) + 1;
     const terakhir = Math.max(1, Math.ceil(PLG_TOTAL / PLG_LIMIT));
@@ -236,6 +219,17 @@ function plgTerpilih() {
 
 function plgPilihAll(chk) {
   document.querySelectorAll('.plgSel').forEach(c => { c.checked = chk.checked; });
+  plgPilihBaris();
+}
+
+/** Pintasan pilih-semua untuk layar HP: daftar jadi kartu, header tabel (tempat
+ *  kotak plgAll) tidak ditampilkan, jadi aksi yang sama ditaruh di bar pager. */
+function plgPilihSemuaHalaman() {
+  const kotak = [...document.querySelectorAll('.plgSel')];
+  if (!kotak.length) return toast('Belum ada pelanggan di halaman ini', true);
+  const sudah = kotak.every(c => c.checked);
+  kotak.forEach(c => { c.checked = !sudah; });
+  document.getElementById('plgAll').checked = !sudah;
   plgPilihBaris();
 }
 
@@ -316,6 +310,122 @@ async function plgHapus(id) {
     toast('Pelanggan dihapus');
     loadPelanggan();
   } catch (e) { toast(e.message, true); }
+}
+
+/**
+ * Modal Detail pelanggan (v2.7.1).
+ *
+ * Daftar Pelanggan sekarang cuma menampilkan Nama · ID · Status · No. HP ·
+ * Redaman · Aksi, jadi kolom lain (paket, username, IP, MAC, ODP, desa,
+ * koordinat, profil tagihan, catatan, dll.) dibaca di sini. Isinya diambil
+ * dari GET /api/pelanggan/:id — endpoint yang sama dipakai form Ubah — supaya
+ * modal menampilkan data tersimpan, bukan potongan JOIN daftar yang bisa
+ * tertinggal. Baris daftar tetap dipakai sebagai isi awal supaya modal tidak
+ * pernah kosong kalau request detail sedang gagal.
+ */
+let PLG_DETAIL = null;
+let PLG_DETAIL_TAGIHAN = [];
+
+async function plgDetail(id) {
+  const awal = PLG_ROWS.find(p => Number(p.id) === Number(id));
+  PLG_DETAIL = awal || null;
+  PLG_DETAIL_TAGIHAN = [];
+  document.getElementById('plgdJudul').textContent = awal ? awal.nama : 'Pelanggan #' + id;
+  document.getElementById('plgdIsi').innerHTML = '<div class="empty">Memuat…</div>';
+  document.getElementById('plgdAksi').innerHTML = '';
+  modalOpen('mPlgDetail');
+  let p = awal, tagihan = [];
+  try {
+    const d = await API.get(`/api/pelanggan/${id}`);
+    p = d.data; tagihan = d.tagihan || [];
+  } catch (e) {
+    if (!p) {
+      document.getElementById('plgdIsi').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+      return;
+    }
+    toast('Gagal memuat data lengkap: ' + e.message, true);
+  }
+  PLG_DETAIL = p;
+  PLG_DETAIL_TAGIHAN = tagihan;
+  plgDetailRender();
+}
+
+/** Satu baris label → nilai. Nilai kosong ditulis jelas, tidak hilang begitu saja. */
+function dlItem(k, v) {
+  return `<div class="dl-item"><span class="dl-k">${k}</span>`
+    + `<span class="dl-v">${(v == null || v === '') ? '<i class="hint">kosong</i>' : v}</span></div>`;
+}
+
+function plgDetailRender() {
+  const p = PLG_DETAIL;
+  if (!p) return;
+  const badge = (t, s) => `<span class="badge ${t}">${esc(s)}</span>`;
+  const koor = (p.latitude && p.longitude)
+    ? `<a href="https://google.com/maps/?q=${esc(p.latitude)},${esc(p.longitude)}" target="_blank" rel="noopener">📍 ${esc(p.latitude)}, ${esc(p.longitude)}</a>`
+    : (p.titik_koordinat
+      ? `<a href="https://google.com/maps/?q=${encodeURIComponent(p.titik_koordinat)}" target="_blank" rel="noopener">📍 ${esc(p.titik_koordinat)} (titik ODP)</a>` : null);
+  const wa = p.nomor_whatsapp
+    ? `<a href="https://wa.me/${esc(p.nomor_whatsapp)}" target="_blank" rel="noopener">${esc(p.nomor_whatsapp)}</a>` : null;
+  const redaman = p.redaman_db != null
+    ? badge(({ ok: 'ok', warning: 'warn', kritis: 'bad' }[p.status_redaman] || 'mute'), `${p.redaman_db} dB`)
+      + (p.rx_dbm != null ? ` <span class="hint">RX ${esc(p.rx_dbm)} dBm</span>` : '')
+    : null;
+  document.getElementById('plgdJudul').textContent = `${p.nama} · #${p.id}`;
+  document.getElementById('plgdIsi').innerHTML = `
+    <p>${badge(p.status === 'aktif' ? 'ok' : p.status === 'isolir' ? 'bad' : 'mute', p.status)}
+      ${badge(p.tipe === 'pppoe' ? 'info' : 'warn', p.tipe)}
+      ${p.tipe === 'pppoe' ? `<span class="hint">${p.pppoe_online ? '🟢 online' : '⚪ offline'}${p.last_seen ? ' · terakhir dilihat ' + esc(tgl(p.last_seen)) : ''}</span>` : ''}
+      ${p.profile_isolir ? `<span class="hint">🔒 profil isolir ${esc(p.profile_isolir)}${p.profil_sebelum_isolir ? ` (asal: ${esc(p.profil_sebelum_isolir)})` : ''}</span>` : ''}</p>
+    <div class="dl-grid">
+      ${dlItem('ID', '#' + esc(p.id))}
+      ${dlItem('Kode', esc(p.kode))}
+      ${dlItem('Nama', '<b>' + esc(p.nama) + '</b>')}
+      ${dlItem('No. HP', wa)}
+      ${dlItem('Email', esc(p.email))}
+      ${dlItem('Alamat', esc(p.alamat))}
+      ${dlItem('Tipe', esc(p.tipe))}
+      ${dlItem('Paket', p.nama_paket ? esc(p.nama_paket) + (p.harga != null ? ` · ${rupiah(p.harga)}` : '') : null)}
+      ${dlItem('Username PPPoE', esc(p.username_pppoe))}
+      ${dlItem('Password PPPoE', esc(p.password_pppoe))}
+      ${dlItem('IP tercatat', esc(p.ip_address))}
+      ${dlItem('IP aktif (sesi)', esc(p.ip_lokal))}
+      ${dlItem('MAC', esc(p.mac_onu || p.mac_address))}
+      ${dlItem('SN ONU', esc(p.sn_onu))}
+      ${dlItem('Redaman', redaman)}
+      ${dlItem('Topologi / ODP', p.nama_topologi ? esc(p.nama_topologi) + (p.port_odp ? ` · port ${esc(p.port_odp)}` : '') : (p.port_odp ? 'port ' + esc(p.port_odp) : null))}
+      ${dlItem('Desa', esc(p.nama_desa))}
+      ${dlItem('Koordinat', koor)}
+      ${dlItem('Profile Tagihan', p.profil_tagihan ? esc(p.profil_tagihan) + (p.profil_tanggal_isolir ? ` · tempo tgl ${esc(p.profil_tanggal_isolir)}` : '') : badge('mute', 'tanpa profil'))}
+      ${dlItem('Hari tagihan', esc(p.hari_tagihan))}
+      ${dlItem('Tanggal masuk', p.tanggal_masuk ? esc(tgl(p.tanggal_masuk)) : null)}
+      ${dlItem('Didaftarkan', p.created_at ? esc(tgl(p.created_at)) : null)}
+      ${dlItem('Terakhir diubah', p.updated_at ? esc(tgl(p.updated_at)) : null)}
+      ${dlItem('Catatan', esc(p.catatan))}
+    </div>
+    <p class="hint mt">Tagihan terakhir ${PLG_DETAIL_TAGIHAN.length ? `(${PLG_DETAIL_TAGIHAN.length})` : ''}</p>
+    ${PLG_DETAIL_TAGIHAN.length ? `<div class="dl-scroll"><table class="dl-tagihan"><thead><tr><th>Invoice</th><th>Periode</th>
+      <th>Jatuh tempo</th><th class="t-num">Total</th><th>Status</th></tr></thead><tbody>`
+      + PLG_DETAIL_TAGIHAN.slice(0, 5).map(t => `<tr><td>${esc(t.nomor_invoice || '#' + t.id)}</td>
+        <td>${esc(t.periode || '-')}</td>
+        <td>${esc(tgl(t.jatuh_tempo))}</td>
+        <td class="t-num">${rupiah(t.total)}</td>
+        <td>${badge(t.status === 'lunas' ? 'ok' : t.status === 'batal' ? 'mute'
+          : ['jatuh_tempo', 'menunggu'].includes(t.status) ? 'bad' : 'warn', t.status)}</td></tr>`).join('')
+      + '</tbody></table></div>'
+      : '<p class="hint">Belum ada tagihan untuk pelanggan ini.</p>'}`;
+  const id = Number(p.id);
+  const aksi = [];
+  aksi.push(`<button class="btn sm" onclick="modalClose('mPlgDetail'); remoteOnu(${id})">Remote ONU</button>`);
+  aksi.push(`<button class="btn sm secondary" onclick="modalClose('mPlgDetail'); formPelanggan(PLG_DETAIL)">Ubah</button>`);
+  if (p.status === 'baru') {
+    aksi.push(`<button class="btn sm" onclick="modalClose('mPlgDetail'); aktivasiPelanggan(${id})">⚡ Aktivasi</button>`);
+  } else if (p.status !== 'aktif') {
+    aksi.push(`<button class="btn sm" onclick="modalClose('mPlgDetail'); plgStatus(${id},'aktif')">Aktifkan</button>`);
+  }
+  if (p.status !== 'isolir') aksi.push(`<button class="btn sm secondary" onclick="modalClose('mPlgDetail'); plgStatus(${id},'isolir')">Isolir</button>`);
+  if (p.status !== 'nonaktif') aksi.push(`<button class="btn sm secondary" onclick="modalClose('mPlgDetail'); plgStatus(${id},'nonaktif')">Nonaktif</button>`);
+  aksi.push(`<button class="btn sm ghost" onclick="modalClose('mPlgDetail'); plgHapus(${id})">Hapus</button>`);
+  document.getElementById('plgdAksi').innerHTML = aksi.join(' ');
 }
 
 function plgUnmanage() {

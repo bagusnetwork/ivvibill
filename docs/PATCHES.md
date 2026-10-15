@@ -4,7 +4,99 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
-## 2026-10-15 — v2.7.0 — Bersihkan tagihan batal sekali klik + Return pembayaran
+## 2026-10-15 — v2.7.1 — Daftar Pelanggan dipersempit + modal Detail per baris (responsif HP)
+
+**Permintaan user**
+
+"perkecil look table data yang ditampilkan agar tidak terlalu panjang … hanya
+tampilkan nama id status nomor hp Remote ONU dan redaman … harus responsif ketika
+tampil di browser HP". Kolom yang disebut persis sama dengan isi tabel Pelanggan,
+jadi yang dirapikan tabel itu; tabel menu lain belum disentuh.
+
+**1 · Daftar jadi 6 kolom** (`public/panel/index.html` + `panel.js`)
+
+Sebelumnya 11 kolom (checkbox, Kode, Nama+koordinat, Tipe/Paket/profil,
+Topologi/Desa, Username, IP/MAC, No.HP+WA, Redaman, Status, 7 tombol aksi) — di
+layar HP tabel seperti ini hanya bisa dibaca dengan menggulir ke samping.
+Sekarang: **Nama** (checkbox pilih massal menyatu di selnya, kode jadi baris
+kecil di bawah nama) · **ID** · **Status** · **No. HP** · **Redaman** · **Aksi**.
+Data kolom yang hilang TIDAK dibuang — semuanya pindah ke modal Detail.
+
+**2 · Aksi per baris jadi dua**: **Remote ONU** (📡) dan **Detail** (📋). Aksi
+lainnya (Ubah, ⚡Aktivasi/Aktifkan, Isolir, Nonaktif, Hapus) pindah ke footer
+modal Detail dan masing-masing menutup modal lebih dulu supaya tidak ada dua
+modal bertumpuk.
+
+**3 · Modal Detail** (`mPlgDetail`, `plgDetail()` + `plgDetailRender()`)
+
+Membaca `GET /api/pelanggan/:id` — endpoint yang sama dengan form Ubah, jadi
+yang ditampilkan adalah data tersimpan, bukan potongan daftar. Isinya 24 pasangan
+label→nilai (identitas, kontak, paket, kredensial PPPoE, IP tercatat vs IP sesi,
+MAC, SN ONU, redaman + RX dBm, topologi/ODP, desa, koordinat, profil tagihan,
+tanggal masuk/daftar/ubah, catatan) di atas `.dl-grid` (2 kolom di layar lebar,
+1 kolom di HP) + tabel 5 tagihan terakhir. Baris daftar hanya jadi seed awal
+supaya modal langsung terisi sebelum respons datang.
+
+**4 · Responsif** (`public/assets/style.css`)
+
+Di bawah 700px baris tabel berubah jadi kartu (`thead` disembunyikan, tiap sel
+satu lajur berlabel dari `data-label`), ikon tombol menggantikan teks aksi, dan
+pintasan "Pilih semua di halaman ini" muncul di bar pager karena header tabel —
+tempat kotak `plgAll` — tidak ditampilkan. Modal Detail: `.modal-bg` diberi
+`grid-template-columns: minmax(0, 1fr)` supaya lajur tidak ikut melebar mengikuti
+isi terlebar (tabel riwayat 420px); tanpa itu modalnya sendiri keluar layar dan
+teks di kanan terpotong. Tabel riwayat dibungkus `.dl-scroll` — yang menggulir
+hanya tabelnya.
+
+**5 · Dua temuan saat audit pasca-pasang (ikut diperbaiki)**
+
+* `GET /api/pelanggan/:id` tidak ikut menyeleksi `mt.titik_koordinat` padahal
+  daftarnya ya → pelanggan yang koordinatnya diambil dari titik ODP (bukan
+  latitude/longitude sendiri) kehilangan tautan peta di modal. Kolomnya
+  ditambahkan ke SELECT rinci.
+* `billing.returPembayaran()` (v2.7.0) jalan tanpa transaksi dan tidak memeriksa
+  `affectedRows` UPDATE-nya: kalau proses mati di tengah, pembayaran bisa
+  berstatus `retur` sementara tagihannya masih `lunas`; dan dua klik beruntun
+  bisa mencatat kas `keluar` dua kali. Sekarang rute `/pembayaran/:id/retur`
+  dibungkus `db.tx()`, fungsi menerima executor opsional (`x = db`), dan
+  UPDATE pembayaran yang tidak mengenai baris langsung berhenti dengan 409.
+
+**Verifikasi**
+
+Deploy 5 berkas (`index.html`, `panel.js`, `style.css`, `routes/pelanggan.js`,
+`services/billing.js` + `routes/tagihan.js`), md5 lokal = md5 server, aset
+disajikan dengan cache-bust `style.css?v=20261015d` / `panel.js?v=20261015g`,
+`systemctl restart ivvibill` → active.
+
+* Browser nyata lebar 406px dengan data sungguhan: 6 kolom, layout kartu aktif,
+  tidak ada gulir horizontal, modal Detail menampilkan 24 isian, tombol Ubah
+  membuka form terisi, "pilih semua" menandai 3 baris, 0 error konsol.
+* Render 1280px lewat harness Chrome headless dengan CSS yang sama persis
+  (md5 diverifikasi): tabel ringkas + modal 2 kolom.
+* API nyata: `GET /api/pelanggan` dan `GET /api/pelanggan/309` mengembalikan
+  seluruh 37 kolom yang dibaca modal (dites dengan daftar kolom eksplisit).
+* Retur lewat API nyata di tenant sandbox: pembayaran `diterima` → `retur` +
+  jejak, tagihan `lunas` → `jatuh_tempo` (`paid_at`/`metode_bayar` kosong), kas
+  `keluar` 150.000 tercatat; klik kedua ditolak `sudah pernah diretur` dan kas
+  tetap satu baris.
+* Semua artefak uji dihapus setelahnya: tenant 1 kembali 0 pelanggan / 0 tagihan /
+  0 pembayaran / 0 kas / 0 antrean WA, `app_user` uji dihapus, dan tenant lain
+  tidak bergeser (ds2 198 pelanggan / 172 tagihan; ds5 79 / 157).
+
+**Catatan insiden uji (jujur dicatat)**
+
+Tagihan uji sempat dibuat dengan `jatuh_tempo` di MASA LALU. Siklus isolir
+produksi yang memang berjalan untuk tenant 1 sempat membajak statusnya
+(`aktif` → `isolir`) dan MENGIRIM SATU PESAN WA Sungguhan ke nomor karangan
+6281234567801 (`wa_queue` #579, terkirim). Barisnya sudah dihapus dari antrean.
+Pelajaran yang dipasang sebagai aturan kerja: **data uji berupa tagihan harus
+selalu memakai tanggal jatuh tempo di MASA DEPAN.**
+
+**Belum**
+
+Tabel menu lain (Tagihan, ONU, Pengguna, dst.) masih lebar — belum diminta.
+
+
 
 **Permintaan user**
 

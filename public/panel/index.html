@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ivvibill — Panel Data Server</title>
-<link rel="stylesheet" href="/assets/style.css?v=20261011b">
+<link rel="stylesheet" href="/assets/style.css?v=20261015d">
 <style>
   .menu-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:8px; margin-top:6px; }
   .menu-grid .chk { display:flex; align-items:center; justify-content:space-between; gap:10px;
@@ -167,12 +167,19 @@
           <button class="btn sm secondary" onclick="plgBulkBersihkan()">Batal pilih</button>
         </div>
         <div class="panel"><div class="panel-body" style="padding:0">
-          <table><thead><tr><th style="width:34px"><input type="checkbox" id="plgAll" onchange="plgPilihAll(this)"></th>
-            <th>Kode</th><th>Nama</th><th>Tipe / Paket</th><th>Topologi / Desa</th>
-            <th>Username</th><th>IP lokal / MAC</th><th>WhatsApp</th><th>Redaman</th><th>Status</th>
+          <!-- v2.7.1: kolom yang tampil dibuat sempit (Nama/ID/Status/No.HP/Redaman/Aksi).
+             Sisa kolomnya tidak dibuang, hanya pindah ke modal Detail per baris, supaya
+             daftar tidak lagi melebar dan bisa dibaca di layar HP. Checkbox pilih
+             massal menyatu dengan sel Nama (kolom terpisah terlalu mahal di HP). -->
+          <table class="tbl-plg"><thead><tr>
+            <th>Nama <input type="checkbox" id="plgAll" onchange="plgPilihAll(this)" title="Pilih semua di halaman ini"></th>
+            <th style="width:56px">ID</th><th>Status</th><th>No. HP</th><th>Redaman</th>
             <th class="t-actions">Aksi</th></tr></thead>
-          <tbody id="tbPelanggan"><tr><td colspan="11" class="empty">Memuat…</td></tr></tbody></table>
+          <tbody id="tbPelanggan"><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table>
           <div class="pager">
+            <!-- Kotak pilih-semua ada di header tabel, dan header itu disembunyikan saat
+             daftar berubah jadi kartu di layar HP — jadi butuh pintasan tersendiri. -->
+            <button class="btn sm secondary only-mobile" onclick="plgPilihSemuaHalaman()">☑️ Pilih semua di halaman ini</button>
             <button class="btn sm secondary" onclick="plgHal(-1)">← Sebelumnya</button>
             <span class="hint" id="plgHalInfo"></span>
             <button class="btn sm secondary" onclick="plgHal(1)">Berikutnya →</button>
@@ -1320,6 +1327,14 @@
     <button class="btn danger" onclick="kirimRetur()">Kembalikan Pembayaran</button></div>
 </div></div>
 
+<!-- Detail pelanggan: semua kolom yang tidak lagi muat di daftar (v2.7.1) -->
+<div class="modal-bg" id="mPlgDetail"><div class="modal wide">
+  <div class="modal-head"><h2 id="plgdJudul">Pelanggan</h2>
+    <button class="btn sm ghost" onclick="modalClose('mPlgDetail')">✕</button></div>
+  <div class="modal-body" id="plgdIsi"><div class="empty">Memuat…</div></div>
+  <div class="modal-foot" id="plgdAksi"></div>
+</div></div>
+
 <div class="modal-bg" id="mInvoice"><div class="modal">
   <div class="modal-head"><h2 id="mInvTitle">Invoice Penjualan Barang / Jasa</h2>
     <button class="btn sm ghost" onclick="modalClose('mInvoice')">✕</button></div>
@@ -1368,6 +1383,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261015e"></script>
+<script src="panel.js?v=20261015g"></script>
 </body>
 </html>

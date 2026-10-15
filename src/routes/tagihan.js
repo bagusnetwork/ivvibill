@@ -436,7 +436,9 @@ router.post('/pembayaran/:id/retur', requirePJ(), requireMenu('pembayaran', 'ver
        FROM pembayaran b JOIN tagihan t ON t.id = b.id_tagihan
        WHERE b.id = ? AND t.id_data_server = ?`, [id, ds]);
     if (!b) return res.status(404).json({ error: 'Pembayaran tidak ada di data server ini' });
-    const r = await billing.returPembayaran(id, { oleh: req.user.id, alasan, force });
+    // Semua perubahan uang dalam SATU transaksi: pembayaran 'retur' + tagihan
+    // kembali belum lunas + kas keluar harus terjadi bersamaan, atau tidak sama sekali.
+    const r = await db.tx(c => billing.returPembayaran(id, { oleh: req.user.id, alasan, force }, c));
     await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
       [req.user.id, ds, 'retur_pembayaran',
        `pembayaran #${id} (${b.metode} ${r.jumlah}) invoice ${b.nomor_invoice} — ${alasan}`

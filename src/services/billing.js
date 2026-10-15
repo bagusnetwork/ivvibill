@@ -532,15 +532,15 @@ async function lunaskanTagihan(idTagihan, metode, { verifiedBy = null, ref = nul
  * uang pelanggan ada di vendor dan harus di-refund dari dashboard vendor lebih
  * dulu, kalau tidak kas aplikasi bilang sudah balik padahal belum.
  */
-async function returPembayaran(idPembayaran, { oleh = null, alasan = '', force = false } = {}) {
-  const b = await db.one('SELECT * FROM pembayaran WHERE id = ?', [idPembayaran]);
+async function returPembayaran(idPembayaran, { oleh = null, alasan = '', force = false } = {}, x = db) {
+  const b = await x.one('SELECT * FROM pembayaran WHERE id = ?', [idPembayaran]);
   if (!b) throw new Error('Pembayaran tidak ditemukan');
   if (b.status === 'retur') { const e = new Error('Pembayaran ini sudah pernah diretur'); e.status = 400; throw e; }
   if (b.status !== 'diterima') {
     const e = new Error(`Pembayaran berstatus "${b.status}" — yang bisa diretur hanya yang sudah diterima`);
     e.status = 400; throw e;
   }
-  const t = await db.one('SELECT * FROM tagihan WHERE id = ?', [b.id_tagihan]);
+  const t = await x.one('SELECT * FROM tagihan WHERE id = ?', [b.id_tagihan]);
   if (!t) throw new Error('Tagihan tidak ditemukan');
   if (b.metode !== 'manual' && !force) {
     const e = new Error(
@@ -549,24 +549,31 @@ async function returPembayaran(idPembayaran, { oleh = null, alasan = '', force =
     e.status = 409; e.kunci = 'retur_perlu_force'; throw e;
   }
 
-  await db.run(
+  // AND status='diterima' + cek affectedRows: dua klik beruntun (atau dua operator
+  // sekaligus) tidak boleh mengeluarkan uang dua kali. Bila barisnya sudah diambil
+  // jalur lain, hentikan di sini — bukan lanjut membalik tagihan dan mencatat kas.
+  const diubah = await x.run(
     `UPDATE pembayaran SET status='retur', retur_oleh=?, retur_at=NOW(), alasan_retur=?
      WHERE id=? AND status='diterima'`,
     [oleh, String(alasan || '').slice(0, 255) || null, b.id]);
+  if (!diubah) {
+    const e = new Error('Pembayaran ini baru saja diretur — muat ulang daftar sebelum mengulang.');
+    e.status = 409; throw e;
+  }
 
   // Sisa pembayaran yang masih sah menentukan apakah tagihannya tetap lunas.
-  const sisa = await db.one(
+  const sisa = await x.one(
     `SELECT COALESCE(SUM(jumlah), 0) AS jml FROM pembayaran
       WHERE id_tagihan = ? AND status = 'diterima'`, [t.id]);
   const masihLunas = Number(sisa.jml) + 0.005 >= Number(t.total);
   let statusBaru = t.status, dibatalkanLunas = false;
   if (t.status === 'lunas' && !masihLunas) {
-    await db.run(
+    await x.run(
       `UPDATE tagihan SET
          status = CASE WHEN jatuh_tempo < CURDATE() THEN 'jatuh_tempo' ELSE 'terkirim' END,
          metode_bayar = NULL, paid_at = NULL
        WHERE id = ? AND status = 'lunas'`, [t.id]);
-    const segar = await db.one('SELECT status FROM tagihan WHERE id = ?', [t.id]);
+    const segar = await x.one('SELECT status FROM tagihan WHERE id = ?', [t.id]);
     statusBaru = segar ? segar.status : statusBaru;
     dibatalkanLunas = true;
   }
@@ -575,7 +582,7 @@ async function returPembayaran(idPembayaran, { oleh = null, alasan = '', force =
   let kasCatat = null;
   if (nominal > 0) {
     try {
-      const idKas = await db.insert(
+      const idKas = await x.insert(
         `INSERT INTO kas (id_data_server, tipe, kategori, jumlah, keterangan, id_ref, dibuat_oleh)
          VALUES (?, 'keluar', 'retur_pembayaran', ?, ?, ?, ?)`,
         [t.id_data_server, nominal,

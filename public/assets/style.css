@@ -223,3 +223,66 @@ textarea { min-height: 90px; resize: vertical; }
 }
 .menu-btn { display: none; background: none; border: none; color: var(--text); font-size: 20px; cursor: pointer; }
 @media (max-width: 900px) { .menu-btn { display: block; } }
+
+/* ============================================================
+   v2.7.1 — daftar data yang sempit + modal Detail, tetap terbaca di HP
+   ============================================================ */
+
+/* Modal Detail pelanggan lebih lebar dari modal form biasa, isinya pasangan
+   label → nilai. Dua kolom di layar lebar, satu kolom kalau menyempit. */
+.modal.wide { max-width: 780px; }
+.dl-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 20px; }
+.dl-item { display: flex; gap: 10px; padding: 6px 0;
+  border-bottom: 1px dashed rgba(148,163,184,.18); min-width: 0; }
+.dl-k { flex: 0 0 36%; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); padding-top: 2px; }
+.dl-v { flex: 1 1 auto; min-width: 0; font-size: 13.5px; overflow-wrap: anywhere; }
+.dl-tagihan { margin-top: 6px; font-size: 13px; }
+.dl-tagihan th { padding: 6px 8px; }
+.dl-tagihan td { padding: 6px 8px; }
+/* Riwayat tagihan di dalam modal: lima kolom tetap lebih lebar dari layar HP,
+   jadi yang menggulir adalah tabelnya sendiri — modal dan isian lain tetap
+   pas tanpa mendorong apa pun ke luar layar. */
+.dl-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.dl-scroll .dl-tagihan { min-width: 420px; }
+/* Lak modal dibuat satu lajur yang tidak boleh mengembang. Tanpa ini, lajur
+   grid "auto" ikut melebar mengikuti isi terlebar (tabel riwayat 420px di
+   atas), sehingga modalnya sendiri keluar layar HP dan teks di kanan
+   terpotong — yang seharusnya menggulir hanyalah tabelnya. */
+.modal-bg { grid-template-columns: minmax(0, 1fr); }
+#plgdAksi { justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+
+/* Daftar Pelanggan: Nama merangkul checkbox pilih massal, sisanya ringkas. */
+.tbl-plg .plg-cell { display: flex; align-items: center; gap: 8px; }
+.tbl-plg .plg-cell .hint { margin-top: 0; white-space: nowrap; }
+.tbl-plg .plg-id, .tbl-plg .plg-redaman { white-space: nowrap; }
+.tbl-plg td .badge { display: inline-block; }
+/* Ikon tombol Aksi cuma dipakai di HP — teksnya yang mengambil tempat. */
+.tbl-plg .bti { display: none; }
+/* Kendali yang hanya masuk akal pada layout kartu (pilih-semua, karena header
+   tabelnya hilang). */
+.only-mobile { display: none; }
+
+/* Di bawah 700px barisnya jadi kartu: thead hilang, tiap sel jadi satu lajur
+   berlabel. Data yang sama, tinggi layar HP yang pendek tetap terpakai. */
+@media (max-width: 700px) {
+  .dl-grid { grid-template-columns: 1fr; }
+  .only-mobile { display: inline-block; }
+  .tbl-plg thead { display: none; }
+  .tbl-plg, .tbl-plg tbody, .tbl-plg tr { display: block; width: 100%; }
+  .tbl-plg tr { border: 1px solid var(--line); border-radius: 12px;
+    padding: 4px 12px 10px; width: calc(100% - 20px); margin: 0 auto 10px; }
+  .tbl-plg tr:hover td { background: transparent; }
+  .tbl-plg td { display: flex; align-items: center; gap: 10px;
+    border-bottom: none; padding: 4px 0; font-size: 13px; }
+  .tbl-plg td[data-label]::before { content: attr(data-label); flex: 0 0 76px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .tbl-plg td[data-label=""]::before { content: none; }
+  .tbl-plg td.plg-nama { padding-top: 8px; }
+  .tbl-plg td.t-actions { flex-wrap: wrap; gap: 6px; margin-top: 8px;
+    padding-top: 10px; border-top: 1px solid var(--line); text-align: left; }
+  .tbl-plg td .btx { display: none; }
+  .tbl-plg td .bti { display: inline; }
+  /* Modal detail: tombol aksi rata kiri supaya mudah dijangkau jempol. */
+  #plgdAksi { justify-content: flex-start; }
+}
