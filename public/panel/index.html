@@ -207,21 +207,32 @@
             <option value="lunas">lunas</option><option value="jatuh_tempo">jatuh tempo</option>
             <option value="batal">batal</option></select>
           <div class="spacer"></div>
+          <a class="btn secondary" id="lnEksporTagihan" href="/api/tagihan/export" download title="Unduh daftar tagihan sesuai saringan yang sedang dipilih (status / pencarian) ke Excel">&#128190; Export Excel</a>
           <button class="btn secondary" onclick="jalankanSiklus()" title="Jalankan siklus otomatis sekarang, tetap sesuai jadwal: hanya profil tagihan yang tanggal buat/kirimnya jatuh hari ini ditagih &amp; dikirim WA; pengingat dan isolir hanya untuk yang sudah lewat tempo">⟳ Jalankan Siklus</button>
           <button class="btn secondary" onclick="kirimTagihanWA()">📨 Kirim via WA</button>
           <button class="btn secondary" onclick="formTagihanSatuan()">+ Tagihan Satuan</button>
           <button class="btn" onclick="buatTagihan()">+ Buat Tagihan Bulanan</button>
         </div>
         <p class="hint" id="tJadwal">Memuat jadwal siklus…</p>
+        <div class="toolbar" id="tqBulk" style="display:none">
+          <span class="hint" id="tqBulkJml">0 dipilih</span>
+          <button class="btn sm secondary" onclick="tqBulkBatal()">Batalkan terpilih</button>
+          <button class="btn sm secondary" onclick="tqPilihSemua(true)">Pilih semua tampil</button>
+          <button class="btn sm ghost" onclick="tqBulkBersihkan()">Batal pilih</button>
+        </div>
         <div class="cards">
           <div class="card red"><div class="label">Belum lunas</div><div class="value" id="tBelum">Rp 0</div></div>
           <div class="card blue"><div class="label">Jumlah tagihan</div><div class="value" id="tJml">0</div></div>
         </div>
         <div class="panel"><div class="panel-body" style="padding:0">
-          <table><thead><tr><th>Invoice</th><th>Pelanggan</th><th>Periode</th>
+          <table><thead><tr><th style="width:34px"><input type="checkbox" id="tqAll" onchange="tqPilihSemua(this.checked)"></th>
+            <th>Invoice</th><th>Pelanggan</th><th>Periode</th>
             <th class="t-num">Total</th><th>Jatuh tempo</th><th>Status</th><th class="t-actions">Aksi</th></tr></thead>
-          <tbody id="tbTagihan"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
+          <tbody id="tbTagihan"><tr><td colspan="8" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
+        <p class="hint" style="margin-top:10px">Baris merah ini membersihkan data, bukan melayani pelanggan.
+          <button class="btn sm danger" onclick="hapusSemuaTagihan()" title="Hapus PERMANEN semua tagihan data server ini. Barisnya dibuang dari database (disalin dulu ke tabel cadangan). Khusus pemilik.">&#128465; Hapus semua data tagihan</button>
+        </p>
       </div>
 
       <!-- ================= INVOICE PENJUALAN BARANG/JASA ================= -->
@@ -633,10 +644,11 @@
           <p class="hint">Siklus WA juga mencoba ulang otomatis sampai 4 percobaan; setelah itu pesan berhenti dan perlu diperiksa (nomor tidak aktif / gateway mati / URL media ditolak).</p>
           <table><thead><tr><th>Tujuan</th><th>Jenis</th><th>Pesan</th><th>Percobaan</th><th>Error</th></tr></thead>
           <tbody id="tbWaGagal"><tr><td colspan="5" class="empty">Kosong</td></tr></tbody></table></div></div>
-        <div class="panel"><div class="panel-head"><h2>Log pengiriman</h2></div>
+        <div class="panel"><div class="panel-head"><h2>Log pengiriman</h2>
+          <button class="btn sm danger" onclick="waBersihkan()" title="Hapus semua log berstatus terkirim milik data server ini (antrean & pesan gagal tetap disimpan)">&#128465; Bersihkan terkirim</button></div>
           <div class="panel-body" style="padding:0">
-          <table><thead><tr><th>Waktu</th><th>Tujuan</th><th>Status</th><th>Response</th></tr></thead>
-          <tbody id="tbWaLog"><tr><td colspan="4" class="empty">Kosong</td></tr></tbody></table></div></div>
+          <table><thead><tr><th>Waktu</th><th>Tujuan</th><th>Status</th><th>Response</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbWaLog"><tr><td colspan="5" class="empty">Kosong</td></tr></tbody></table></div></div>
       </div>
 
       <!-- ================= SETTING ================= -->
@@ -1266,6 +1278,24 @@
     <button class="btn" onclick="simpanKeteranganTagihan()">Simpan</button></div>
 </div></div>
 
+<div class="modal-bg" id="mBayar"><div class="modal">
+  <div class="modal-head"><h2>Bayar tagihan</h2>
+    <button class="btn sm ghost" onclick="modalClose('mBayar')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="byTagId">
+    <p class="hint">Tagihan <b id="byInvoice">-</b> · <span id="byPelanggan">-</span> · total <b id="byTotal">-</b></p>
+    <div class="form-row"><label>Rekening tujuan transfer</label>
+      <select id="byRekening"><option value="">— tanpa rekening —</option></select></div>
+    <div class="form-row"><label>Upload bukti transfer (png/jpg/webp, maks 3 MB)</label>
+      <input type="file" id="byBukti" accept="image/png,image/jpeg,image/webp"></div>
+    <div class="form-row"><label>Keterangan</label>
+      <input id="byKet" placeholder="mis. transfer BCA, an. pelanggan"></div>
+    <p class="hint" id="byMode"></p>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mBayar')">Batal</button>
+    <button class="btn" onclick="kirimBayar()">Tandai Bayar</button></div>
+</div></div>
+
 <div class="modal-bg" id="mInvoice"><div class="modal">
   <div class="modal-head"><h2 id="mInvTitle">Invoice Penjualan Barang / Jasa</h2>
     <button class="btn sm ghost" onclick="modalClose('mInvoice')">✕</button></div>
@@ -1314,6 +1344,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261015b"></script>
+<script src="panel.js?v=20261015c"></script>
 </body>
 </html>

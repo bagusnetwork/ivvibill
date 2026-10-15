@@ -16,6 +16,8 @@ const crypto = require('../util/crypto');
 const cryptoLib = require('crypto');
 const http = require('../util/http');
 const multer = require('multer');
+const XLSX = require('xlsx');
+const csv = require('../util/csv');
 const path = require('path');
 const fs = require('fs');
 const config = require('../config');
@@ -171,6 +173,133 @@ router.get('/tagihan/jadwal', async (req, res, next) => {
            AND t.jatuh_tempo < CURDATE() AND p.status = 'aktif'`, [ds]
       ) || {}).n || 0
     });
+  } catch (e) { next(e); }
+});
+
+/**
+ * v2.6.0 — EKSPOR tagihan ke Excel/CSV untuk laporan.
+ * Sengaja menyalin PERSIS saringan daftar Tagihan (status + pencarian + sekat
+ * tenant/role) supaya tombol "Export" menghasilkan apa yang sedang dilihat
+ * operator: pilih status "lunas" lalu Export = laporan lunas; "jatuh_tempo" =
+ * laporan tunggakan. Tidak ada batas 100 baris seperti daftar — laporan memang
+ * untuk seluruh isinya (dibatasi 20.000 baris agar memori proses tetap aman).
+ */
+router.get('/tagihan/export', async (req, res, next) => {
+  try {
+    const s = scopeTagihan(req);
+    const status = v.enumOf(req.query.status, ['buat', 'terkirim', 'menunggu', 'lunas', 'jatuh_tempo', 'batal'], null);
+    const cari = v.str(req.query.q, { max: 100, def: '' });
+    const where = [s.where];
+    const params = [...s.params];
+    if (status) { where.push('t.status = ?'); params.push(status); }
+    if (cari) { where.push('(t.nomor_invoice LIKE ? OR p.nama LIKE ?)'); params.push(`%${cari}%`, `%${cari}%`); }
+    const rows = await db.q(
+      `SELECT t.nomor_invoice, p.nama AS nama_pelanggan, p.username_pppoe, t.periode,
+              t.jumlah, t.ppn, t.total, t.jatuh_tempo, t.status,
+              t.metode_bayar, b.rekening_tujuan, b.created_at AS tanggal_bayar
+       FROM tagihan t
+       JOIN pelanggan p ON p.id = t.id_pelanggan
+       LEFT JOIN pembayaran b ON b.id = (
+         SELECT MAX(b2.id) FROM pembayaran b2 WHERE b2.id_tagihan = t.id AND b2.status = 'diterima')
+       WHERE ${where.join(' AND ')}
+       ORDER BY t.jatuh_tempo DESC, t.id DESC LIMIT 20000`,
+      params);
+    const KEPALA = ['Nomor Invoice', 'Pelanggan', 'Username', 'Periode', 'Jumlah',
+      'PPN', 'Total', 'Jatuh Tempo', 'Status', 'Metode Bayar', 'Rekening Tujuan', 'Tanggal Bayar'];
+    const kunci = ['nomor_invoice', 'nama_pelanggan', 'username_pppoe', 'periode', 'jumlah',
+      'ppn', 'total', 'jatuh_tempo', 'status', 'metode_bayar', 'rekening_tujuan', 'tanggal_bayar'];
+    const isi = [KEPALA, ...rows.map(r => kunci.map(k => {
+      const val = r[k];
+      if (val == null) return '';
+      if (k === 'jatuh_tempo' || k === 'tanggal_bayar') return String(val).slice(0, 10);
+      return String(val);
+    }))];
+    const label = status ? `tagihan-${status}` : 'tagihan-semua';
+    const nama = `${label}-${new Date().toISOString().slice(0, 10)}`;
+    if (req.query.format === 'csv') {
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${nama}.csv"`);
+      return res.send(csv.tulisCsv(isi, { bom: true }));
+    }
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(isi);
+    ws['!cols'] = KEPALA.map(() => ({ wch: 18 }));
+    XLSX.utils.book_append_sheet(wb, ws, 'Tagihan');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${nama}.xlsx"`);
+    return res.send(buf);
+  } catch (e) { next(e); }
+});
+
+/**
+ * v2.6.0 — batalkan BANYAK tagihan sekaligus (dari checkbox daftar).
+ * Ini tetap pembatalan LEMBUT (status = 'batal'), bukan hapus baris: tagihan
+ * lunas sengaja ditolak agar catatan uang masuk tidak hilang. Aksi per-baris
+ * yang lama (POST /tagihan/:id/batal) tidak berubah.
+ */
+router.post('/tagihan/batal-banyak', requirePJ(), requireMenu('tagihan', 'batal'), async (req, res, next) => {
+  try {
+    const ids = [].concat(req.body.ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0);
+    if (!ids.length) return res.status(400).json({ error: 'Belum ada tagihan dipilih' });
+    if (ids.length > 2000) return res.status(400).json({ error: 'Maksimal 2000 tagihan sekali jalan' });
+    const ts = tenantSql(req, 'id_data_server');
+    const frag = ids.map(() => '?').join(',');
+    const diubah = await db.run(
+      `UPDATE tagihan SET status='batal'
+       WHERE id IN (${frag}) AND status != 'lunas'${ts.sql}`,
+      [...ids, ...ts.params]);
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, tenantAktif(req), 'batal_tagihan_banyak', `${diubah}/${ids.length} tagihan`, (req.ip || '').replace('::ffff:', '')]);
+    res.json({ ok: true, diubah, diminta: ids.length });
+  } catch (e) { next(e); }
+});
+
+/**
+ * v2.6.0 — HAPUS KERAS seluruh tagihan satu data server.
+ *
+ * Ini satu-satunya jalur yang membuang baris tagihan permanen, karena itu
+ * dikunci rapat: hanya superadmin/master, hanya tenant aktif yang dipilih,
+ * butuh nama tenant diketik persis sebagai konfirmasi, dan SEMUA baris
+ * disalin dulu ke tagihan_hapus_backup / pembayaran_hapus_backup (satu batch)
+ * sebelum DELETE. Tidak ada router/WA yang disentuh — mutasi layanan bukan
+ * bagian dari membersihkan data laporan.
+ */
+router.post('/tagihan/hapus-semua', requireRole('superadmin', 'master'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const konfirmasi = v.str(req.body.konfirmasi, { max: 100, def: '' });
+    const srv = await cfgData.getServer(ds, true);
+    const nama = String((srv && srv.nama_server) || '').trim();
+    if (konfirmasi !== nama) {
+      return res.status(400).json({
+        error: `Konfirmasi salah — ketik persis nama data server "${nama}" untuk menghapus permanen`
+      });
+    }
+    const tagihan = await db.q(`SELECT * FROM tagihan WHERE id_data_server = ?`, [ds]);
+    if (!tagihan.length) return res.json({ ok: true, dihapus: 0, pembayaran: 0, batch: null });
+    const bayar = await db.q(
+      `SELECT b.* FROM pembayaran b JOIN tagihan t ON t.id = b.id_tagihan WHERE t.id_data_server = ?`, [ds]);
+    const batch = `hapus-${ds}-${Date.now()}`;
+    await db.tx(async (c) => {
+      for (const t of tagihan) {
+        await c.insert(
+          `INSERT INTO tagihan_hapus_backup (id_data_server, batch, deleted_by, baris) VALUES (?,?,?,?)`,
+          [ds, batch, req.user.id, JSON.stringify(t)]);
+      }
+      for (const b of bayar) {
+        await c.insert(
+          `INSERT INTO pembayaran_hapus_backup (id_data_server, batch, deleted_by, baris) VALUES (?,?,?,?)`,
+          [ds, batch, req.user.id, JSON.stringify(b)]);
+      }
+      await c.run(`DELETE b FROM pembayaran b JOIN tagihan t ON t.id = b.id_tagihan WHERE t.id_data_server = ?`, [ds]);
+      await c.run(`DELETE FROM tagihan WHERE id_data_server = ?`, [ds]);
+    });
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'hapus_tagihan_semua',
+       `${tagihan.length} tagihan + ${bayar.length} pembayaran dibuang (backup batch ${batch})`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json({ ok: true, dihapus: tagihan.length, pembayaran: bayar.length, batch });
   } catch (e) { next(e); }
 });
 
@@ -335,14 +464,34 @@ router.post('/tagihan/:id/bayar', upload.single('bukti'), async (req, res, next)
     }
     const keterangan = v.str(req.body.keterangan, { max: 255, def: null });
     const bukti = req.file ? `/uploads/${req.file.filename}` : null;
+
+    // v2.6.0 — "transfer ke rekening". id_rekening dikirim dari dropdown modal
+    // Bayar. Divalidasi ke tabel rekening MILIK TENANT tagihan ini (bukan tenant
+    // aktif, bukan sembarang id) supaya rekening ISP lain tidak bisa ditempelkan;
+    // label-nya di-snapshot ke kolom rekening_tujuan agar laporan masih menunjuk
+    // rekening yang benar-benar dipakai walau rekening itu nanti diubah/dinonaktifkan.
+    let idRekening = null, rekeningTujuan = null;
+    const rekId = req.body.id_rekening === '' || req.body.id_rekening == null
+      ? null : v.num(req.body.id_rekening, { int: true, min: 1 });
+    if (rekId) {
+      const rek = await db.one(
+        `SELECT bank, no_rek, atas_nama FROM rekening
+         WHERE id = ? AND id_data_server = ? AND status = 'aktif'`,
+        [rekId, t.id_data_server]);
+      if (!rek) return res.status(400).json({ error: 'Rekening tujuan tidak ada / bukan milik data server ini' });
+      idRekening = rekId;
+      rekeningTujuan = `${rek.bank} / ${rek.no_rek} / a/n ${rek.atas_nama}`.slice(0, 150);
+    }
+
     // Pelanggan mengunggah bukti → status menunggu verifikasi penanggung jawab.
     // Pemilik ISP / superadmin boleh langsung tandai lunas.
     const langsungLunas = req.user.role === 'superadmin' || req.user.role === 'master';
 
     await db.insert(
-      `INSERT INTO pembayaran (id_tagihan, jumlah, metode, status, bukti, keterangan, verified_by)
-       VALUES (?,?, 'manual', ?, ?, ?, ?)`,
-      [id, t.total, langsungLunas ? 'diterima' : 'menunggu', bukti, keterangan, langsungLunas ? req.user.id : null]
+      `INSERT INTO pembayaran (id_tagihan, jumlah, metode, status, bukti, keterangan, verified_by, id_rekening, rekening_tujuan)
+       VALUES (?,?, 'manual', ?, ?, ?, ?, ?, ?)`,
+      [id, t.total, langsungLunas ? 'diterima' : 'menunggu', bukti, keterangan,
+       langsungLunas ? req.user.id : null, idRekening, rekeningTujuan]
     );
     if (langsungLunas) {
       await billing.lunaskanTagihan(id, 'manual', {

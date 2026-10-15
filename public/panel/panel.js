@@ -696,8 +696,12 @@ async function loadTagihan() {
       lunas: 'ok', jatuh_tempo: 'bad', batal: 'mute'
     }[s] || 'mute');
     TQ_ROWS = d.data || [];
+    // Export mengikuti saringan yang sama persis dengan daftar ini.
+    const ln = document.getElementById('lnEksporTagihan');
+    if (ln) ln.href = `/api/tagihan/export?q=${q}&status=${st}`;
     document.getElementById('tbTagihan').innerHTML = TQ_ROWS.map(t => `
       <tr>
+        <td><input type="checkbox" class="tqSel" value="${t.id}" onchange="tqPilihBaris()"></td>
         <td><b>${esc(t.nomor_invoice)}</b></td>
         <td>${esc(t.nama_pelanggan)}</td>
         <td>${esc(t.periode)}</td>
@@ -713,13 +717,15 @@ async function loadTagihan() {
           ${t.status !== 'lunas' && t.status !== 'batal'
             ? `<button class="btn sm ghost" onclick="kirimWaTagihan(${t.id})" title="Kirim / kirim ulang tagihan ini ke WhatsApp pelanggan">📤 WA</button>
                <button class="btn sm ghost" onclick="isolirTagihan(${t.id_pelanggan})" title="Isolir pelanggan ini sekarang: secret/profil di router + kirim WA isolir">🔒 Isolir</button>
-               <button class="btn sm" onclick="bayarTagihan(${t.id})">Bayar</button>
+               <button class="btn sm" onclick="bayarTagihan(${TQ_ROWS.indexOf(t)})">Bayar</button>
                <button class="btn sm ghost" onclick="formKeteranganTagihan(${TQ_ROWS.indexOf(t)})">Keterangan</button>
                <button class="btn sm ghost" onclick="batalTagihan(${t.id})">Batal</button>`
             : t.status === 'lunas'
               ? `<button class="btn sm ghost" onclick="kirimKwitansi(${t.id})" title="Kirim bukti lunas (gambar) ke WA">Kwitansi WA</button>` : ''}
         </td>
-      </tr>`).join('') || '<tr><td colspan="7" class="empty">Belum ada tagihan</td></tr>';
+      </tr>`).join('') || '<tr><td colspan="8" class="empty">Belum ada tagihan</td></tr>';
+    const all = document.getElementById('tqAll'); if (all) all.checked = false;
+    tqPilihBaris();
     muatJadwalTagihan();
   } catch (e) { toast(e.message, true); }
 }
@@ -821,11 +827,108 @@ async function kirimTagihanWA() {
   } catch (e) { toast(e.message, true); }
 }
 
-async function bayarTagihan(id) {
-  if (!confirm('Tandai tagihan LUNAS (pembayaran manual)?')) return;
+// ------------------------------------------- checkbox / aksi massal tagihan
+function tqTerpilih() {
+  return [...document.querySelectorAll('.tqSel:checked')].map(c => Number(c.value));
+}
+function tqPilihSemua(cek) {
+  const on = cek === true || (cek && cek.checked === true) || cek === 'true';
+  document.querySelectorAll('.tqSel').forEach(c => { c.checked = on; });
+  const all = document.getElementById('tqAll'); if (all) all.checked = on;
+  tqPilihBaris();
+}
+function tqPilihBaris() {
+  const n = tqTerpilih().length;
+  const bar = document.getElementById('tqBulk');
+  if (bar) bar.style.display = n ? 'flex' : 'none';
+  const jml = document.getElementById('tqBulkJml');
+  if (jml) jml.textContent = `${n} dipilih`;
+}
+function tqBulkBersihkan() {
+  document.querySelectorAll('.tqSel').forEach(c => { c.checked = false; });
+  const all = document.getElementById('tqAll'); if (all) all.checked = false;
+  tqPilihBaris();
+}
+async function tqBulkBatal() {
+  const ids = tqTerpilih();
+  if (!ids.length) return toast('Belum ada tagihan dipilih', true);
+  if (!confirm(`Batalkan ${ids.length} tagihan terpilih?\n\n`
+    + 'Statusnya menjadi "batal" dan keluar dari daftar aktif. Tagihan yang sudah LUNAS '
+    + 'tidak ikut dibatalkan (catatan uang masuk dilindungi).')) return;
   try {
-    await API.post(`/api/tagihan/${id}/bayar`, { keterangan: 'manual' });
-    toast('Lunas'); loadTagihan();
+    const r = await API.post('/api/tagihan/batal-banyak', { ids });
+    toast(`${r.diubah} tagihan dibatalkan`
+      + (r.diubah < r.diminta ? ` · ${r.diminta - r.diubah} dilewati (lunas/tidak ada)` : ''),
+      r.diubah < r.diminta);
+    loadTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
+/**
+ * v2.6.0 — hapus PERMANEN semua tagihan data server aktif.
+ * Sengaja minta nama data server diketik ulang (bukan sekadar OK) karena
+ * barisnya dibuang dari database — backup-nya ke tabel tagihan_hapus_backup,
+ * tapi tidak ada tombol "urungkan".
+ */
+async function hapusSemuaTagihan() {
+  const s = sesi() || {};
+  const u = s.user || {};
+  if (u.role !== 'superadmin' && u.role !== 'master') {
+    return toast('Hanya pemilik data server / platform yang boleh menghapus permanen', true);
+  }
+  const nama = prompt('Ketik NAMA DATA SERVER yang sedang aktif untuk konfirmasi hapus permanen:');
+  if (!nama) return;
+  if (!confirm('PERINGATAN: ini menghapus SEMUA baris tagihan data server ini dari database '
+    + '(disalin dulu ke tabel cadangan, tidak bisa dibatalkan dari panel). Lanjutkan?')) return;
+  try {
+    const r = await API.post('/api/tagihan/hapus-semua', { konfirmasi: nama });
+    toast(`${r.dihapus} tagihan + ${r.pembayaran} pembayaran dihapus (cadangan batch ${r.batch || '-'})`, !!r.dihapus);
+    tqBulkBersihkan(); loadTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function bayarTagihan(idx) {
+  const t = TQ_ROWS[idx];
+  if (!t) return;
+  document.getElementById('byTagId').value = t.id;
+  document.getElementById('byInvoice').textContent = t.nomor_invoice;
+  document.getElementById('byPelanggan').textContent = t.nama_pelanggan || '';
+  document.getElementById('byTotal').textContent = rupiah(t.total);
+  document.getElementById('byBukti').value = '';
+  document.getElementById('byKet').value = '';
+  // dropdown rekening diisi dari /api/rekening (sudah ter-scope tenant aktif,
+  // hanya status aktif). Bila ISP belum punya rekening, opsi "tanpa rekening" tetap ada.
+  const sel = document.getElementById('byRekening');
+  sel.innerHTML = '<option value="">— tanpa rekening —</option>';
+  try {
+    const rk = await API.get('/api/rekening');
+    sel.innerHTML += (rk.data || []).map(r =>
+      `<option value="${r.id}">${esc(r.bank)} · ${esc(r.no_rek)} · a/n ${esc(r.atas_nama)}</option>`).join('');
+  } catch (e) { /* daftar rekening gagal dimuat — tetap boleh bayar tanpa rekening */ }
+  const s = sesi() || {};
+  const u = s.user || {};
+  document.getElementById('byMode').textContent =
+    (u.role === 'superadmin' || u.role === 'master' || u.tipe === 'master')
+      ? 'Sebagai pemilik: menyimpan akan langsung menandai tagihan LUNAS.'
+      : 'Bukti tersimpan dan menunggu verifikasi penanggung jawab (status jadi "menunggu").';
+  modalOpen('mBayar');
+}
+
+async function kirimBayar() {
+  const id = document.getElementById('byTagId').value;
+  if (!id) return;
+  const fd = new FormData();
+  const rek = document.getElementById('byRekening').value;
+  if (rek) fd.append('id_rekening', rek);
+  const ket = document.getElementById('byKet').value.trim();
+  fd.append('keterangan', ket || 'manual');
+  const f = document.getElementById('byBukti').files[0];
+  if (f) fd.append('bukti', f);
+  try {
+    const r = await API.post(`/api/tagihan/${id}/bayar`, fd, true);
+    modalClose('mBayar');
+    toast(r.status === 'lunas' ? 'Tagihan LUNAS' : 'Bukti masuk, menunggu verifikasi');
+    loadTagihan();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1964,8 +2067,32 @@ async function loadWa() {
     document.getElementById('tbWaLog').innerHTML = (d.data || []).slice(0, 40).map(w => `
       <tr><td>${esc(String(w.created_at).slice(0, 16))}</td><td>${esc(w.tujuan)}</td>
         <td><span class="badge ${w.status === 'terkirim' ? 'ok' : 'bad'}">${esc(w.status)}</span></td>
-        <td class="hint">${esc(String(w.response || '').slice(0, 60))}</td></tr>`).join('')
-      || '<tr><td colspan="4" class="empty">Belum ada log</td></tr>';
+        <td class="hint">${esc(String(w.response || '').slice(0, 60))}</td>
+        <td class="t-actions"><button class="btn sm danger" onclick="waHapus(${w.id})" title="Hapus baris log ini dari riwayat">&#128465;</button></td></tr>`).join('')
+      || '<tr><td colspan="5" class="empty">Belum ada log</td></tr>';
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Hapus satu baris log WA (riwayat tidak menumpuk selamanya). */
+async function waHapus(id) {
+  if (!confirm('Hapus baris log pesan ini dari riwayat?')) return;
+  try { await API.del(`/api/wa/log/${id}`); toast('Log dihapus'); loadWa(); }
+  catch (e) { toast(e.message, true); }
+}
+
+/** Sapu semua log 'terkirim' milik tenant aktif; antrean & pesan gagal tetap disimpan. */
+async function waBersihkan() {
+  const s = sesi() || {};
+  const u = s.user || {};
+  if (u.role !== 'superadmin' && u.role !== 'master') {
+    return toast('Hanya pemilik data server / platform yang boleh menyapu log', true);
+  }
+  if (!confirm('Hapus SEMUA log WA berstatus "terkirim" pada data server ini?\n\n'
+    + 'Antrean pending dan pesan gagal tetap disimpan. Riwayat yang terhapus tidak bisa dikembalikan.')) return;
+  try {
+    const r = await API.post('/api/wa/log/bersihkan', {});
+    toast(`${r.dihapus} log terkirim dihapus`, !!r.dihapus);
+    loadWa();
   } catch (e) { toast(e.message, true); }
 }
 async function waKirim() {

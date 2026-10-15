@@ -4,6 +4,82 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-15 — v2.6.0 — Menu Tagihan: bayar+rekening tujuan, batalkan massal, hapus permanen ber-backup, export Excel, dan pembersih log WA
+
+**Permintaan user**
+
+"ketika klik bayar ada fitur pilihan transfer ke rekening dan upload bukti
+transfernya untuk kebutuhan laporan; tombol delete data batalkan tagihan serentak
+atau by checkbox; tombol delete data tagihan semua; tombol export to excel untuk
+keperluan laporan berikut di menu Isolir dan lunas; di menu WA log pesan pun
+tambahkan tombol delete pesan agar tidak menumpuk data historynya." Lima fitur,
+empat keputusan design dikonfirmasi lewat pertanyaan (kolom rekening baru +
+migrasi; hapus = hard-delete scoped + backup; export ikut filter aktif; WA = hapus
+per baris + kosongkan terkirim).
+
+**1. Bayar → pilih rekening tujuan + upload bukti**
+
+Sebelumnya `bayarTagihan()` cuma `confirm()` lalu `POST /bayar {keterangan}` —
+modal rekening/bukti tidak ada meski rute-nya sudah menerima upload `bukti`
+(multer 3 MB). Ditambah kolom `pembayaran.id_rekening` + `pembayaran.rekening_tujuan`
+(migrasi v24) — id untuk report bisa diGROUP, snapshot teks "BANK / no_rek / a/n"
+agar laporan tetap menunjuk rekening yang benar-benar dipakai walaupun rekening
+itu nanti diubah/dinonaktifkan. `POST /tagihan/:id/bayar` memvalidasi
+`id_rekening` HANYA ke rekening milik tenant tagihan itu (bukan tenant aktif,
+bukan sembarang id). Panel kini membuka modal `mBayar` (dropdown `/api/rekening`
++ file bukti + keterangan) dan mengirim FormData multipart.
+
+**2. Batalkan serentak / by checkbox**
+
+Daftar Tagihan dapat kolom checkbox (`tqAll` header + `tqSel` per baris) + bar
+`tqBulk`, meniru pola voucher yang sudah teruji. Rute baru
+`POST /tagihan/batal-banyak {ids}` = pembatalan LEMBUT (`status='batal'`), dengan
+`WHERE ... AND status != 'lunas'` supaya catatan uang masuk tidak bisa dibatalkan
+sambil lewat. Aksi tunggal `/tagihan/:id/batal` lama tidak berubah.
+
+**3. Hapus semua data tagihan (hard delete + backup)**
+
+`POST /tagihan/hapus-semua` — satu-satunya jalur pembuang baris permanen, dikunci
+rapat: hanya `requireRole('superadmin','master')`, hanya tenant AKTIF, wajib
+mengetik persis `nama_server` sebagai konfirmasi, dan di dalam satu transaksi
+`db.tx` SEMUA baris disalin dulu ke `tagihan_hapus_backup` /
+`pembayaran_hapus_backup` (satu batch, JSON + siapa + kapan) sebelum `DELETE`.
+Tidak menyentuh router/WA. Backup disimpan JSON agar tetap terbaca kalau struktur
+berubah; pemulihan manual dari tabel itu.
+
+**4. Export Excel (Ikut filter — Isolir & lunas = pilih status lalu Export)**
+
+Tagihan tidak punya menu "Isolir/Lunas" terpisah (hanya `#tstatus` di daftar),
+jadi satu tombol Export memakai saringan yang SAMA persis dengan daftar
+(`scopeTagihan` + status + q + `sekatBaca`). `GET /tagihan/export[?status=&q=&format=csv]`
+→ xlsx (SheetJS) / csv; batas 20.000 baris (bukan 100 seperti daftar). Kolom
+menyertakan `rekening_tujuan` & `tanggal_bayar` dari pembayaran 'diterima' terbaru.
+
+**5. Hapus log WA**
+
+`DELETE /wa/wa/log/:id` (scoped via JOIN wa_queue→id_data_server) untuk satu baris,
+dan `POST /wa/log/bersihkan` (superadmin/master) menyapu HANYA `wa_log` +
+`wa_queue` berstatus `terkirim` milik tenant aktif — antrean pending dan pesan
+gagal SENGAJA dipertahankan. Tombol 🗑 per baris + "Bersihkan terkirim" di Log WA.
+
+**Verifikasi jalur asli (sandbox ds1 "IVVI Network", 0 pelanggan/0 tagihan, lalu dipulihkan 0/0/0/0)**
+- Bayar multipart `id_rekening=1`+bukti png → `pembayaran` #183: `id_rekening=1`,
+  `rekening_tujuan="BCA / 0000000000 / a/n IVVI Network"`, `bukti=/uploads/...png`; tagihan → lunas.
+- `batal-banyak {ids:[363,362]}` → `diubah:1 diminta:2`: B→batal, A (lunas) ditolak.
+- `export?status=lunas` → HTTP 200, 17 KB, `PK` (xlsx valid).
+- `hapus-semua` konfirmasi "SALAH" → 400 (pesan memuat nama persis); "IVVI Network" →
+  `dihapus:2 pembayaran:1`, tagihan ds1→0, `tagihan_hapus_backup`=2, `pembayaran_hapus_backup`=1.
+- WA: seed 2 log terkirim ds1 → `DELETE /wa/log/545` 200 (sisa 1) → `bersihkan` hapus sisanya; ds1 bersih.
+- Produksi tak tersentuh: ds2=172, ds5=157, pembayaran=173, menunggu=0, wa_log=532, backup_sisa=0.
+- Nginx melayani panel.js baru (md5 identik webroot, `?v=20261015c`, mengandung `kirimBayar`).
+
+Migrasi: `scripts/migrate-v24.js` (idempoten) — kolom `pembayaran.id_rekening`+`rekening_tujuan`,
+tabel `tagihan_hapus_backup`+`pembayaran_hapus_backup`. Service `ivvibill` di-restart.
+Berkas: `src/routes/tagihan.js`, `src/routes/lain.js`, `public/panel/panel.js`,
+`public/panel/index.html`, `sql/schema.sql`, `scripts/migrate-v24.js`.
+
+---
+
 ## 2026-10-15 — v2.5.0 — Tab Pelanggan Unmanage: status/IP/MAC/redaman terbaca + Remote ONU + Input Billing
 
 **Gejala (laporan user)**

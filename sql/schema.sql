@@ -261,10 +261,39 @@ CREATE TABLE IF NOT EXISTS pembayaran (
   ref          VARCHAR(100) DEFAULT NULL,      -- id transaksi gateway
   keterangan   VARCHAR(255) DEFAULT NULL,
   verified_by  INT DEFAULT NULL,
+  id_rekening      INT DEFAULT NULL,           -- rekening tujuan transfer (v2.6.0)
+  rekening_tujuan  VARCHAR(150) DEFAULT NULL,  -- snapshot "BANK / no_rek / a/n" saat uang masuk
   created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_bayar_tagihan (id_tagihan, status),
   KEY idx_bayar_ref (ref)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Cadangan baris yang dibuang lewat "hapus tagihan/pembayaran" (v2.6.0).
+-- Disimpan sebagai JSON per batch agar tetap terbaca walaupun struktur tabel
+-- induk berubah di versi berikutnya; pemulihan dilakukan manual dari sini.
+CREATE TABLE IF NOT EXISTS tagihan_hapus_backup (
+  id             INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL,
+  batch          VARCHAR(40) NOT NULL,
+  deleted_by     INT DEFAULT NULL,
+  deleted_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  baris          JSON NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_hapus_ds (id_data_server),
+  KEY idx_hapus_batch (batch)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS pembayaran_hapus_backup (
+  id             INT NOT NULL AUTO_INCREMENT,
+  id_data_server INT NOT NULL,
+  batch          VARCHAR(40) NOT NULL,
+  deleted_by     INT DEFAULT NULL,
+  deleted_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  baris          JSON NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_hapusbay_ds (id_data_server),
+  KEY idx_hapusbay_batch (batch)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS rekening (

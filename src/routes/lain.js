@@ -718,6 +718,51 @@ router.post('/wa/ulangi', requirePJ(), requireMenu('wa', 'proses'), async (req, 
   catch (e) { next(e); }
 });
 
+/**
+ * v2.6.0 — hapus SATU baris log WA supaya riwayat tidak menumpuk. wa_log tidak
+ * punya kolom tenant sendiri, jadi sekatnya lewat JOIN ke wa_queue — sama seperti
+ * GET /wa/log. Baris di luar tenant pemohon tidak akan pernah terhapus.
+ */
+router.delete('/wa/log/:id', requirePJ(), requireMenu('wa', 'proses'), async (req, res, next) => {
+  try {
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const ts = tenantSql(req, 'q.id_data_server');
+    const diubah = await db.run(
+      `DELETE w FROM wa_log w JOIN wa_queue q ON q.id = w.id_queue
+       WHERE w.id = ?${ts.sql}`, [id, ...ts.params]);
+    if (!diubah) return res.status(404).json({ error: 'Log tidak ada / bukan milik data server ini' });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+/**
+ * v2.6.0 — kosongkan riwayat log WA milik tenant aktif.
+ *
+ * Hanya baris 'terkirim' yang dibuang; antrean pending dan pesan gagal SENGAJA
+ * dipertahankan (menghapusnya berarti menghilangkan pekerjaan yang belum selesai
+ * dan bukti masalah yang masih perlu diperiksa). Baris wa_queue 'terkirim' ikut
+ * dibersihkan agar tidak tinggal anak tanpa induk. Dikunci superadmin/master
+ * karena ini menyapu banyak riwayat sekaligus.
+ */
+router.post('/wa/log/bersihkan', requireRole('superadmin', 'master'), requireMenu('wa', 'proses'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const hasil = await db.tx(async (c) => {
+      const [cnt] = await c.q(
+        `SELECT COUNT(*) AS n FROM wa_log w JOIN wa_queue q ON q.id = w.id_queue
+         WHERE q.id_data_server = ? AND w.status = 'terkirim'`, [ds]);
+      await c.run(
+        `DELETE w FROM wa_log w JOIN wa_queue q ON q.id = w.id_queue
+         WHERE q.id_data_server = ? AND w.status = 'terkirim'`, [ds]);
+      await c.run(`DELETE FROM wa_queue WHERE id_data_server = ? AND status = 'terkirim'`, [ds]);
+      return Number((cnt[0] || {}).n || 0);
+    });
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'bersihkan_log_wa', `${hasil} log terkirim dihapus`, (req.ip || '').replace('::ffff:', '')]);
+    res.json({ ok: true, dihapus: hasil });
+  } catch (e) { next(e); }
+});
+
 // ------------------------------------------------- rekening CRUD
 router.post('/rekening', requirePJ(), requireMenu('setting', 'rekening'), async (req, res, next) => {
   try {
