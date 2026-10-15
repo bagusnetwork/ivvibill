@@ -684,6 +684,7 @@ async function plgSinkronMac(btn) {
 
 // ============================================================ TAGIHAN
 let TQ_ROWS = [];
+let RETUR_ROWS = [];   // pembayaran 'diterima' milik tagihan yang dibuka di modal Retur
 async function loadTagihan() {
   try {
     const q = encodeURIComponent(document.getElementById('tq').value || '');
@@ -721,7 +722,8 @@ async function loadTagihan() {
                <button class="btn sm ghost" onclick="formKeteranganTagihan(${TQ_ROWS.indexOf(t)})">Keterangan</button>
                <button class="btn sm ghost" onclick="batalTagihan(${t.id})">Batal</button>`
             : t.status === 'lunas'
-              ? `<button class="btn sm ghost" onclick="kirimKwitansi(${t.id})" title="Kirim bukti lunas (gambar) ke WA">Kwitansi WA</button>` : ''}
+              ? `<button class="btn sm ghost" onclick="kirimKwitansi(${t.id})" title="Kirim bukti lunas (gambar) ke WA">Kwitansi WA</button>
+                 <button class="btn sm ghost" onclick="returTagihan(${TQ_ROWS.indexOf(t)})" title="Return pembayaran: balikkan pelunasan yang ternyata salah catat">Retur</button>` : ''}
         </td>
       </tr>`).join('') || '<tr><td colspan="8" class="empty">Belum ada tagihan</td></tr>';
     const all = document.getElementById('tqAll'); if (all) all.checked = false;
@@ -932,6 +934,86 @@ async function hapusSemuaTagihan() {
     const r = await API.post('/api/tagihan/hapus-semua', { konfirmasi: nama });
     toast(`${r.dihapus} tagihan + ${r.pembayaran} pembayaran dihapus (cadangan batch ${r.batch || '-'})`, !!r.dihapus);
     tqBulkBersihkan(); loadTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
+/**
+ * v2.7.0 — sapu semua tagihan berstatus batal di data server aktif (satu klik).
+ */
+async function hapusTagihanBatal() {
+  const u = (sesi() || {}).user || {};
+  if (u.role !== 'superadmin' && u.role !== 'master') {
+    return toast('Hanya pemilik data server / platform yang boleh menghapus permanen', true);
+  }
+  if (!confirm('Hapus PERMANEN semua tagihan berstatus "batal" di data server ini?\n\n'
+    + 'Yang lunas / aktif / jatuh tempo tidak tersentuh. Barisnya tetap disalin dulu '
+    + 'ke tabel cadangan tagihan_hapus_backup.')) return;
+  try {
+    const r = await API.post('/api/tagihan/hapus-batal', {});
+    toast(r.dihapus
+      ? `${r.dihapus} tagihan batal dihapus (cadangan batch ${r.batch})`
+      : 'Tidak ada tagihan berstatus batal', !!r.dihapus);
+    tqBulkBersihkan(); loadTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Buka modal retur: ambil daftar pembayaran tagihan ini dari server. */
+async function returTagihan(idx) {
+  const t = TQ_ROWS[idx];
+  if (!t) return;
+  document.getElementById('rtTagId').value = t.id;
+  document.getElementById('rtInvoice').textContent = t.nomor_invoice;
+  document.getElementById('rtPelanggan').textContent = t.nama_pelanggan || '';
+  document.getElementById('rtTotal').textContent = rupiah(t.total);
+  document.getElementById('rtAlasan').value = '';
+  document.getElementById('rtForce').checked = false;
+  document.getElementById('rtForceBaris').style.display = 'none';
+  const box = document.getElementById('rtDaftar');
+  box.innerHTML = '<span class="hint">Memuat pembayaran…</span>';
+  modalOpen('mRetur');
+  try {
+    const d = await API.get(`/api/tagihan/${t.id}`);
+    RETUR_ROWS = (d.pembayaran || []).filter(b => b.status === 'diterima');
+    if (!RETUR_ROWS.length) {
+      box.innerHTML = '<span class="hint">Tidak ada pembayaran berstatus diterima pada tagihan ini.</span>';
+      return;
+    }
+    const perluForce = RETUR_ROWS.some(b => b.metode !== 'manual');
+    document.getElementById('rtForceBaris').style.display = perluForce ? '' : 'none';
+    box.innerHTML = RETUR_ROWS.map((b, i) => `
+      <label style="display:block;margin:4px 0">
+        <input type="radio" name="rtPilih" value="${i}" ${i === 0 ? 'checked' : ''}>
+        ${rupiah(b.jumlah)} · ${esc(b.metode)} · ${esc(tgl(b.created_at))}
+        ${b.rekening_tujuan ? '· ' + esc(b.rekening_tujuan) : ''}
+        ${b.keterangan ? '· <span class="hint">' + esc(b.keterangan) + '</span>' : ''}
+      </label>`).join('');
+  } catch (e) {
+    box.innerHTML = `<span class="hint">${esc(e.message)}</span>`;
+  }
+}
+
+async function kirimRetur() {
+  const i = document.querySelector('input[name="rtPilih"]:checked');
+  const b = i ? RETUR_ROWS[Number(i.value)] : null;
+  if (!b) return toast('Pilih pembayaran yang akan dikembalikan', true);
+  const alasan = document.getElementById('rtAlasan').value.trim();
+  if (!alasan) return toast('Alasan retur wajib diisi', true);
+  const force = document.getElementById('rtForce').checked === true;
+  if (b.metode !== 'manual' && !force) {
+    return toast('Pembayaran gateway: centang "refund sudah saya lakukan di vendor" lebih dulu', true);
+  }
+  const idTag = document.getElementById('rtTagId').value;
+  const inv = document.getElementById('rtInvoice').textContent;
+  if (!confirm(`Kembalikan pembayaran ${rupiah(b.jumlah)} (${b.metode}) pada invoice ${inv}?\n\n`
+    + 'Tagihan akan kembali ke status belum lunas bila tidak ada pembayaran sah lain yang menutupinya, '
+    + 'dan kas mencatat pengeluaran sebesar nominalnya.')) return;
+  try {
+    const r = await API.post(`/api/pembayaran/${b.id}/retur`, { alasan, force });
+    modalClose('mRetur');
+    toast(r.dibatalkan_lunas
+      ? `Retur tercatat — tagihan kembali ke "${r.status_tagihan}", kas keluar ${rupiah(r.jumlah)}`
+      : `Retur tercatat — tagihan tetap lunas (pembayaran sah tersisa ${rupiah(r.tersisa_diterima)})`);
+    loadTagihan();
   } catch (e) { toast(e.message, true); }
 }
 

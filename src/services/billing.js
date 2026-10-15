@@ -508,6 +508,91 @@ async function lunaskanTagihan(idTagihan, metode, { verifiedBy = null, ref = nul
 }
 
 /**
+ * v2.7.0 — RETUR pembayaran: menarik kembali uang yang ternyata salah catat.
+ *
+ * Dipakai kalau operator menandai lunas padahal uangnya tidak masuk (salah
+ * nominal, salah pelanggan, transfer belum benar-benar datang). Yang dibalik
+ * HANYA catatan keuangannya:
+ *
+ *   pembayaran  → status 'retur' + siapa/kapan/alasan. Barisnya TIDAK dihapus:
+ *                 menghapusnya memutuskan jejak audit dan membuat laporan
+ *                 bulan berjalan berubah diam-diam.
+ *   tagihan     → kembali ke 'terkirim' atau 'jatuh_tempo' (ikut CURDATE(), sama
+ *                 seperti penandaan jatuh tempo di tempat lain) + metode_bayar
+ *                 dan paid_at dikosongkan. Kalau masih ada pembayaran sah lain
+ *                 yang menutupi total, tagihan tetap lunas.
+ *   kas         → baris 'keluar' sebesar nominalnya, jadi pemasukan & pengembalian
+ *                 terlihat berdampingan di laporan keuangan.
+ *
+ * Sengaja TIDAK menyentuh router/isolir/WA: pelunasan boleh mengaktifkan
+ * pelanggan, tapi menarik pembayaran tidak boleh memutus layanan siapa pun
+ * tanpa keputusan manusia — itu pekerjaan tombol Isolir, bukan efek samping.
+ *
+ * Pembayaran gateway (midtrans/treepay/flip/saldo_agen) diblokir kecuali force:
+ * uang pelanggan ada di vendor dan harus di-refund dari dashboard vendor lebih
+ * dulu, kalau tidak kas aplikasi bilang sudah balik padahal belum.
+ */
+async function returPembayaran(idPembayaran, { oleh = null, alasan = '', force = false } = {}) {
+  const b = await db.one('SELECT * FROM pembayaran WHERE id = ?', [idPembayaran]);
+  if (!b) throw new Error('Pembayaran tidak ditemukan');
+  if (b.status === 'retur') { const e = new Error('Pembayaran ini sudah pernah diretur'); e.status = 400; throw e; }
+  if (b.status !== 'diterima') {
+    const e = new Error(`Pembayaran berstatus "${b.status}" — yang bisa diretur hanya yang sudah diterima`);
+    e.status = 400; throw e;
+  }
+  const t = await db.one('SELECT * FROM tagihan WHERE id = ?', [b.id_tagihan]);
+  if (!t) throw new Error('Tagihan tidak ditemukan');
+  if (b.metode !== 'manual' && !force) {
+    const e = new Error(
+      `Pembayaran ini masuk lewat ${b.metode} — refund-nya harus dilakukan di dashboard `
+      + 'vendor lebih dulu. Centang "sudah di-refund di vendor" bila memang sudah.');
+    e.status = 409; e.kunci = 'retur_perlu_force'; throw e;
+  }
+
+  await db.run(
+    `UPDATE pembayaran SET status='retur', retur_oleh=?, retur_at=NOW(), alasan_retur=?
+     WHERE id=? AND status='diterima'`,
+    [oleh, String(alasan || '').slice(0, 255) || null, b.id]);
+
+  // Sisa pembayaran yang masih sah menentukan apakah tagihannya tetap lunas.
+  const sisa = await db.one(
+    `SELECT COALESCE(SUM(jumlah), 0) AS jml FROM pembayaran
+      WHERE id_tagihan = ? AND status = 'diterima'`, [t.id]);
+  const masihLunas = Number(sisa.jml) + 0.005 >= Number(t.total);
+  let statusBaru = t.status, dibatalkanLunas = false;
+  if (t.status === 'lunas' && !masihLunas) {
+    await db.run(
+      `UPDATE tagihan SET
+         status = CASE WHEN jatuh_tempo < CURDATE() THEN 'jatuh_tempo' ELSE 'terkirim' END,
+         metode_bayar = NULL, paid_at = NULL
+       WHERE id = ? AND status = 'lunas'`, [t.id]);
+    const segar = await db.one('SELECT status FROM tagihan WHERE id = ?', [t.id]);
+    statusBaru = segar ? segar.status : statusBaru;
+    dibatalkanLunas = true;
+  }
+
+  const nominal = Number(b.jumlah);
+  let kasCatat = null;
+  if (nominal > 0) {
+    try {
+      const idKas = await db.insert(
+        `INSERT INTO kas (id_data_server, tipe, kategori, jumlah, keterangan, id_ref, dibuat_oleh)
+         VALUES (?, 'keluar', 'retur_pembayaran', ?, ?, ?, ?)`,
+        [t.id_data_server, nominal,
+         `Retur Invoice ${t.nomor_invoice} (${b.metode})${alasan ? ' — ' + String(alasan).slice(0, 120) : ''}`,
+         t.id, oleh]);
+      kasCatat = { id: idKas, jumlah: nominal };
+    } catch (_) { /* kas tidak boleh membatalkan retur — sama seperti pelunasan */ }
+  }
+
+  return {
+    ok: true, id_pembayaran: b.id, jumlah: nominal, metode: b.metode,
+    tagihan_id: t.id, status_tagihan: statusBaru, dibatalkan_lunas: dibatalkanLunas,
+    tersisa_diterima: Number(sisa.jml), kas: kasCatat
+  };
+}
+
+/**
  * Isolir pelanggan yang lewat jatuh tempo + pesan WA isolir.
  *
  * Siklusnya dibuat memulihkan diri: tagihan 'buat'/'terkirim' yang tanggalnya
@@ -621,7 +706,7 @@ module.exports = {
   tglIndo, waktuSiklus, kebijakan, hitungPpn, adaProfilPadaHari,
   KOLOM_PROFIL, GABUNG_PROFIL, tanggalPerPeriode,
   buatTagihanBulanan, buatTagihanSatuan, kirimTagihanWajib,
-  kirimTagihanSatuan, peringatanTagihan, lunaskanTagihan, isolirJatuhTempo,
+  kirimTagihanSatuan, peringatanTagihan, lunaskanTagihan, returPembayaran, isolirJatuhTempo,
   jalankanSiklusTenant,
   isolirManual, aktifkanManual, kirimWaIsolir, kirimWaIsolirPelanggan, kirimKwitansi
 };

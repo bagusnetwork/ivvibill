@@ -374,6 +374,81 @@ router.post('/tagihan/hapus-terpilih', requirePJ(), requireMenu('tagihan', 'hapu
   } catch (e) { next(e); }
 });
 
+/**
+ * v2.7.0 — sapu SEMUA tagihan berstatus 'batal' pada data server aktif.
+ *
+ * "mohon diper-simple untuk penghapusan data table tagihan yang batal". Baris
+ * batal memang sampah administratif: tidak menagih apa pun, tidak ada uang
+ * masuk, dan menumpuk di daftar. Karena itu jalurnya dibuat lebih ringan dari
+ * hapus-semua: tanpa ketik nama data server, cukup satu konfirmasi — tapi tetap
+ * scoped ke satu tenant (tenantAktif, bukan tenantSql: lihat catatan di
+ * /hapus-terpilih) dan tetap menyalin barisnya ke tagihan_hapus_backup lebih
+ * dulu, supaya pembersihan tidak pernah jadi pemusnahan.
+ */
+router.post('/tagihan/hapus-batal', requirePJ(), requireMenu('tagihan', 'hapus'), async (req, res, next) => {
+  try {
+    const ds = tenantAktif(req);
+    const rows = await db.q(
+      `SELECT * FROM tagihan WHERE id_data_server = ? AND status = 'batal'`, [ds]);
+    if (!rows.length) return res.json({ ok: true, dihapus: 0, pembayaran: 0, batch: null });
+    const ids = rows.map(t => t.id);
+    const frag = ids.map(() => '?').join(',');
+    const bayar = await db.q(`SELECT * FROM pembayaran WHERE id_tagihan IN (${frag})`, ids);
+    const batch = `batal-${ds}-${Date.now()}`;
+    await db.tx(async (c) => {
+      for (const t of rows) {
+        await c.insert(
+          `INSERT INTO tagihan_hapus_backup (id_data_server, batch, deleted_by, baris) VALUES (?,?,?,?)`,
+          [ds, batch, req.user.id, JSON.stringify(t)]);
+      }
+      for (const b of bayar) {
+        await c.insert(
+          `INSERT INTO pembayaran_hapus_backup (id_data_server, batch, deleted_by, baris) VALUES (?,?,?,?)`,
+          [ds, batch, req.user.id, JSON.stringify(b)]);
+      }
+      await c.run(`DELETE FROM pembayaran WHERE id_tagihan IN (${frag})`, ids);
+      await c.run(`DELETE FROM tagihan WHERE id IN (${frag}) AND id_data_server = ?`, [...ids, ds]);
+    });
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'hapus_tagihan_batal',
+       `${rows.length} tagihan batal + ${bayar.length} pembayaran dibuang (backup batch ${batch})`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json({ ok: true, dihapus: rows.length, pembayaran: bayar.length, batch });
+  } catch (e) { next(e); }
+});
+
+/**
+ * v2.7.0 — RETUR satu pembayaran (pembatalan uang masuk yang salah catat).
+ * Seluruh logikanya di billing.returPembayaran(): pembayaran jadi 'retur',
+ * tagihan kembali ke terkirim/jatuh_tempo kalau tidak ada pembayaran sah lain,
+ * dan kas dicatat keluar. Di sini hanya sekat tenant + jejak audit.
+ */
+router.post('/pembayaran/:id/retur', requirePJ(), requireMenu('pembayaran', 'verifikasi'), async (req, res, next) => {
+  try {
+    const id = v.num(req.params.id, { int: true, min: 1 });
+    const alasan = v.str(req.body.alasan, { max: 255, def: '' });
+    const force = req.body.force === true || req.body.force === '1';
+    if (!alasan.trim()) return res.status(400).json({ error: 'Alasan retur wajib diisi (tercetak di laporan)' });
+    // Sekat: tenant AKTIF, bukan daftar baca — sama seperti rute hapus.
+    const ds = tenantAktif(req);
+    const b = await db.one(
+      `SELECT b.id, b.status, b.metode, b.jumlah, t.nomor_invoice
+       FROM pembayaran b JOIN tagihan t ON t.id = b.id_tagihan
+       WHERE b.id = ? AND t.id_data_server = ?`, [id, ds]);
+    if (!b) return res.status(404).json({ error: 'Pembayaran tidak ada di data server ini' });
+    const r = await billing.returPembayaran(id, { oleh: req.user.id, alasan, force });
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'retur_pembayaran',
+       `pembayaran #${id} (${b.metode} ${r.jumlah}) invoice ${b.nomor_invoice} — ${alasan}`
+       + `${r.dibatalkan_lunas ? ` — tagihan kembali ke ${r.status_tagihan}` : ' — tagihan tetap lunas'}`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json(r);
+  } catch (e) {
+    if (e && e.kunci === 'retur_perlu_force') return res.status(409).json({ error: e.message, perlu_force: true });
+    next(e);
+  }
+});
+
 router.get('/tagihan/:id', async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });

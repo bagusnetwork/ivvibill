@@ -4,6 +4,85 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-15 — v2.7.0 — Bersihkan tagihan batal sekali klik + Return pembayaran
+
+**Permintaan user**
+
+"mohon di persimple untuk penghapusan data table tagihan yang batal dan tambah
+fitur return pembayaran jika ada kesalahan pembayaran". Dua keputusan desain
+dikonfirmasi lebih dulu: hapus batal = **satu tombol massal + hapus per checkbox
+tetap ada**, dan return = **membalikkan tagihan jadi belum lunas** (bukan sekadar
+mencatat refund), boleh dilakukan **pemilik data server + PJ**.
+
+**1 · `POST /api/tagihan/hapus-batal`**
+
+Satu tombol merah "Bersihkan tagihan batal" di daftar Tagihan. Menghapus permanen
+SEMUA baris `status='batal'` pada data server aktif — tanpa perlu mengetik nama
+server (baris batal tidak menagih apa pun dan tidak membawa uang), tapi tetap:
+scoped ke `tenantAktif(req)`, tetap menyalin barisnya ke `tagihan_hapus_backup`
+(+ `pembayaran_hapus_backup` kalau ada) dalam satu transaksi, tetap tercatat di
+`audit_log`, dan tetap `requirePJ()` + `requireMenu('tagihan','hapus')`. Baris
+dipanggil dua kali: kedua kalinya `dihapus: 0, batch: null` (bukan error).
+
+**2 · Return pembayaran — `POST /api/pembayaran/:id/retur`**
+
+Inti logikanya `billing.returPembayaran(id, {oleh, alasan, force})`:
+
+* `pembayaran.status` → **`retur`** (enum diperluas, migrasi v25). Bukan
+  `ditolak`: nilai itu milik antrean verifikasi bukti dan berarti "bukti tidak
+  sah". Barisnya TIDAK dihapus — jejak uang masuk tetap terbaca, lengkap dengan
+  `retur_oleh`, `retur_at`, `alasan_retur`.
+* `tagihan` → kalau tidak ada pembayaran sah lain yang menutupi total, status
+  kembali lewat `CASE WHEN jatuh_tempo < CURDATE() THEN 'jatuh_tempo' ELSE
+  'terkirim' END` (acuan yang sama dengan penandaan jatuh tempo di siklus),
+  `metode_bayar` dan `paid_at` dikosongkan. Kalau masih ada pembayaran `diterima`
+  lain yang menutup total, tagihan tetap lunas dan hasilnya `dibatalkan_lunas:false`.
+* `kas` → baris `keluar` kategori `retur_pembayaran` sebesar nominalnya, jadi
+  pemasukan dan pengembaliannya berdampingan di laporan keuangan. `KATEGORI`
+  di `routes/keuangan.js` ikut ditambah, dan entri kas bersistem (kategori
+  `pembayaran` / `retur_pembayaran` + `id_ref`) tidak bisa dihapus manual dari
+  halaman Kas — satu-satunya jalan balik adalah tombol Retur.
+* Pembayaran gateway (`metode != 'manual'`) **ditolak dengan 409 `perlu_force`**
+  sampai operator mencentang "refund sudah saya lakukan di dashboard vendor".
+  Tanpa itu kas aplikasi bisa bilang uang sudah balik padahal vendor belum.
+* Sengaja TIDAK menyentuh router/isolir/WA: menarik pembayaran tidak boleh
+  memutus layanan siapa pun — itu pekerjaan tombol Isolir.
+* `alasan` wajib diisi (400 kalau kosong) karena tercetak di audit + laporan.
+
+**Panel** (`panel.js` + `index.html`, cache-bust `?v=20261015e`): tombol
+**Retur** di baris `lunas` membuka modal `mRetur` yang memuat daftar pembayaran
+tagihan itu dari `GET /api/tagihan/:id` (hanya yang `diterima`, dipilih lewat
+radio, menampilkan nominal/metode/tanggal/rekening tujuan), kolom alasan, dan
+checkbox force yang baru muncul bila ada metode gateway.
+
+**Migrasi** `scripts/migrate-v25.js` — SUDAH dijalankan di server (idempoten,
+ada `--dry-run`): `pembayaran.status` += `retur`, tambah `retur_oleh`,
+`retur_at`, `alasan_retur`. `sql/schema.sql` disamakan.
+
+**Verifikasi (HTTPS nyata, tenant sandbox ds1, 2026-10-15 sore)**
+
+| Uji | Hasil |
+|---|---|
+| Sapu batal (2 baris batal + 2 bukan batal) | `200 {dihapus:2, batch:"batal-1-…"}`; tersisa `369=terkirim, 370=jatuh_tempo`; cadangan 2 baris; dipanggil lagi → `dihapus:0` |
+| Bayar manual Rp 25.000 → retur dengan alasan | `200 {status_tagihan:"terkirim", dibatalkan_lunas:true, kas:{id:197,jumlah:25000}}`; `tagihan 369: terkirim / metode NULL / paid_at NULL`; pembayaran `retur oleh=1 alasan="transfer ternyata tidak masuk"`; kas: `masuk pembayaran 25.000` + `keluar retur_pembayaran 25.000` |
+| Retur tanpa alasan | `400 "Alasan retur wajib diisi (tercetak di laporan)"` |
+| Retur pembayaran yang sudah diretur | `400 "Pembayaran ini sudah pernah diretur"` |
+| Pembayaran midtrans, tanpa force | `409` + `perlu_force:true`, menyebut dashboard vendor |
+| Pembayaran midtrans, dengan force | `200 {status_tagihan:"jatuh_tempo", dibatalkan_lunas:true}` (jatuh tempo sudah lewat) |
+| Retur pembayaran milik ds2 saat aktif ds1 | `404`; status pembayaran ds2 tetap `diterima`, ds2 172 lunas / ds5 157 tagihan tidak berubah |
+| Hapus entri kas retur dari halaman Kas | `400 "Entri dari pembayaran/retur tagihan tidak bisa dihapus manual"` |
+| `audit_log` | `hapus_tagihan_batal`, 2× `retur_pembayaran` (menyebut invoice, nominal, alasan, dan hasil statusnya) |
+
+Data uji disapu: ds1 kembali 0 pelanggan / 0 tagihan / 0 pembayaran / 0 kas,
+tabel cadangan kembali 0 baris. Sekalian membereskan satu sisa uji v2.6.0 yang
+tertinggal di `kas` ds1 (baris Rp 100.000 dari `bayar_manual tagihan #362`,
+tercatat di audit 08:50) — bukan data pengguna. Pemasukan ds5 tanggal 2026-10-15
+09:40–10:18 (11× Rp 150.000 manual, kas #185–195) adalah kerja user sendiri dan
+tidak disentuh. md5 keenam berkas webroot == cermin `C:\Users\new\ivvi\`;
+service `ivvibill` aktif.
+
+---
+
 ## 2026-10-15 — v2.6.1 — Aksi massal Tagihan: "Hapus terpilih permanen" (sebatas baris yang dicentang)
 
 **Permintaan user**

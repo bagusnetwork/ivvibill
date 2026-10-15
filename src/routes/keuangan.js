@@ -13,7 +13,7 @@ const { tenantSql, tenantAktif, requireMenu } = require('../util/scope');
 const router = express.Router();
 router.use(requireAuth);
 
-const KATEGORI = ['pembayaran', 'topup', 'gaji', 'perbaikan', 'listrik', 'internet', 'sewa', 'lainnya'];
+const KATEGORI = ['pembayaran', 'retur_pembayaran', 'topup', 'gaji', 'perbaikan', 'listrik', 'internet', 'sewa', 'lainnya'];
 
 function filterRange(req, alias = 'k') {
   const dari = v.tgl(req.query.dari, null);
@@ -105,8 +105,11 @@ router.delete('/keuangan/kas/:id', requirePJ(), requireMenu('keuangan', 'hapus')
     const ts = tenantSql(req, 'id_data_server');
     const k = await db.one(`SELECT * FROM kas WHERE id = ?${ts.sql}`, [id, ...ts.params]);
     if (!k) return res.status(404).json({ error: 'Entri kas tidak ada' });
-    if (k.kategori === 'pembayaran' && k.id_ref) {
-      return res.status(400).json({ error: 'Entri dari pembayaran tagihan tidak bisa dihapus manual' });
+    // Entri yang lahir dari pelunasan/retur tagihan adalah cermin catatan
+    // pembayaran — menghapusnya dari halaman kas membuat kas dan tagihan
+    // tidak lagi cocok. Baliknya dilakukan lewat tombol Retur di menu Tagihan.
+    if (['pembayaran', 'retur_pembayaran'].includes(k.kategori) && k.id_ref) {
+      return res.status(400).json({ error: 'Entri dari pembayaran/retur tagihan tidak bisa dihapus manual' });
     }
     await db.run('DELETE FROM kas WHERE id = ?', [id]);
     res.json({ ok: true });

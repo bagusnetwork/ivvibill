@@ -234,6 +234,7 @@
         <p class="hint" style="margin-top:10px">Baris merah ini membersihkan data, bukan melayani pelanggan.
           "Hapus terpilih" (di bar centang) membuang baris yang dicentang saja; tombol ini untuk seluruh data server.
           <button class="btn sm danger" onclick="hapusSemuaTagihan()" title="Hapus PERMANEN semua tagihan data server ini. Barisnya dibuang dari database (disalin dulu ke tabel cadangan). Khusus pemilik.">&#128465; Hapus semua data tagihan</button>
+          <button class="btn sm danger" onclick="hapusTagihanBatal()" id="btnSapuBatal" title="Hapus PERMANEN semua baris berstatus batal di data server ini — sekali klik, tetap disalin ke tabel cadangan.">&#129529; Bersihkan tagihan batal</button>
         </p>
       </div>
 
@@ -1298,6 +1299,27 @@
     <button class="btn" onclick="kirimBayar()">Tandai Bayar</button></div>
 </div></div>
 
+<div class="modal-bg" id="mRetur"><div class="modal">
+  <div class="modal-head"><h2>Return pembayaran (salah catat)</h2>
+    <button class="btn sm ghost" onclick="modalClose('mRetur')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="rtTagId">
+    <p class="hint">Tagihan <b id="rtInvoice">-</b> · <span id="rtPelanggan">-</span> · total <b id="rtTotal">-</b></p>
+    <p class="hint">Pilih pembayaran yang akan dikembalikan. Barisnya <b>tidak dihapus</b> — statusnya menjadi
+      <span class="badge warn">retur</span> dan kas mencatat pengeluarannya, jadi jejak audit tetap utuh.</p>
+    <div id="rtDaftar" class="form-row"><label>Pembayaran tercatat</label>
+      <div class="empty">Memuat…</div></div>
+    <div class="form-row"><label>Alasan retur * <span class="hint">(tercetak di laporan &amp; audit)</span></label>
+      <textarea id="rtAlasan" rows="2" placeholder="mis. transfer tidak pernah masuk / salah nominal / salah pelanggan"></textarea></div>
+    <label class="hint" id="rtForceBaris" style="display:none">
+      <input type="checkbox" id="rtForce"> refund sudah saya lakukan di dashboard vendor</label>
+    <p class="hint">Catatan: retur hanya membalik pembukuan. Layanan pelanggan TIDAK ikut diputus —
+      kalau perlu, gunakan tombol Isolir.</p>
+  </div>
+  <div class="modal-foot"><button class="btn secondary" onclick="modalClose('mRetur')">Batal</button>
+    <button class="btn danger" onclick="kirimRetur()">Kembalikan Pembayaran</button></div>
+</div></div>
+
 <div class="modal-bg" id="mInvoice"><div class="modal">
   <div class="modal-head"><h2 id="mInvTitle">Invoice Penjualan Barang / Jasa</h2>
     <button class="btn sm ghost" onclick="modalClose('mInvoice')">✕</button></div>
@@ -1346,6 +1368,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261015d"></script>
+<script src="panel.js?v=20261015e"></script>
 </body>
 </html>
