@@ -864,6 +864,54 @@ async function tqBulkBatal() {
   } catch (e) { toast(e.message, true); }
 }
 
+/** Baris terpilih masih dipegang di TQ_ROWS, jadi statusnya bisa dibaca lagi. */
+function tqTerpilihRow() {
+  return tqTerpilih()
+    .map(id => TQ_ROWS.find(t => Number(t.id) === id))
+    .filter(Boolean);
+}
+
+/**
+ * v2.6.1 — hapus PERMANEN baris yang DICENTANG saja.
+ * Bedanya dengan "Batalkan terpilih": status batal menyimpan jejak, sedangkan
+ * ini membuang barisnya (lebih dulu disalin ke tagihan_hapus_backup). Karena
+ * itu konfirmasinya menyebut nomor invoice yang benar-benar akan hilang, dan
+ * baris lunas minta ketikan HAPUS terpisah — itu catatan uang masuk.
+ */
+async function tqBulkHapus() {
+  const u = (sesi() || {}).user || {};
+  if (u.role !== 'superadmin' && u.role !== 'master') {
+    return toast('Hanya pemilik data server / platform yang boleh menghapus permanen', true);
+  }
+  const rows = tqTerpilihRow();
+  if (!rows.length) return toast('Belum ada tagihan dipilih', true);
+  const rincian = rows.slice(0, 8).map(t => `· ${t.nomor_invoice} — ${t.status}`).join('\n')
+    + (rows.length > 8 ? `\n… dan ${rows.length - 8} lainnya` : '');
+  const lunas = rows.filter(t => t.status === 'lunas');
+  let pesan = `HAPUS PERMANEN ${rows.length} tagihan terpilih dari database:\n\n${rincian}\n\n`
+    + 'Barisnya dibuang (disalin dulu ke tabel cadangan — tidak ada tombol urungkan di panel).\n'
+    + 'Untuk sekadar mengeluarkan dari daftar aktif, pakai "Batalkan terpilih".';
+  const ids = rows.map(t => t.id);
+  if (lunas.length) {
+    pesan += `\n\n⚠ ${lunas.length} di antaranya sudah LUNAS — menghapusnya ikut membuang catatan `
+      + `uang masuk. Ketik HAPUS bila memang yakin:`;
+    const jawab = prompt(pesan);
+    if (!jawab || jawab.trim().toUpperCase() !== 'HAPUS') return;
+    return hapusTerpilihKirim(ids, true);
+  }
+  if (!confirm(pesan)) return;
+  return hapusTerpilihKirim(ids, false);
+}
+
+async function hapusTerpilihKirim(ids, force) {
+  try {
+    const r = await API.post('/api/tagihan/hapus-terpilih', { ids, force });
+    toast(`${r.dihapus} tagihan${r.pembayaran ? ` + ${r.pembayaran} pembayaran` : ''} dihapus `
+      + `· cadangan batch ${r.batch}${r.dilewati ? ` · ${r.dilewati} tidak ditemukan` : ''}`, true);
+    tqBulkBersihkan(); loadTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
 /**
  * v2.6.0 — hapus PERMANEN semua tagihan data server aktif.
  * Sengaja minta nama data server diketik ulang (bukan sekadar OK) karena

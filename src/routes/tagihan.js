@@ -303,6 +303,77 @@ router.post('/tagihan/hapus-semua', requireRole('superadmin', 'master'), async (
   } catch (e) { next(e); }
 });
 
+/**
+ * v2.6.1 — hapus PERMANEN tagihan yang DICENTANG saja (bukan satu data server).
+ *
+ * Sama amannya dengan /tagihan/hapus-semua — hanya pemilik data server, baris
+ * disalin dulu ke tagihan_hapus_backup / pembayaran_hapus_backup dalam satu
+ * transaksi — tapi scoped ke daftar id yang dikirim dan dibatasi tenant aktif,
+ * sehingga tidak ada jalan menghapus baris ISP lain lewat request ini.
+ *
+ * Tagihan 'lunas' sengaja ditolak kecuali pemohon mengirim force=true: barisnya
+ * membawa catatan uang masuk. Panel memisahkan kasus itu dengan konfirmasi
+ * tersendiri, jadi force tidak pernah terkirim diam-diam.
+ */
+router.post('/tagihan/hapus-terpilih', requirePJ(), requireMenu('tagihan', 'hapus'), async (req, res, next) => {
+  try {
+    const ids = [].concat(req.body.ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0);
+    if (!ids.length) return res.status(400).json({ error: 'Belum ada tagihan dipilih' });
+    if (ids.length > 2000) return res.status(400).json({ error: 'Maksimal 2000 tagihan sekali jalan' });
+    const force = req.body.force === true || req.body.force === '1';
+
+    const ds = tenantAktif(req);
+    const frag = ids.map(() => '?').join(',');
+    // Sengaja pakai tenantAktif (satu angka), bukan tenantSql: pemohon dengan
+    // hak "?ds=all" tidak boleh bisa menyeret id tenant lain ke daftar hapus.
+    const tagihan = await db.q(
+      `SELECT * FROM tagihan WHERE id IN (${frag}) AND id_data_server = ?`, [...ids, ds]);
+    if (!tagihan.length) {
+      return res.status(400).json({ error: 'Tagihan terpilih tidak ditemukan di data server ini' });
+    }
+
+    const lunas = tagihan.filter(t => t.status === 'lunas');
+    if (lunas.length && !force) {
+      return res.status(400).json({
+        error: `${lunas.length} tagihan terpilih sudah LUNAS — centang sisanya saja, `
+             + `atau kirim force bila memang yakin menghapus catatan uang masuknya`,
+        lunas: lunas.map(t => t.nomor_invoice)
+      });
+    }
+
+    const hapusIds = tagihan.map(t => t.id);
+    const fragH = hapusIds.map(() => '?').join(',');
+    const bayar = await db.q(
+      `SELECT * FROM pembayaran WHERE id_tagihan IN (${fragH})`, hapusIds);
+    const batch = `hapus-${ds}-${Date.now()}`;
+
+    await db.tx(async (c) => {
+      for (const t of tagihan) {
+        await c.insert(
+          `INSERT INTO tagihan_hapus_backup (id_data_server, batch, deleted_by, baris) VALUES (?,?,?,?)`,
+          [ds, batch, req.user.id, JSON.stringify(t)]);
+      }
+      for (const b of bayar) {
+        await c.insert(
+          `INSERT INTO pembayaran_hapus_backup (id_data_server, batch, deleted_by, baris) VALUES (?,?,?,?)`,
+          [ds, batch, req.user.id, JSON.stringify(b)]);
+      }
+      await c.run(`DELETE FROM pembayaran WHERE id_tagihan IN (${fragH})`, hapusIds);
+      await c.run(`DELETE FROM tagihan WHERE id IN (${fragH}) AND id_data_server = ?`,
+        [...hapusIds, ds]);
+    });
+
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'hapus_tagihan_terpilih',
+       `${tagihan.length} tagihan + ${bayar.length} pembayaran dibuang (diminta ${ids.length}${force ? ', force lunas' : ''}, backup batch ${batch})`,
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json({
+      ok: true, dihapus: tagihan.length, pembayaran: bayar.length,
+      dilewati: ids.length - tagihan.length, lunas: lunas.length, batch
+    });
+  } catch (e) { next(e); }
+});
+
 router.get('/tagihan/:id', async (req, res, next) => {
   try {
     const id = v.num(req.params.id, { int: true, min: 1 });

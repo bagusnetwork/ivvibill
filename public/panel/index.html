@@ -217,6 +217,7 @@
         <div class="toolbar" id="tqBulk" style="display:none">
           <span class="hint" id="tqBulkJml">0 dipilih</span>
           <button class="btn sm secondary" onclick="tqBulkBatal()">Batalkan terpilih</button>
+          <button class="btn sm danger" onclick="tqBulkHapus()" title="Hapus PERMANEN baris yang dicentang saja dari database (disalin dulu ke tabel cadangan). Khusus pemilik data server.">&#128465; Hapus terpilih permanen</button>
           <button class="btn sm secondary" onclick="tqPilihSemua(true)">Pilih semua tampil</button>
           <button class="btn sm ghost" onclick="tqBulkBersihkan()">Batal pilih</button>
         </div>
@@ -231,6 +232,7 @@
           <tbody id="tbTagihan"><tr><td colspan="8" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
         <p class="hint" style="margin-top:10px">Baris merah ini membersihkan data, bukan melayani pelanggan.
+          "Hapus terpilih" (di bar centang) membuang baris yang dicentang saja; tombol ini untuk seluruh data server.
           <button class="btn sm danger" onclick="hapusSemuaTagihan()" title="Hapus PERMANEN semua tagihan data server ini. Barisnya dibuang dari database (disalin dulu ke tabel cadangan). Khusus pemilik.">&#128465; Hapus semua data tagihan</button>
         </p>
       </div>
@@ -1344,6 +1346,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261015c"></script>
+<script src="panel.js?v=20261015d"></script>
 </body>
 </html>

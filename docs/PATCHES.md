@@ -4,6 +4,62 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-15 — v2.6.1 — Aksi massal Tagihan: "Hapus terpilih permanen" (sebatas baris yang dicentang)
+
+**Permintaan user**
+
+Setelah v2.6.0 dicoba: screenshot daftar tagihan bercentang + satu baris,
+"maksud saya bisa hapus data yang di cekbox saja bukan per data server". Yang
+dibutuhkan adalah hapus PERMANEN baris yang dicentang, bukan hapus satu data
+server. v2.6.0 baru menyediakan dua ujung: "Batalkan terpilih" (lunak — status
+jadi `batal`, baris tetap ada) dan "Hapus semua data tagihan" (keras — satu
+tenant). Tidak ada jalan tengah.
+
+**Yang dibuat**
+
+Rute baru `POST /api/tagihan/hapus-terpilih` (`src/routes/tagihan.js`): id dari
+checkbox, maksimal 2000 sekali jalan, dikunci `requirePJ()` (superadmin / master)
++ `requireMenu('tagihan','hapus')`. Setiap baris disalin dulu ke
+`tagihan_hapus_backup` / `pembayaran_hapus_backup` dengan nomor batch
+`hapus-<ds>-<epoch>` di dalam satu `db.tx()`, baru `DELETE` pembayaran lalu
+tagihannya. Tidak ada perubahan skema — tabel cadangan `*_hapus_backup` buatan
+migrasi v24 (v2.6.0) sudah cukup menampung baris per batch.
+
+Dua penjagaan yang membedakan rute ini dari "hapus semua":
+
+- **Sekat tenant pakai `tenantAktif(req)` (satu angka), bukan `tenantSql(req)`.**
+  `tenantSql` melonggar jadi tanpa klausa bila pemohon platform mengirim
+  `?ds=all`; itu berguna untuk baca tapi tidak boleh berlaku untuk hapus permanen.
+  Id milik tenant lain karena itu tidak ditemukan, bukan ikut terhapus.
+- **Baris `lunas` ditolak kecuali `force:true`** — menghapusnya berarti membuang
+  catatan uang masuk. Respons 400 menyebut nomor invoice-nya.
+
+Panel (`public/panel/panel.js`, `index.html`): tombol merah **"Hapus terpilih
+permanen"** di bar aksi massal (`tqBulkHapus`). Konfirmasinya mencetak sampai 8
+nomor invoice + status yang benar-benar akan hilang; kalau ada baris lunas di
+antara yang dicentang, prompt minta mengetik `HAPUS` dan permintaan dikirim dengan
+`force`. Helper `tqTerpilihRow()` membaca status dari `TQ_ROWS` (baris daftar
+sudah disimpan di situ sejak v2.5.0), jadi tidak perlu request tambahan.
+Cache-bust `panel.js?v=20261015d`.
+
+**Verifikasi (jalur HTTP nyata, tenant sandbox ds1, 2026-10-15)**
+
+| Uji | Hasil |
+|---|---|
+| 2 baris non-lunas dicentang → hapus | `200 {dihapus:2, pembayaran:0, dilewati:0, lunas:0}`; tersisa 1 baris; cadangan 2 baris |
+| 1 baris `lunas` tanpa force | `400` "…sudah LUNAS — centang sisanya saja, atau kirim force…", `lunas:["UJI-202610-C"]` |
+| baris `lunas` dengan force | `200 {dihapus:1, pembayaran:1, lunas:1}`; ds1 0 tagihan / 0 pembayaran; cadangan 3/1 |
+| id milik ds2 dikirim saat aktif ds1, **plus `?ds=all`** | `400 "Tagihan terpilih tidak ditemukan di data server ini"`; ds2 tetap 172, ds5 tetap 157 |
+| `{"ids":[]}` | `400 "Belum ada tagihan dipilih"` |
+| jejak `audit_log` | 2 entri `hapus_tagihan_terpilih` berurutan, menyebut jumlah + batch |
+
+Data uji disapu sesudahnya: ds1 kembali 0 pelanggan / 0 tagihan,
+`tagihan_hapus_backup` dan `pembayaran_hapus_backup` kembali 0 baris, ds2 172 /
+ds5 157 / pembayaran 173 tidak berubah. `nginx` sudah melayani `panel.js?v=20261015d`
+(md5 webroot == cermin `C:\Users\new\ivvi\`), service `ivvibill` aktif.
+
+---
+
 ## 2026-10-15 — v2.6.0 — Menu Tagihan: bayar+rekening tujuan, batalkan massal, hapus permanen ber-backup, export Excel, dan pembersih log WA
 
 **Permintaan user**
