@@ -16,8 +16,7 @@ const crypto = require('../util/crypto');
 const cryptoLib = require('crypto');
 const http = require('../util/http');
 const multer = require('multer');
-const XLSX = require('xlsx');
-const csv = require('../util/csv');
+const laporan = require('../services/laporan');
 const path = require('path');
 const fs = require('fs');
 const config = require('../config');
@@ -155,6 +154,16 @@ router.get('/tagihan/jadwal', async (req, res, next) => {
       belum_terkirim: (await db.one(
         `SELECT COUNT(*) AS n FROM tagihan t WHERE t.id_data_server = ? AND t.status = 'buat'`, [ds]
       ) || {}).n || 0,
+      // v2.8.0: dari jumlah di atas, berapa yang hari kirim profilnya SUDAH lewat
+      // atau jatuh hari ini — persis yang akan didorong tombol "Push Tagihan".
+      // Aturan COALESCE-nya sama dengan billing.kirimTagihanTerjadwal().
+      siap_push: (await db.one(
+        `SELECT COUNT(*) AS n FROM tagihan t
+         JOIN pelanggan p ON p.id = t.id_pelanggan
+         ${billing.GABUNG_PROFIL}
+         WHERE t.id_data_server = ? AND t.status = 'buat'
+           AND COALESCE(NULLIF(pt.tanggal_kirim, 0), ?, 1) <= ?`,
+        [ds, srv.jadwal_kirim_hari, w.tanggal]) || {}).n || 0,
       // v2.0: jadwal hari ini bukan satu angka lagi — tiap profil tagihan punya
       // tanggalnya sendiri, jadi panel menampilkan per profil + hitungan yang
       // masih mengikuti jadwal tenant (belum ditautkan).
@@ -177,58 +186,229 @@ router.get('/tagihan/jadwal', async (req, res, next) => {
 });
 
 /**
- * v2.6.0 — EKSPOR tagihan ke Excel/CSV untuk laporan.
- * Sengaja menyalin PERSIS saringan daftar Tagihan (status + pencarian + sekat
- * tenant/role) supaya tombol "Export" menghasilkan apa yang sedang dilihat
- * operator: pilih status "lunas" lalu Export = laporan lunas; "jatuh_tempo" =
- * laporan tunggakan. Tidak ada batas 100 baris seperti daftar — laporan memang
- * untuk seluruh isinya (dibatasi 20.000 baris agar memori proses tetap aman).
+ * v2.6.0 — EKSPOR tagihan; v2.8.0 — dipecah per KELOMPOK laporan + PDF.
+ *
+ * Operator dulu hanya punya satu tombol yang menyalin saringan daftar. Untuk
+ * laporan, itu tidak cukup: "yang sudah dibayar" dicampur "yang belum dibayar"
+ * dalam satu berkas, sedangkan yang diisolir tidak terlihat sama sekali. Kini
+ * ada tiga kelompok tetap (berjalan / lunas / isolir) plus satu berkas
+ * ber-lembar-tiga, dan masing-masing bisa Excel, CSV, atau PDF.
+ *
+ * Kelompok = klausa WHERE, jadi saringan pencarian dan periode tetap bekerja di
+ * atasnya. Sekat tenant/role memakai scopeTagihan() yang sama dengan daftar.
  */
+const KELOMPOK_EKSPOR = {
+  berjalan: {
+    label: 'Tagihan Berjalan',
+    ket: 'belum lunas: status buat, terkirim, dan jatuh_tempo',
+    where: `t.status IN ('buat','terkirim','jatuh_tempo')`
+  },
+  lunas: {
+    label: 'Tagihan Lunas',
+    ket: 'sudah dibayar (status lunas), lengkap dengan metode & tanggal bayar',
+    where: `t.status = 'lunas'`
+  },
+  isolir: {
+    label: 'Pelanggan Isolir',
+    ket: 'langganan yang sedang diisolir dan tagihannya belum lunas',
+    where: `p.status = 'isolir' AND t.status NOT IN ('lunas','batal')`
+  },
+  semua: {
+    label: 'Rekap 3 Kelompok',
+    ket: 'berjalan + lunas + isolir dalam satu berkas (tiga lembar)',
+    gabungan: true
+  },
+  // Kelompok lama tetap bisa diminta supaya tautan export lama tidak mati.
+  batal: { label: 'Tagihan Batal', ket: 'status batal', where: `t.status = 'batal'` }
+};
+
+/** Kolom laporan tagihan — satu definisi untuk Excel, CSV, dan PDF. */
+const KOLOM_TAGIHAN = [
+  { label: 'Nomor Invoice', k: 'nomor_invoice', tebal: true, w: 20 },
+  { label: 'Pelanggan', k: 'nama_pelanggan', w: 26 },
+  { label: 'Username PPPoE', k: 'username_pppoe', w: 18 },
+  { label: 'No. HP', k: 'nomor_whatsapp', w: 16 },
+  { label: 'Periode', k: 'periode', w: 10 },
+  { label: 'Jumlah', k: 'jumlah', tipe: 'num', w: 14 },
+  { label: 'PPN', k: 'ppn', tipe: 'num', w: 12 },
+  { label: 'Total', k: 'total', tipe: 'num', tebal: true, w: 15 },
+  { label: 'Jatuh Tempo', k: 'jatuh_tempo', tipe: 'tgl', w: 13 },
+  { label: 'Lewat Tempo (hari)', k: 'lama_hari', tipe: 'num', rp: false, w: 12 },
+  { label: 'Status Tagihan', k: 'status', w: 12 },
+  { label: 'Status Pelanggan', k: 'status_pelanggan', w: 12 },
+  { label: 'Metode Bayar', k: 'metode_bayar', w: 13 },
+  { label: 'Rekening Tujuan', k: 'rekening_tujuan', w: 20 },
+  { label: 'Tanggal Bayar', k: 'tanggal_bayar', tipe: 'waktu', w: 16 }
+];
+/** PDF A4 horizontal: 15 kolom masih muat, tapi yang benar-benar dibaca orang
+ *  saja — username, PPN, dan status pelanggan dibuang agar tidak 3 lajur per sel. */
+const KOLOM_TAGIHAN_PDF = KOLOM_TAGIHAN.filter(c =>
+  !['username_pppoe', 'ppn', 'status_pelanggan'].includes(c.k));
+
+/** Kolom kelompok isolir: tunggakan per pelanggan, bukan per invoice saja. */
+const KOLOM_ISOLIR = [
+  { label: 'Pelanggan', k: 'nama_pelanggan', tebal: true, w: 26 },
+  { label: 'Username PPPoE', k: 'username_pppoe', w: 18 },
+  { label: 'No. HP', k: 'nomor_whatsapp', w: 16 },
+  { label: 'Alamat', k: 'alamat', w: 34 },
+  { label: 'Invoice Terakhir', k: 'nomor_invoice', w: 20 },
+  { label: 'Periode', k: 'periode', w: 10 },
+  { label: 'Tagihan Ini', k: 'total', tipe: 'num', w: 15 },
+  { label: 'Jatuh Tempo', k: 'jatuh_tempo', tipe: 'tgl', w: 13 },
+  { label: 'Lewat Tempo (hari)', k: 'lama_hari', tipe: 'num', rp: false, w: 12 },
+  { label: 'Total Menunggak', k: 'tunggakan', tipe: 'num', tebal: true, w: 17 },
+  { label: 'Profile Tagihan', k: 'profil_nama', w: 16 },
+  { label: 'Status Tagihan', k: 'status', w: 12 }
+];
+
+/**
+ * Satu query untuk semua kelompok: bedanya hanya klausa WHERE. `lama_hari`
+ * dihitung di SQL (bukan di JS) supaya Excel dan PDF memakai angka yang sama,
+ * dan negatif berarti belum jatuh tempo.
+ */
+async function barisEksporTagihan(req, tambahan) {
+  const s = scopeTagihan(req);
+  const cari = v.str(req.query.q, { max: 100, def: '' });
+  const periode = /^\d{4}-\d{2}$/.test(String(req.query.periode || '')) ? req.query.periode : null;
+  const where = [s.where];
+  const params = [...s.params];
+  // `tambahan` = { sql, params } — params dipakai untuk status lama supaya nilai
+  // dari query string tidak pernah masuk sebagai teks SQL.
+  if (tambahan && tambahan.sql) { where.push(tambahan.sql); params.push(...(tambahan.params || [])); }
+  if (cari) { where.push('(t.nomor_invoice LIKE ? OR p.nama LIKE ?)'); params.push(`%${cari}%`, `%${cari}%`); }
+  if (periode) { where.push('t.periode = ?'); params.push(periode); }
+  const baris = await db.q(
+    `SELECT t.nomor_invoice, p.nama AS nama_pelanggan, p.username_pppoe, p.nomor_whatsapp,
+            p.alamat, p.status AS status_pelanggan, pt.nama AS profil_nama,
+            t.periode, t.jumlah, t.ppn, t.total, t.jatuh_tempo, t.status,
+            DATEDIFF(CURDATE(), t.jatuh_tempo) AS lama_hari,
+            t.metode_bayar, b.rekening_tujuan, b.created_at AS tanggal_bayar,
+            (SELECT IFNULL(SUM(t2.total), 0) FROM tagihan t2
+              WHERE t2.id_pelanggan = p.id AND t2.status NOT IN ('lunas','batal')) AS tunggakan
+     FROM tagihan t
+     JOIN pelanggan p ON p.id = t.id_pelanggan
+     LEFT JOIN profil_tagihan pt ON pt.id = p.id_profil_tagihan
+     LEFT JOIN pembayaran b ON b.id = (
+       SELECT MAX(b2.id) FROM pembayaran b2 WHERE b2.id_tagihan = t.id AND b2.status = 'diterima')
+     WHERE ${where.join(' AND ')}
+     ORDER BY t.jatuh_tempo DESC, t.id DESC LIMIT 20000`,
+    params);
+  // DATEDIFF memberi angka negatif untuk tagihan yang belum lewat tempo; di
+  // laporan itu lebih jelas dibiarkan kosong daripada tertulis "-6 hari".
+  return baris.map(r => ({ ...r, lama_hari: Number(r.lama_hari) > 0 ? Number(r.lama_hari) : null }));
+}
+
+/** Ringkasan angka di kepala laporan (baris + nominal). */
+function ringkasTagihan(baris, { nominal = 'total', label = 'Nilai' } = {}) {
+  const jumlah = baris.reduce((a, r) => a + (Number(r[nominal]) || 0), 0);
+  return [
+    { label: 'Jumlah baris', nilai: String(baris.length) },
+    { label: nominal === 'tunggakan' ? 'Total tunggakan' : label, nilai: laporan.RUR_UTUH(jumlah) }
+  ];
+}
+
 router.get('/tagihan/export', async (req, res, next) => {
   try {
-    const s = scopeTagihan(req);
-    const status = v.enumOf(req.query.status, ['buat', 'terkirim', 'menunggu', 'lunas', 'jatuh_tempo', 'batal'], null);
-    const cari = v.str(req.query.q, { max: 100, def: '' });
-    const where = [s.where];
-    const params = [...s.params];
-    if (status) { where.push('t.status = ?'); params.push(status); }
-    if (cari) { where.push('(t.nomor_invoice LIKE ? OR p.nama LIKE ?)'); params.push(`%${cari}%`, `%${cari}%`); }
-    const rows = await db.q(
-      `SELECT t.nomor_invoice, p.nama AS nama_pelanggan, p.username_pppoe, t.periode,
-              t.jumlah, t.ppn, t.total, t.jatuh_tempo, t.status,
-              t.metode_bayar, b.rekening_tujuan, b.created_at AS tanggal_bayar
-       FROM tagihan t
-       JOIN pelanggan p ON p.id = t.id_pelanggan
-       LEFT JOIN pembayaran b ON b.id = (
-         SELECT MAX(b2.id) FROM pembayaran b2 WHERE b2.id_tagihan = t.id AND b2.status = 'diterima')
-       WHERE ${where.join(' AND ')}
-       ORDER BY t.jatuh_tempo DESC, t.id DESC LIMIT 20000`,
-      params);
-    const KEPALA = ['Nomor Invoice', 'Pelanggan', 'Username', 'Periode', 'Jumlah',
-      'PPN', 'Total', 'Jatuh Tempo', 'Status', 'Metode Bayar', 'Rekening Tujuan', 'Tanggal Bayar'];
-    const kunci = ['nomor_invoice', 'nama_pelanggan', 'username_pppoe', 'periode', 'jumlah',
-      'ppn', 'total', 'jatuh_tempo', 'status', 'metode_bayar', 'rekening_tujuan', 'tanggal_bayar'];
-    const isi = [KEPALA, ...rows.map(r => kunci.map(k => {
-      const val = r[k];
-      if (val == null) return '';
-      if (k === 'jatuh_tempo' || k === 'tanggal_bayar') return String(val).slice(0, 10);
-      return String(val);
-    }))];
-    const label = status ? `tagihan-${status}` : 'tagihan-semua';
-    const nama = `${label}-${new Date().toISOString().slice(0, 10)}`;
-    if (req.query.format === 'csv') {
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${nama}.csv"`);
-      return res.send(csv.tulisCsv(isi, { bom: true }));
+    const format = v.enumOf(req.query.format, ['xlsx', 'csv', 'pdf'], 'xlsx');
+    const statusLama = v.enumOf(req.query.status,
+      ['buat', 'terkirim', 'menunggu', 'lunas', 'jatuh_tempo', 'batal'], null);
+    const namaKelompok = v.enumOf(req.query.kelompok, Object.keys(KELOMPOK_EKSPOR), null);
+    const tglHari = new Date().toISOString().slice(0, 10);
+    let namaServer = null;
+    const dsAktif = Number(req.ds);
+    if (Number.isInteger(dsAktif) && dsAktif >= 1) {
+      const srv = await db.one('SELECT nama_server FROM data_server WHERE id = ?', [dsAktif]);
+      namaServer = (srv && srv.nama_server) || null;
     }
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(isi);
-    ws['!cols'] = KEPALA.map(() => ({ wch: 18 }));
-    XLSX.utils.book_append_sheet(wb, ws, 'Tagihan');
-    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="${nama}.xlsx"`);
-    return res.send(buf);
+    const kop = { server: namaServer || 'ivvibill', zona: 'waktu server' };
+    const saringan = [
+      req.query.periode ? `Periode ${req.query.periode}` : null,
+      v.str(req.query.q, { max: 100, def: '' }) ? `Pencarian "${req.query.q}"` : null
+    ].filter(Boolean).join(' · ');
+
+    // --- jalur lama: ?status=lunas tanpa kelompok = berkas satu status saja,
+    //     supaya tautan export versi 2.6.0 tidak mati.
+    if (!namaKelompok && statusLama) {
+      const b = await barisEksporTagihan(req, { sql: 't.status = ?', params: [statusLama] });
+      const nama = `tagihan-${statusLama}-${tglHari}`;
+      if (format === 'pdf') {
+        return laporan.unduhPdf(res, {
+          nama, kop, judul: `Tagihan ${statusLama}`,
+          subjudul: `Saringan status: ${statusLama}` + (saringan ? ` · ${saringan}` : ''),
+          kolom: KOLOM_TAGIHAN_PDF, baris: b, ringkas: ringkasTagihan(b),
+          catatan: ['"Lewat Tempo (hari)" dihitung dari tanggal laporan dicetak.']
+        });
+      }
+      if (format === 'csv') return laporan.unduhCsv(res, { nama, kolom: KOLOM_TAGIHAN, baris: b });
+      return laporan.unduhXlsx(res, { nama, lembar: [{ nama: 'Tagihan', kolom: KOLOM_TAGIHAN, baris: b }] });
+    }
+
+    const k = KELOMPOK_EKSPOR[namaKelompok] || KELOMPOK_EKSPOR.berjalan;
+
+    if (!k.gabungan) {
+      const b = await barisEksporTagihan(req, { sql: k.where });
+      const kolom = namaKelompok === 'isolir' ? KOLOM_ISOLIR : KOLOM_TAGIHAN;
+      const kolomPdf = namaKelompok === 'isolir' ? KOLOM_ISOLIR : KOLOM_TAGIHAN_PDF;
+      const nama = `${namaKelompok}-${tglHari}`;
+      if (format === 'pdf') {
+        return laporan.unduhPdf(res, {
+          nama, kop, judul: k.label,
+          subjudul: k.ket + (saringan ? ` · ${saringan}` : ''),
+          kolom: kolomPdf, baris: b,
+          ringkas: ringkasTagihan(b, namaKelompok === 'isolir'
+            ? { nominal: 'tunggakan', label: 'Total tunggakan' } : {}),
+          catatan: namaKelompok === 'isolir'
+            ? ['"Total Menunggak" menjumlahkan SEMUA tagihan pelanggan ini yang belum lunas,',
+               'termasuk periode sebelum baris ini. Pelanggan di luar daftar ini sedang tidak terisolir.']
+            : ['"Lewat Tempo (hari)" dihitung dari tanggal laporan dicetak.']
+        });
+      }
+      if (format === 'csv') return laporan.unduhCsv(res, { nama, kolom, baris: b });
+      return laporan.unduhXlsx(res, { nama, lembar: [{ nama: k.label, kolom, baris: b }] });
+    }
+
+    // --- Rekap 3 kelompok: satu berkas, tiga lembar (Excel/CSV) atau tiga bagian
+    //     berurutan dalam satu PDF.
+    const [berjalan, lunas, isolir] = await Promise.all([
+      barisEksporTagihan(req, { sql: KELOMPOK_EKSPOR.berjalan.where }),
+      barisEksporTagihan(req, { sql: KELOMPOK_EKSPOR.lunas.where }),
+      barisEksporTagihan(req, { sql: KELOMPOK_EKSPOR.isolir.where })
+    ]);
+    const nama = `rekap-tagihan-${tglHari}`;
+    if (format === 'pdf') {
+      // PDF tidak punya "lembar", jadi kelompok ditulis berurutan, masing-masing
+      // mulai di halaman baru; yang pertama dibaca operator adalah tunggakan.
+      return laporan.unduhPdfBertingkat(res, {
+        nama, kop, judul: 'Rekap Tagihan',
+        // Baris meta tambahan ini menempel di kepala SETIAP bagian (lihat
+        // tulisBagian): cukup saringan yang sama untuk ketiganya.
+        subjudul: saringan,
+        maksimum: 4000,
+        bagian: [
+          { judul: '1. Tagihan Berjalan', subjudul: KELOMPOK_EKSPOR.berjalan.ket,
+            kolom: KOLOM_TAGIHAN_PDF, baris: berjalan, ringkas: ringkasTagihan(berjalan),
+            catatan: ['"Lewat Tempo (hari)" dihitung dari tanggal laporan dicetak.'] },
+          { judul: '2. Tagihan Lunas', subjudul: KELOMPOK_EKSPOR.lunas.ket,
+            kolom: KOLOM_TAGIHAN_PDF, baris: lunas, ringkas: ringkasTagihan(lunas) },
+          { judul: '3. Pelanggan Isolir', subjudul: KELOMPOK_EKSPOR.isolir.ket,
+            kolom: KOLOM_ISOLIR, baris: isolir,
+            ringkas: ringkasTagihan(isolir, { nominal: 'tunggakan', label: 'Total tunggakan' }),
+            catatan: ['"Total Menunggak" menjumlahkan SEMUA tagihan pelanggan ini yang belum lunas.'] }
+        ]
+      });
+    }
+    const lembar = [
+      { nama: '1 Berjalan', kolom: KOLOM_TAGIHAN, baris: berjalan },
+      { nama: '2 Lunas', kolom: KOLOM_TAGIHAN, baris: lunas },
+      { nama: '3 Isolir', kolom: KOLOM_ISOLIR, baris: isolir }
+    ];
+    if (format === 'csv') {
+      // CSV tidak mengenal lembar: pakai kelompok berjalan saja.
+      return laporan.unduhCsv(res, {
+        nama: `berjalan-${tglHari}`, kolom: KOLOM_TAGIHAN, baris: berjalan
+      });
+    }
+    return laporan.unduhXlsx(res, { nama, lembar });
   } catch (e) { next(e); }
 });
 
@@ -419,9 +599,10 @@ router.post('/tagihan/hapus-batal', requirePJ(), requireMenu('tagihan', 'hapus')
 
 /**
  * v2.7.0 — RETUR satu pembayaran (pembatalan uang masuk yang salah catat).
- * Seluruh logikanya di billing.returPembayaran(): pembayaran jadi 'retur',
- * tagihan kembali ke terkirim/jatuh_tempo kalau tidak ada pembayaran sah lain,
- * dan kas dicatat keluar. Di sini hanya sekat tenant + jejak audit.
+ * Seluruh logikanya di billing.returPembayaran(): pembayaran jadi 'retur' dan
+ * tagihan kembali ke terkirim/jatuh_tempo kalau tidak ada pembayaran sah lain.
+ * Sejak v2.8.0 TIDAK ada baris kas yang ditulis — mengoreksi catatan bukan
+ * pengeluaran uang. Di sini hanya sekat tenant + jejak audit.
  */
 router.post('/pembayaran/:id/retur', requirePJ(), requireMenu('pembayaran', 'verifikasi'), async (req, res, next) => {
   try {
@@ -436,8 +617,8 @@ router.post('/pembayaran/:id/retur', requirePJ(), requireMenu('pembayaran', 'ver
        FROM pembayaran b JOIN tagihan t ON t.id = b.id_tagihan
        WHERE b.id = ? AND t.id_data_server = ?`, [id, ds]);
     if (!b) return res.status(404).json({ error: 'Pembayaran tidak ada di data server ini' });
-    // Semua perubahan uang dalam SATU transaksi: pembayaran 'retur' + tagihan
-    // kembali belum lunas + kas keluar harus terjadi bersamaan, atau tidak sama sekali.
+    // Semua perubahan dalam SATU transaksi: pembayaran 'retur' + tagihan
+    // kembali belum lunas harus terjadi bersamaan, atau tidak sama sekali.
     const r = await db.tx(c => billing.returPembayaran(id, { oleh: req.user.id, alasan, force }, c));
     await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
       [req.user.id, ds, 'retur_pembayaran',
@@ -476,9 +657,46 @@ router.post('/tagihan/buat', requirePJ(), requireMenu('tagihan', 'tambah'), asyn
   } catch (e) { next(e); }
 });
 
+/**
+ * v2.8.0 — PUSH tagihan ke WhatsApp. Tiga mode, semuanya menulis audit_log:
+ *
+ *   terjadwal (bawaan) : tagihan 'buat' yang hari kirim profilnya SUDAH lewat
+ *                        atau jatuh hari ini. Ini yang membuat pelanggan baru
+ *                        (Input Billing / tagihan satuan) tidak menggantung
+ *                        sampai hari kirim bulan depan.
+ *   terpilih           : `ids` dari checkbox daftar — didorong sekarang juga,
+ *                        hari kirim tidak ditanyakan (keputusan operator).
+ *   semua              : SEMUA 'buat', termasuk golongan yang harinya belum
+ *                        tiba. Jarang diperlukan (misalnya setelah server mati
+ *                        berminggu-minggu); panel tidak memakainya.
+ *
+ * Bawaannya sengaja 'terjadwal': tombol lama mengirim SEMUA tagihan 'buat',
+ * jadi sekali klik di tanggal 3 bisa mengirim tagihan golongan tanggal 20 ke
+ * pelanggan yang belum seharusnya dibayar — dan itu tidak bisa dibatalkan.
+ */
 router.post('/tagihan/kirim-wa', requirePJ(), requireMenu('tagihan', 'kirim'), async (req, res, next) => {
-  try { res.json(await billing.kirimTagihanWajib(tenantAktif(req), 100)); }
-  catch (e) { next(e); }
+  try {
+    const ds = tenantAktif(req);
+    const ids = [].concat((req.body || {}).ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0);
+    const mode = v.enumOf((req.body || {}).mode, ['terjadwal', 'terpilih', 'semua'],
+      ids.length ? 'terpilih' : 'terjadwal');
+    let hasil;
+    if (mode === 'terpilih') {
+      if (!ids.length) return res.status(400).json({ error: 'Mode terpilih butuh daftar id tagihan' });
+      hasil = { mode, ...(await billing.pushTagihanTerpilih(ds, ids)) };
+    } else if (mode === 'semua') {
+      hasil = { mode, ...(await billing.kirimTagihanWajib(ds, 500)) };
+    } else {
+      hasil = { mode, ...(await billing.kirimTagihanTerjadwal(ds, 500)) };
+    }
+    const n = hasil.dikirim !== undefined ? hasil.dikirim : hasil.terkirim;
+    await db.insert('INSERT INTO audit_log (user_id, id_data_server, aksi, detail, ip) VALUES (?,?,?,?,?)',
+      [req.user.id, ds, 'push_tagihan',
+       JSON.stringify({ mode, jumlah: n, ids: mode === 'terpilih' ? ids : undefined,
+         menunggu: hasil.masih_menunggu, tanpa_wa: (hasil.tanpa_nomor_wa || []).length }),
+       (req.ip || '').replace('::ffff:', '')]);
+    res.json(hasil);
+  } catch (e) { next(e); }
 });
 
 /** Kirim / kirim ulang WA satu tagihan — tombol manual per baris. */

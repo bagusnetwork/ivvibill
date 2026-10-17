@@ -807,9 +807,10 @@ async function loadTagihan() {
       lunas: 'ok', jatuh_tempo: 'bad', batal: 'mute'
     }[s] || 'mute');
     TQ_ROWS = d.data || [];
-    // Export mengikuti saringan yang sama persis dengan daftar ini.
-    const ln = document.getElementById('lnEksporTagihan');
-    if (ln) ln.href = `/api/tagihan/export?q=${q}&status=${st}`;
+    // Export punya kelompoknya sendiri (dropdown Ekspor), bukan kotak status
+    // daftar: kalau ikut status di layar, "Tagihan Lunas" bisa terunduh kosong
+    // karena layar sedang menampilkan 'buat'. Pencarian (q) tetap dipakai.
+    tqPerbaruiEkspor();
     document.getElementById('tbTagihan').innerHTML = TQ_ROWS.map(t => `
       <tr>
         <td><input type="checkbox" class="tqSel" value="${t.id}" onchange="tqPilihBaris()"></td>
@@ -842,6 +843,23 @@ async function loadTagihan() {
   } catch (e) { toast(e.message, true); }
 }
 
+/**
+ * Dua tautan export (Excel / PDF) mengikuti dropdown kelompok + kata kunci.
+ * Sengaja memakai <a download> biasa: berkasnya datang dari GET yang sudah
+ * ter-autentikasi cookie, jadi tidak perlu fetch + blob — dan browser langsung
+ * menampilkan nama file dari header Content-Disposition server.
+ */
+function tqPerbaruiEkspor() {
+  const g = document.getElementById('tqEkspor');
+  const kelompok = (g && g.value) || 'berjalan';
+  const q = encodeURIComponent((document.getElementById('tq').value || '').trim());
+  const dasar = `/api/tagihan/export?kelompok=${kelompok}&q=${q}`;
+  const x = document.getElementById('lnEksporTagihan');
+  const p = document.getElementById('lnEksporPdf');
+  if (x) x.href = `${dasar}&format=xlsx`;
+  if (p) p.href = `${dasar}&format=pdf`;
+}
+
 /** Jalankan / buat tagihan itu otomatis — operator perlu tahu kapan. */
 async function muatJadwalTagihan() {
   const el = document.getElementById('tJadwal');
@@ -863,7 +881,10 @@ async function muatJadwalTagihan() {
       + inti
       + (j.profil && j.profil.tanpa_profil
         ? ` · <b>${esc(j.profil.tanpa_profil)}</b> pelanggan belum ditautkan ke profil` : '')
-      + `. Belum terkirim: <b>${esc(j.belum_terkirim)}</b> · lewat tempo belum lunas: <b>${esc(j.lewat_tempo)}</b>`
+      + `. Belum terkirim: <b>${esc(j.belum_terkirim)}</b>`
+      + (j.siap_push !== undefined
+        ? ` (<b>${esc(j.siap_push)}</b> di antaranya sudah sampai hari kirimnya → tombol Push Tagihan)` : '')
+      + ` · lewat tempo belum lunas: <b>${esc(j.lewat_tempo)}</b>`
       + ` (yang masih aktif dan akan diisolir: <b>${esc(j.akan_isolir)}</b>).`
       + ' Tanggal-tanggal di atas diatur di menu Profile Tagihan, bukan di Pengaturan.';
   } catch (e) { el.textContent = ''; }
@@ -884,9 +905,10 @@ async function isolirTagihan(idPelanggan) {
 
 async function jalankanSiklus() {
   if (!confirm('Jalankan siklus sesuai JADWAL PROFIL TAGIHAN hari ini?\n\n'
-    + 'Hanya golongan yang tanggal buat/kirimnya jatuh hari ini yang ditagih dan dikirim WA; '
-    + 'pengingat dan isolir hanya untuk tagihan yang memang sudah lewat tempo. '
-    + 'Tidak ada tagihan yang dibuat lebih awal.')) return;
+    + 'Tagihan hanya DIBUAT untuk golongan yang tanggal buatnya jatuh hari ini; '
+    + 'yang dikirim WA adalah tagihan berstatus "buat" yang hari kirimnya sudah lewat atau jatuh '
+    + 'hari ini (termasuk tagihan pelanggan baru yang tertinggal). '
+    + 'Pengingat dan isolir hanya untuk tagihan yang memang sudah lewat tempo.')) return;
   try {
     const r = await API.post('/api/tagihan/siklus', {});
     const l = r.langkah || {};
@@ -908,6 +930,9 @@ async function jalankanSiklus() {
     // langkah yang tidak jalan bukan error: memang bukan harinya, jadi
     // alasannya ditampilkan sebagai info terpisah
     if (dilewati.length) toast('Dilewati sesuai jadwal — ' + dilewati.join(' | '));
+    // v2.8.0: siklus tidak lagi mendorong SEMUA 'buat' — sisa yang belum sampai
+    // hari kirimnya disebut supaya operator tahu kenapa masih ada 'buat'.
+    if (k.masih_menunggu) toast(`Masih ${k.masih_menunggu} tagihan berstatus "buat" menunggu hari kirim profilnya`);
     (i.router_gagal || []).slice(0, 3).forEach(x => toast(x, true));
   } catch (e) { toast(e.message, true); }
   loadTagihan();
@@ -927,15 +952,45 @@ async function buatTagihan() {
   } catch (e) { toast(e.message, true); }
 }
 
-async function kirimTagihanWA() {
-  if (!confirm('Kirim WA SEMUA tagihan yang masih berstatus "buat" sekarang?\n\n'
-    + 'Tombol ini mengabaikan tanggal kirim pada profil tagihan — semua tagihan mengantung '
-    + 'langsung masuk antrean WhatsApp pelanggan.')) return;
+/**
+ * v2.8.0 — PUSH tagihan terjadwal. Mendorong tagihan 'buat' yang hari kirim
+ * profilnya sudah lewat atau jatuh hari ini, termasuk tagihan pelanggan yang
+ * baru didaftarkan SETELAH hari kirimnya lewat (dulu menggantung sampai bulan
+ * berikutnya). Tombol lama "Kirim via WA" mengirim SEMUA 'buat' tanpa peduli
+ * tanggal, jadi golongan yang hari H-nya masih jauh ikut tertagih.
+ */
+async function pushTagihan() {
+  if (!confirm('Dorong tagihan yang sudah sampai hari kirimnya sekarang?\n\n'
+    + 'Yang dikirim hanya tagihan berstatus "buat" dengan hari kirim profil SUDAH lewat '
+    + 'atau jatuh hari ini — termasuk tagihan pelanggan baru yang tertinggal.\n'
+    + 'Golongan yang hari kirimnya belum tiba tidak ikut terkirim.')) return;
   try {
-    const r = await API.post('/api/tagihan/kirim-wa', {});
+    const r = await API.post('/api/tagihan/kirim-wa', { mode: 'terjadwal' });
     const tanpa = (r.tanpa_nomor_wa || []).length;
-    toast(`${r.dikirim || 0} tagihan masuk antrean WA`
-      + (tanpa ? ` · ${tanpa} pelanggan tanpa nomor WA (status ditandai terkirim, tidak ada pesan)` : ''), !!tanpa);
+    toast(`${r.dikirim || 0} tagihan masuk antrean WA (hari kirim s/d ke-${r.hari})`
+      + (tanpa ? ` · ${tanpa} tanpa nomor WA (ditandai terkirim, tidak ada pesan)` : '')
+      + (r.masih_menunggu ? ` · masih ${r.masih_menunggu} tagihan "buat" menunggu hari kirimnya` : ''),
+      !!tanpa);
+    loadTagihan();
+  } catch (e) { toast(e.message, true); }
+}
+
+/** Push baris yang dicentang — keputusan operator, hari kirim tidak ditanyakan. */
+async function tqPushTerpilih() {
+  const rows = tqTerpilihRow();
+  if (!rows.length) return toast('Belum ada tagihan dipilih', true);
+  const rincian = rows.slice(0, 6).map(t => `· ${t.nomor_invoice} — ${t.nama_pelanggan} (${t.status})`).join('\n')
+    + (rows.length > 6 ? `\n… dan ${rows.length - 6} lainnya` : '');
+  if (!confirm(`Kirim ${rows.length} tagihan terpilih ke WhatsApp pelanggan SEKARANG?\n\n${rincian}\n\n`
+    + 'Hari kirim pada profil tagihan tidak ditanyakan — baris berstatus lunas/batal ditolak.')) return;
+  try {
+    const r = await API.post('/api/tagihan/kirim-wa', { mode: 'terpilih', ids: rows.map(t => t.id) });
+    const tanpa = (r.tanpa_nomor_wa || []).length;
+    toast(`${r.terkirim || 0} tagihan masuk antrean WA`
+      + (r.ditolak ? ` · ${r.ditolak} ditolak` : '')
+      + (tanpa ? ` · ${tanpa} tanpa nomor WA` : ''));
+    tqBulkBersihkan();
+    loadTagihan();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1115,13 +1170,13 @@ async function kirimRetur() {
   const idTag = document.getElementById('rtTagId').value;
   const inv = document.getElementById('rtInvoice').textContent;
   if (!confirm(`Kembalikan pembayaran ${rupiah(b.jumlah)} (${b.metode}) pada invoice ${inv}?\n\n`
-    + 'Tagihan akan kembali ke status belum lunas bila tidak ada pembayaran sah lain yang menutupinya, '
-    + 'dan kas mencatat pengeluaran sebesar nominalnya.')) return;
+    + 'Tagihan akan kembali ke status belum lunas bila tidak ada pembayaran sah lain yang menutupinya.\n'
+    + 'Retur TIDAK dicatat sebagai pengeluaran kas — hanya membatalkan catatan pembayaran ini.')) return;
   try {
     const r = await API.post(`/api/pembayaran/${b.id}/retur`, { alasan, force });
     modalClose('mRetur');
     toast(r.dibatalkan_lunas
-      ? `Retur tercatat — tagihan kembali ke "${r.status_tagihan}", kas keluar ${rupiah(r.jumlah)}`
+      ? `Retur tercatat — tagihan kembali ke "${r.status_tagihan}" (kas tidak berubah)`
       : `Retur tercatat — tagihan tetap lunas (pembayaran sah tersisa ${rupiah(r.tersisa_diterima)})`);
     loadTagihan();
   } catch (e) { toast(e.message, true); }
@@ -2997,18 +3052,42 @@ async function loadKeuangan() {
     document.getElementById('kMasuk').textContent = rupiah(lap.total_masuk);
     document.getElementById('kKeluar').textContent = rupiah(lap.total_keluar);
     document.getElementById('kSaldo').textContent = rupiah(lap.saldo);
-    document.getElementById('tbKas').innerHTML = (d.data || []).map(k => `
-      <tr><td>${String(k.created_at).slice(0, 16)}</td>
+    // v2.8.0: retur dipisah dari Pengeluaran. Kalau tidak disebut, operator
+    // yang tahu ada retur hari ini akan mengira angkanya salah.
+    const elRetur = document.getElementById('kRetur');
+    if (elRetur) elRetur.textContent = rupiah(lap.total_retur || 0);
+    const elKet = document.getElementById('kCatatan');
+    if (elKet) elKet.textContent = (lap.total_retur || 0) > 0
+      ? `Pengeluaran di atas TIDAK memasukkan retur (${rupiah(lap.total_retur || 0)}, ${lap.n_retur || 0} baris): `
+        + 'retur hanya membatalkan catatan pembayaran di menu Tagihan, bukan uang yang keluar dari kas.'
+      : 'Retur pembayaran tidak dihitung sebagai pengeluaran — ia hanya membatalkan catatan pembayaran di menu Tagihan.';
+    kPerbaruiEkspor();
+    document.getElementById('tbKas').innerHTML = (d.data || []).map((k, i) => `
+      <tr><td class="t-num">${i + 1}</td>
+        <td>${String(k.created_at).slice(0, 16)}</td>
         <td><span class="badge ${k.tipe === 'masuk' ? 'ok' : 'bad'}">${esc(k.tipe)}</span></td>
         <td>${esc(k.kategori)}</td>
         <td class="t-num">${rupiah(k.jumlah)}</td>
+        <td>${esc(k.nama_pelanggan || '-')}</td>
+        <td>${esc(k.nomor_invoice || '-')}</td>
         <td>${esc(k.keterangan || '-')}</td>
         <td>${esc(k.nama_user || '-')}</td>
-        <td class="t-actions">${k.kategori === 'pembayaran'
+        <td class="t-actions">${['pembayaran', 'retur_pembayaran'].includes(k.kategori) && k.id_ref
           ? '<span class="hint">otomatis</span>'
           : `<button class="btn sm danger" onclick="hapusKas(${k.id})">Hapus</button>`}</td></tr>`).join('')
-      || '<tr><td colspan="7" class="empty">Belum ada transaksi kas</td></tr>';
+      || '<tr><td colspan="10" class="empty">Belum ada transaksi kas</td></tr>';
   } catch (e) { toast(e.message, true); }
+}
+
+/** Tautan export Kas mengikuti rentang tanggal yang sedang dibuka. */
+function kPerbaruiEkspor() {
+  const dari = encodeURIComponent(document.getElementById('kDari').value || '');
+  const sampai = encodeURIComponent(document.getElementById('kSampai').value || '');
+  const dasar = `/api/keuangan/kas/export?dari=${dari}&sampai=${sampai}`;
+  const x = document.getElementById('lnEksporKas');
+  const p = document.getElementById('lnEksporKasPdf');
+  if (x) x.href = `${dasar}&format=xlsx`;
+  if (p) p.href = `${dasar}&format=pdf`;
 }
 function formKas(tipe) {
   document.getElementById('kkTipe').value = tipe || 'keluar';

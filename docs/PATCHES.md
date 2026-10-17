@@ -4,6 +4,160 @@ Format: **[TANGGAL] v<versi> — <jenis>**. Tambahkan entri baru di atas.
 
 ---
 
+## 2026-10-17 — v2.8.0 — Export Tagihan per kelompok (Excel/CSV/PDF), Export Kas, retur keluar dari Pengeluaran, Push Tagihan
+
+**Permintaan user**
+
+"saya menemukan kesulitan dalam export excel di menu tagihan harusnya dipisah data
+lunas data isolir data tagihan berjalan / buat tambahkan juga export PDF lalu di
+menu kas tambahkan tombol export excel dan PDF tampilkan nomor urut nama pelanggan
+dan untuk transaksi return tidak masuk ke nilai pengeluaran harusnya hanya kembali
+ke status tagihan berjalan, lalu ada kejanggalan di logica tagihan harusnya ada
+fitur push tagihan manual dan autopush tagihan sesuai profile tagihan"
+
+Keputusan yang diambil user untuk bagian yang ambigu: PDF memakai **pdfkit** yang
+dipasang di server (satu klik → berkas `.pdf`), "tagihan berjalan" = **semua yang
+belum lunas** (`buat` + `terkirim` + `jatuh_tempo`), retur = **berhenti mencatat ke
+kas + dikeluarkan dari total Pengeluaran** (baris retur lama tetap terlihat di
+daftar), push = **manual sekarang + autopush per profil + tagihan `buat` yang
+tertinggal ikut terdorong**.
+
+**1. Export Menu Tagihan dipecah per kelompok — `src/routes/tagihan.js`**
+
+`KELOMPOK_EKSPOR` menggantikan filter status tunggal: `berjalan` (belum lunas),
+`lunas`, `isolir` (pelanggan terisolir yang tagihannya belum lunas, kolom lain:
+alamat + total menunggak), `semua` (rekap tiga kelompok), dan `batal` tetap bisa
+diminta supaya tautan export lama tidak mati. Dropdown "Bagian laporan" di panel
+(`#tqEkspor`) **tidak** mengubah daftar di layar — hanya menentukan berkas unduhan.
+
+Satu definisi kolom dipakai tiga media: `KOLOM_TAGIHAN` (15 kolom) untuk Excel/CSV,
+`KOLOM_TAGIHAN_PDF` (12 kolom — username PPPoE, PPN, dan status pelanggan dibuang
+agar A4 horizontal tidak jadi tiga lajur per sel), `KOLOM_ISOLIR` (12 kolom).
+`barisEksporTagihan(req, tambahan)` satu query untuk semua kelompok; klausa WHERE
+kelompok lewat `tambahan.sql` + `tambahan.params` sehingga nilai dari query string
+tidak pernah menjadi teks SQL.
+
+`GET /api/tagihan/export?kelompok=…&format=xlsx|csv|pdf` — `semua` menjadi tiga
+lembar (.xlsx) / tiga bagian berramping (PDF). Batas 20.000 baris sama seperti
+export lama; PDF memotong di 5.000 baris dan menyebutkan sisanya di catatan kaki.
+
+**2. PDF bersama — `src/services/laporan.js` (baru)**
+
+Modul layanan baru di atas **pdfkit ^0.20.2** (`npm install pdfkit` di webroot,
+`package.json` + `package-lock.json` ikut berubah): `unduhPdf` (satu bagian) dan
+`unduhPdfBertingkat` (rekap multi-bagian), A4 horizontal, margin 30, kop nama ISP
++ judul + "Dicetak …", blok ringkasan angka, tabel zebra, dan catatan kaki. Kolom
+diformat sesuai `tipe` (`num` → `Rp` rata kanan, `tgl`/`waktu` → dd-mm-yyyy),
+karakter di luar WinAnsi diganti `?` supaya nama pelanggan ber-emoji tidak
+merusak berkas.
+
+`lebarKolom()` menentukan lebar dari **isi**, bukan teks terlebar. Tiga aturan yang
+ditemukan saat uji di produksi:
+
+* kolom yang isinya satu token (nomor invoice, tanggal, angka) tidak pernah bisa
+  melipat — kalau lajurnya ikut menyusut isinya terpotong `…`, jadi kolom begitu
+  minta lebar utuh; yang boleh dikorbankan hanya kolom berkalimat (alamat,
+  keterangan, rekening) dan itu pun sampai batas bawah dulu sebelum semua lajur
+  menyusut proporsional;
+* label kepala boleh melipat dua-tiga baris (`cetakBarisKepala` mengukur
+  `heightOfString` lalu meninggikan baris kepala), sehingga lebar lajur cukup
+  separuh labelnya;
+* **sel tebal diukur dengan font yang salah.** `isiLebar()` mengukur dengan
+  Helvetica reguler padahal kolom `tebal` (Total, Nomor Invoice) dicetak
+  Helvetica-Bold yang ±8% lebih lebar — hasilnya kolom "Total" tercetak `Rp…`.
+  Sekarang pengukuran memakai font kolom itu sendiri (juga saat menghitung
+  tinggi baris) dan sisa cadangan 8pt, bukan 6pt.
+
+Nomor halaman ("Halaman i dari n") ditulis lewat `bufferedPageRange()` +
+`switchToPage()`. Margin bawah **sementara dinolkan** saat itu: pdfkit memeriksa
+"y + tinggi vs margin bawah" sebelum menggambar, jadi teks yang posisinya di luar
+kotak isi tidak ditulis di tempatnya malah menambah satu halaman kosong berisi
+nomor halaman saja di akhir setiap laporan.
+
+**3. Menu Kas: nomor urut + nama pelanggan + export — `src/routes/keuangan.js`**
+
+`KOLOM_KAS` diawali `No.` (nomor urut 1..n) lalu memunculkan **Pelanggan** dan
+**Nomor Invoice**. Keduanya tidak ada di tabel `kas`, jadi `DARI_KAS` JOIN
+`pembayaran` → `tagihan` → `pelanggan` lewat `k.id_ref`. Produksi menulis
+`kas.id_ref = tagihan.id` (bukan `pembayaran.id`) saat pelunasan — itu yang jadi
+acuan JOIN; kalau salah menafsirkan, kolomnya terisi kosong seperti yang terjadi
+pada uji pertama.
+
+`GET /api/keuangan/kas/export?format=xlsx|csv|pdf` menghormati rentang tanggal yang
+sama dengan daftar di layar. Tombol **Export Excel** / **Export PDF** di header tab
+Kas (`#lnEksporKas`, `#lnEksporKasPdf`).
+
+**4. Retur pembayaran bukan pengeluaran — `src/services/billing.js` + `keuangan.js`**
+
+`returPembayaran()` tidak lagi INSERT baris `kas` bertipe `keluar`
+(`kategori = 'retur_pembayaran'`); pelunasan yang di-retur hanya kembali ke status
+tagihan belum lunas (`terkirim`/`jatuh_tempo`), persis seperti diminta. Baris retur
+lama yang sudah terlanjur masuk kas **dibiarkan terlihat** — `BUKAN_PENGELUARAN`
+menyaringnya dari `total_keluar` dan `saldo`, lalu angkanya ditampilkan sendiri di
+kolom "Retur" + catatan kaki laporan. Tidak ada migrasi: `pembayaran.status='retur'`
+(v2.7.0) sudah cukup sebagai jejak.
+
+**5. Push tagihan manual + autopush sesuai profil — `src/services/billing.js` + `tagihan.js`**
+
+Masalah lama: tombol "Kirim via WA" mengirim **semua** tagihan `buat` tanpa peduli
+hari kirim profil, sedangkan autopush hanya jalan pada hari H — tagihan pelanggan
+yang baru didaftarkan setelah hari kirimnya lewat menggantung sampai periode
+berikutnya. Sekarang:
+
+* `kirimDaftar(tags, srv, ds)` inti bersama: antrekan WA, tandai `terkirim`, catat
+  yang tanpa nomor WA (tetap ditandai terkirim supaya tidak diulang tiap menit);
+* `kirimTagihanTerjadwal(ds, limit, w)` — dipakai scheduler maupun tombol: hanya
+  `buat` yang `COALESCE(NULLIF(pt.tanggal_kirim,0), <hari cadangan>, 1) <= hari ini`,
+  jadi profil dihormati dan yang tertinggal tersapu (catch-up);
+* `pushTagihanTerpilih(ids, …)` — keputusan operator, hari kirim tidak ditanyakan;
+  baris `lunas`/`batal` ditolak;
+* `POST /api/tagihan/kirim-wa` dengan `mode` = `terjadwal` | `terpilih` | `semua`
+  (tiga tombol: **Push Tagihan**, **Kirim terpilih**, dan "Kirim via WA" lama yang
+  sekarang minta konfirmasi);
+* `GET /api/tagihan/jadwal` menambahkan `siap_push` — panel menampilkan "(N di
+  antaranya sudah sampai hari kirimnya → tombol Push Tagihan)" sehingga operator
+  tahu ada yang tertinggal;
+* langkah 2 `jalankanSiklusTenant()` tidak lagi menunggu `adaProfilPadaHari
+  ('tanggal_kirim')` — gerbang itu persis penyebab "tertinggal tidak pernah
+  terdorong", dan `kirimTagihanTerjadwal` sudah menyeleksi tanggal per baris.
+
+**Bug yang ditemukan (dan diperbaiki) saat uji jalur asli**
+
+`kirimTagihanTerjadwal` sempat memakai `GABUNG_PROFIL` untuk menghitung sisa tagihan
+`buat`. Fragmen itu mensyaratkan alias `p` dari `JOIN pelanggan`; tanpa JOIN, query
+gagal dan — karena letaknya setelah `kirimDaftar` — seluruh siklus tenant berhenti
+di langkah kirim: pengingatan (3) dan isolir (4) tidak jalan untuk semua tenant
+sejak restart 10:40 sampai tambal 11:1x. `journalctl` tidak mencatat pesannya, jadi
+buktinya HTTP 500 JSON di `/api/tagihan/jadwal`. Sekarang penghitungan itu
+`SELECT COUNT(*) FROM tagihan t WHERE …` polos. Pelajaran: **jangan tempel
+`GABUNG_PROFIL` pada query yang tidak men-JOIN `pelanggan p`.**
+
+Satu efek samping nyata yang perlu diketahui: setelah restart, 11 baris `wa_queue`
+baru muncul untuk tenant 5 (PASNET) — itu catch-up yang sah, WA tagihan pelanggan
+sungguhan yang hari kirimnya memang sudah lewat dan dulu menggantung.
+
+**Verifikasi (jalur asli, bukan sintetis)**
+
+Panel produksi sebagai `adminmaster`, tenant pindah lewat `POST /api/auth/server
+{"id":…}` (query `?ds=` tidak menggeser `req.ds`). Export diunduh untuk ds1 (data
+uji) dan ds2 (178 pelanggan nyata): Excel/CSV/PDF per kelompok + rekap tiga lembar
++ kas. Semua PDF dicek `pdftotext -layout`: **0 halaman kosong**, penomoran "Halaman
+i dari n" benar di setiap halaman, **0 pemotongan `…`** pada 10 berkas termasuk
+`ds2-lunas` 7 halaman/311 baris dan `ds2-semua` 9 halaman. Tagihan uji memakai
+`jatuh_tempo` masa depan; satu baris `jatuh_tempo`+tanggal masa depan yang saya
+buat sempat membuat langkah isolir membalikkan status pelanggannya — seleksi isolir
+berdasarkan **status**, bukan tanggal, jadi data uji harus konsisten.
+
+Push diverifikasi bertiga: `terpilih` mengirim hanya baris yang dicentang,
+`terjadwal` menghasilkan `{"dikirim":1,"masih_menunggu":0,"hari":17,…}` (yang hari
+kirimnya belum tiba tidak ikut), dan autopush scheduler jalan pada tick nyata.
+Tenant tanpa pelanggan uji tidak mendapat WA: `wa_queue` ds1 tetap 0. Data uji
+ds1 (3 pelanggan, 11 tagihan, 1 pembayaran, 2 kas, profil `UJI-JADWAL-BELUM`)
+sudah disapu habis — ds1 kembali 0/0/0 dan tenant lain utuh
+(ds2 198/178, ds5 83/82).
+
+---
+
 ## 2026-10-15 — v2.7.1 — Daftar Pelanggan dipersempit + modal Detail per baris (responsif HP)
 
 **Permintaan user**

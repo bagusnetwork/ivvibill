@@ -186,12 +186,16 @@ async function adaProfilPadaHari(idDataServer, kolom, hari, hariTenant) {
 
 /**
  * Satu putaran siklus billing untuk SATU tenant, dengan gerbang yang sama
- * persis untuk scheduler maupun tombol "Jalankan Siklus" di panel: tiap langkah
- * hanya jalan bila ada pelanggan yang profil tagihannya jatuh hari ini
- * (tanggal_buat / tanggal_kirim) dan ambang jamnya sudah lewat. Dulu tombol
- * manual memakai force=true sehingga sekali klik langsung menagih SEMUA
- * pelanggan — termasuk golongan yang harinya masih jauh, dan jatuh temponya
- * bisa sudah lewat saat itu juga.
+ * persis untuk scheduler maupun tombol "Jalankan Siklus" di panel: pembuatan
+ * tagihan hanya jalan bila ada profil yang tanggal_buat-nya jatuh hari ini,
+ * dan pengiriman WA hanya jalan setelah ambang jam kirim tenant.
+ * Dulu tombol manual memakai force=true sehingga sekali klik langsung menagih
+ * SEMUA pelanggan — termasuk golongan yang harinya masih jauh, dan jatuh
+ * temponya bisa sudah lewat saat itu juga.
+ *
+ * v2.8.0: langkah kirim memakai kirimTagihanTerjadwal() — bukan hanya yang
+ * harinya PAS hari ini, tapi juga tagihan 'buat' yang hari kirimnya sudah
+ * lewat (pelanggan yang baru didaftarkan setelah hari kirim profilnya).
  *
  * Idempoten: memanggilnya berkali-kali pada hari yang sama tidak membuat
  * tagihan dobel (dicek periode) dan tidak mengirim WA dobel (status 'buat').
@@ -215,15 +219,17 @@ async function jalankanSiklusTenant(srv, w = waktuSiklus(), limit = 50) {
   //    satu menit yang terlewat (restart service) tidak boleh membuat bulan itu
   //    kehilangan kiriman. jam_kirim kosong berarti '00:00' = selalu boleh,
   //    persis perilaku scheduler lama.
+  //
+  //    v2.8.0: gerbang "hari ini harus ada profil yang jatuh pada tanggal ini"
+  //    DIHAPUS dan diganti kirimTagihanTerjadwal() yang menyaring per baris.
+  //    Gerbang lama itu yang membuat tagihan pelanggan baru menggantung di
+  //    status 'buat' sampai hari kirim bulan berikutnya, dan membuat tombol
+  //    "Jalankan Siklus" di luar hari kirim tidak pernah mendorong apa pun.
   const jamKirim = normJam(srv.jam_kirim);
   if (!lewatJam(w.jam, jamKirim)) {
     l.kirim = { dikirim: 0, tanpa_nomor_wa: [], ...belum(`belum jam kirim ${jamKirim}`) };
-  } else if (!(await adaProfilPadaHari(srv.id, 'tanggal_kirim', w.tanggal, srv.jadwal_kirim_hari))) {
-    l.kirim = { dikirim: 0, tanpa_nomor_wa: [],
-      ...belum(`tidak ada profil tagihan dengan tanggal kirim ${w.tanggal} ` +
-        `(jadwal server: ${Number(srv.jadwal_kirim_hari) || '-'})`) };
   } else {
-    l.kirim = { jalan: true, ...(await kirimTagihanWajib(srv.id, limit, w.tanggal)) };
+    l.kirim = { jalan: true, ...(await kirimTagihanTerjadwal(srv.id, limit, w)) };
   }
 
   // 3. pengingat H-3 — sekali per tagihan per hari (penanda ingatkan_terakhir)
@@ -335,6 +341,11 @@ async function kirimTagihanWajib(idDataServer, limit = 25, hariKirim = null) {
      ORDER BY t.id ASC LIMIT ?`,
     hari === null ? [idDataServer, Number(limit)] : [idDataServer, srv.jadwal_kirim_hari, hari, Number(limit)]
   );
+  return kirimDaftar(tags, srv, idDataServer);
+}
+
+/** Kirim daftar tagihan yang sudah dipilih: antrekan WA + tandai terkirim. */
+async function kirimDaftar(tags, srv, idDataServer) {
   let n = 0;
   const tanpaWa = [];
   for (const t of tags) {
@@ -349,6 +360,108 @@ async function kirimTagihanWajib(idDataServer, limit = 25, hariKirim = null) {
     n++;
   }
   return { dikirim: n, tanpa_nomor_wa: tanpaWa };
+}
+
+/**
+ * v2.8.0 — PUSH TERJADWAL (autopush + penangkap yang tertinggal).
+ *
+ * KirimTagihanWajib di atas hanya mengirim tagihan yang hari kirimnya PAS hari
+ * ini. Itu membuat tagihan pelanggan baru menggantung: tanggal 16 operator
+ * mendaftarkan pelanggan lewat menu Unmanage / Input Billing / Tagihan Satuan,
+ * hari kirim profilnya tanggal 10, jadi tagihannya baru terdorong tanggal 10
+ * BULAN DEPAN — sebulan penuh pelanggan itu punya tagihan yang tidak pernah
+ * sampai ke WA-nya.
+ *
+ * Di sini aturannya "hari kirimnya SUDAH lewat atau jatuh hari ini":
+ *   - golongan normal tetap terdorong pada harinya sendiri (tidak lebih awal);
+ *   - tagihan yang dibuat setelah hari kirimnya ikut terdorong pada tick
+ *     berikutnya, tidak menunggu bulan depan;
+ *   - tanpa profil / profil nonaktif memakai jadwal tenant, dan kalau tenant
+ *     pun tidak punya angka jadwal yang sah dianggap hari 1 (jangan pernah
+ *     menahan tagihan tanpa tanggal yang jelas).
+ *
+ * Urutannya jatuh_tempo ASC: yang paling mendahulukan pembayaran keluar lebih
+ * dulu kalau `limit` memotong. Sisa yang belum kesampaian dilaporkan lewat
+ * `masih_menunggu` supaya tombol di panel bisa bilang "jalankan lagi".
+ */
+async function kirimTagihanTerjadwal(idDataServer, limit = 100, w = waktuSiklus()) {
+  idDataServer = cfgData.idTenant(idDataServer);
+  const srv = await cfgData.getServer(idDataServer, true);
+  const angka = Number(w && w.tanggal);
+  const hari = Number.isInteger(angka) && angka >= 1 && angka <= 31 ? angka : Number(waktuSiklus().tanggal);
+  const tags = await db.q(
+    `SELECT t.*, p.nama, p.nomor_whatsapp,
+            COALESCE(NULLIF(pt.tanggal_kirim, 0), ?) AS hari_kirim
+     FROM tagihan t
+     JOIN pelanggan p ON p.id = t.id_pelanggan
+     ${GABUNG_PROFIL}
+     WHERE t.id_data_server = ? AND t.status = 'buat'
+       AND COALESCE(NULLIF(pt.tanggal_kirim, 0), ?, 1) <= ?
+     ORDER BY t.jatuh_tempo ASC, t.id ASC LIMIT ?`,
+    [srv.jadwal_kirim_hari, idDataServer, srv.jadwal_kirim_hari, hari, Number(limit)]
+  );
+  const hasil = await kirimDaftar(tags, srv, idDataServer);
+  // Sisa yang masih 'buat' (hari kirimnya belum tiba). Sengaja TIDAK memakai
+  // GABUNG_PROFIL: penghitungan ini tidak perlu kolom profil, dan fragmen itu
+  // mensyaratkan alias `p` dari JOIN pelanggan — tanpa JOIN itu query-nya
+  // gagal dan seluruh siklus tenant berhenti di langkah kirim.
+  const tertinggal = await db.one(
+    `SELECT COUNT(*) AS n FROM tagihan t
+     WHERE t.id_data_server = ? AND t.status = 'buat'`, [idDataServer]);
+  return {
+    ...hasil, hari,
+    masih_menunggu: Number(tertinggal ? tertinggal.n : 0),
+    catatan: hasil.dikirim
+      ? `${hasil.dikirim} tagihan terdorong (hari kirim <= ${hari})`
+      : `Tidak ada tagihan 'buat' yang hari kirimnya sudah lewat atau jatuh hari ini (${hari})`
+  };
+}
+
+/**
+ * v2.8.0 — PUSH MANUAL baris terpilih (checkbox di daftar tagihan).
+ * Sengaja TIDAK memeriksa hari kirim: operator yang mencentang baris berarti
+ * memang memutuskan tagihan itu dikirim sekarang juga. Yang ditolak hanya
+ * baris yang tidak masuk akal dikirim: lunas (punya jalur kwitansi sendiri)
+ * dan batal.
+ */
+async function pushTagihanTerpilih(idDataServer, ids) {
+  idDataServer = cfgData.idTenant(idDataServer);
+  const daftar = [...new Set([].concat(ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0))];
+  if (!daftar.length) return { terkirim: 0, ditolak: 0, hasil: [] };
+  if (daftar.length > 500) throw new Error('Maksimal 500 tagihan sekali push');
+  const srv = await cfgData.getServer(idDataServer, true);
+  const frag = daftar.map(() => '?').join(',');
+  const tags = await db.q(
+    `SELECT t.*, p.nama, p.nomor_whatsapp FROM tagihan t
+     JOIN pelanggan p ON p.id = t.id_pelanggan
+     WHERE t.id_data_server = ? AND t.id IN (${frag}) ORDER BY t.id ASC`,
+    [idDataServer, ...daftar]);
+  const hasil = [];
+  const lolos = [];
+  for (const t of tags) {
+    if (t.status === 'lunas') { hasil.push({ id: t.id, invoice: t.nomor_invoice, ok: false, alasan: 'sudah lunas' }); continue; }
+    if (t.status === 'batal') { hasil.push({ id: t.id, invoice: t.nomor_invoice, ok: false, alasan: 'sudah dibatalkan' }); continue; }
+    lolos.push(t);
+  }
+  const ada = new Set(lolos.map(t => t.id));
+  for (const id of daftar) {
+    if (!ada.has(id) && !hasil.some(h => h.id === id)) {
+      hasil.push({ id, invoice: `#${id}`, ok: false, alasan: 'tidak ada di data server ini' });
+    }
+  }
+  const dikirim = await kirimDaftar(lolos, srv, idDataServer);
+  for (const t of lolos) {
+    hasil.push({
+      id: t.id, invoice: t.nomor_invoice, nama: t.nama, ok: true,
+      tanpa_wa: !t.nomor_whatsapp
+    });
+  }
+  return {
+    terkirim: dikirim.dikirim,
+    ditolak: hasil.filter(h => !h.ok).length,
+    tanpa_nomor_wa: dikirim.tanpa_nomor_wa,
+    hasil
+  };
 }
 
 /**
@@ -521,8 +634,12 @@ async function lunaskanTagihan(idTagihan, metode, { verifiedBy = null, ref = nul
  *                 seperti penandaan jatuh tempo di tempat lain) + metode_bayar
  *                 dan paid_at dikosongkan. Kalau masih ada pembayaran sah lain
  *                 yang menutupi total, tagihan tetap lunas.
- *   kas         → baris 'keluar' sebesar nominalnya, jadi pemasukan & pengembalian
- *                 terlihat berdampingan di laporan keuangan.
+ *   kas         → TIDAK ditulis (sejak v2.8.0). Dulu v2.7.0 mencatat baris
+ *                 'keluar' kategori retur_pembayaran, tapi itu membuat satu
+ *                 koreksi salah catat terlihat seperti pengeluaran uang di
+ *                 laporan bulanan — padahal uangnya memang belum pernah masuk.
+ *                 Baris retur yang lama dibiarkan; laporan keuangan memisahkan
+ *                 diri dari angka Pengeluaran (lihat routes/keuangan.js).
  *
  * Sengaja TIDAK menyentuh router/isolir/WA: pelunasan boleh mengaktifkan
  * pelanggan, tapi menarik pembayaran tidak boleh memutus layanan siapa pun
@@ -579,23 +696,17 @@ async function returPembayaran(idPembayaran, { oleh = null, alasan = '', force =
   }
 
   const nominal = Number(b.jumlah);
-  let kasCatat = null;
-  if (nominal > 0) {
-    try {
-      const idKas = await x.insert(
-        `INSERT INTO kas (id_data_server, tipe, kategori, jumlah, keterangan, id_ref, dibuat_oleh)
-         VALUES (?, 'keluar', 'retur_pembayaran', ?, ?, ?, ?)`,
-        [t.id_data_server, nominal,
-         `Retur Invoice ${t.nomor_invoice} (${b.metode})${alasan ? ' — ' + String(alasan).slice(0, 120) : ''}`,
-         t.id, oleh]);
-      kasCatat = { id: idKas, jumlah: nominal };
-    } catch (_) { /* kas tidak boleh membatalkan retur — sama seperti pelunasan */ }
-  }
+  // v2.8.0: retur TIDAK menulis kas lagi. Lihat catatan di atas fungsi —
+  // mengoreksi catatan pembayaran bukan pengeluaran uang, dan baris 'keluar'
+  // membuat laporan bulanan ISP terlihat merugi karena salah catat orang lain.
 
   return {
     ok: true, id_pembayaran: b.id, jumlah: nominal, metode: b.metode,
     tagihan_id: t.id, status_tagihan: statusBaru, dibatalkan_lunas: dibatalkanLunas,
-    tersisa_diterima: Number(sisa.jml), kas: kasCatat
+    tersisa_diterima: Number(sisa.jml),
+    // kas selalu null: dipertahankan supaya pemanggil lama tidak kaget, dan
+    // supaya jelas bedanya dengan v2.7.0 yang masih mengembalikan id baris kas.
+    kas: null, kas_dicatat: false
   };
 }
 
@@ -713,6 +824,7 @@ module.exports = {
   tglIndo, waktuSiklus, kebijakan, hitungPpn, adaProfilPadaHari,
   KOLOM_PROFIL, GABUNG_PROFIL, tanggalPerPeriode,
   buatTagihanBulanan, buatTagihanSatuan, kirimTagihanWajib,
+  kirimTagihanTerjadwal, pushTagihanTerpilih,
   kirimTagihanSatuan, peringatanTagihan, lunaskanTagihan, returPembayaran, isolirJatuhTempo,
   jalankanSiklusTenant,
   isolirManual, aktifkanManual, kirimWaIsolir, kirimWaIsolirPelanggan, kirimKwitansi

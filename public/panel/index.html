@@ -214,15 +214,24 @@
             <option value="lunas">lunas</option><option value="jatuh_tempo">jatuh tempo</option>
             <option value="batal">batal</option></select>
           <div class="spacer"></div>
-          <a class="btn secondary" id="lnEksporTagihan" href="/api/tagihan/export" download title="Unduh daftar tagihan sesuai saringan yang sedang dipilih (status / pencarian) ke Excel">&#128190; Export Excel</a>
-          <button class="btn secondary" onclick="jalankanSiklus()" title="Jalankan siklus otomatis sekarang, tetap sesuai jadwal: hanya profil tagihan yang tanggal buat/kirimnya jatuh hari ini ditagih &amp; dikirim WA; pengingat dan isolir hanya untuk yang sudah lewat tempo">⟳ Jalankan Siklus</button>
-          <button class="btn secondary" onclick="kirimTagihanWA()">📨 Kirim via WA</button>
+          <select id="tqEkspor" onchange="tqPerbaruiEkspor()" title="Bagian laporan yang diunduh. Kelompok ini TIDAK mengubah daftar di layar — daftar tetap mengikuti kotak status di kiri.">
+            <option value="berjalan">Tagihan berjalan (belum lunas)</option>
+            <option value="lunas">Tagihan lunas</option>
+            <option value="isolir">Pelanggan isolir</option>
+            <option value="semua">Rekap 3 kelompok (1 berkas)</option>
+            <option value="batal">Tagihan batal</option>
+          </select>
+          <a class="btn secondary" id="lnEksporTagihan" href="/api/tagihan/export?kelompok=berjalan&amp;format=xlsx" download title="Unduh kelompok terpilih sebagai Excel (.xlsx) — pencarian di atas ikut dipakai">&#128190; Export Excel</a>
+          <a class="btn secondary" id="lnEksporPdf" href="/api/tagihan/export?kelompok=berjalan&amp;format=pdf" download title="Unduh kelompok terpilih sebagai PDF siap cetak (A4 horizontal)">&#128196; Export PDF</a>
+          <button class="btn secondary" onclick="jalankanSiklus()" title="Jalankan siklus otomatis sekarang, tetap sesuai jadwal: tagihan hanya dibuat untuk profil yang tanggal buatnya jatuh hari ini; WA terkirim untuk yang hari kirimnya sudah lewat/jatuh hari ini; pengingat dan isolir hanya untuk yang sudah lewat tempo">⟳ Jalankan Siklus</button>
+          <button class="btn secondary" onclick="pushTagihan()" title="Dorong tagihan berstatus 'buat' yang hari kirim profilnya sudah lewat atau jatuh hari ini — termasuk tagihan pelanggan baru yang tertinggal">&#128228; Push Tagihan</button>
           <button class="btn secondary" onclick="formTagihanSatuan()">+ Tagihan Satuan</button>
           <button class="btn" onclick="buatTagihan()">+ Buat Tagihan Bulanan</button>
         </div>
         <p class="hint" id="tJadwal">Memuat jadwal siklus…</p>
         <div class="toolbar" id="tqBulk" style="display:none">
           <span class="hint" id="tqBulkJml">0 dipilih</span>
+          <button class="btn sm secondary" onclick="tqPushTerpilih()" title="Kirim tagihan terpilih ke WhatsApp pelanggan sekarang juga, tanpa menunggu hari kirim profilnya">&#128228; Kirim terpilih</button>
           <button class="btn sm secondary" onclick="tqBulkBatal()">Batalkan terpilih</button>
           <button class="btn sm danger" onclick="tqBulkHapus()" title="Hapus PERMANEN baris yang dicentang saja dari database (disalin dulu ke tabel cadangan). Khusus pemilik data server.">&#128465; Hapus terpilih permanen</button>
           <button class="btn sm secondary" onclick="tqPilihSemua(true)">Pilih semua tampil</button>
@@ -539,21 +548,27 @@
           <label class="hint" style="align-self:center">Sampai</label>
           <input type="date" id="kSampai" onchange="loadKeuangan()">
           <div class="spacer"></div>
+          <a class="btn secondary" id="lnEksporKas" href="/api/keuangan/kas/export?format=xlsx" download title="Unduh daftar kas sesuai rentang tanggal di kiri sebagai Excel (.xlsx)">&#128190; Export Excel</a>
+          <a class="btn secondary" id="lnEksporKasPdf" href="/api/keuangan/kas/export?format=pdf" download title="Unduh daftar kas sesuai rentang tanggal di kiri sebagai PDF siap cetak (A4 horizontal)">&#128196; Export PDF</a>
           <button class="btn secondary" onclick="formKas('masuk')">+ Pemasukan</button>
           <button class="btn" onclick="formKas('keluar')">+ Pengeluaran</button>
         </div>
         <div class="cards">
           <div class="card green"><div class="label">Total masuk</div><div class="value" id="kMasuk">Rp 0</div></div>
-          <div class="card red"><div class="label">Total keluar</div><div class="value" id="kKeluar">Rp 0</div></div>
+          <div class="card red"><div class="label">Pengeluaran</div><div class="value" id="kKeluar">Rp 0</div></div>
           <div class="card blue"><div class="label">Saldo</div><div class="value" id="kSaldo">Rp 0</div></div>
+          <div class="card"><div class="label">Retur (di luar pengeluaran)</div><div class="value" id="kRetur">Rp 0</div></div>
         </div>
         <div class="panel"><div class="panel-body" style="padding:0">
-          <table><thead><tr><th>Waktu</th><th>Tipe</th><th>Kategori</th>
-            <th class="t-num">Jumlah</th><th>Keterangan</th><th>Oleh</th><th class="t-actions">Aksi</th></tr></thead>
-          <tbody id="tbKas"><tr><td colspan="7" class="empty">Memuat…</td></tr></tbody></table>
+          <table><thead><tr><th class="t-num" style="width:44px">No</th><th>Waktu</th><th>Tipe</th><th>Kategori</th>
+            <th class="t-num">Jumlah</th><th>Pelanggan</th><th>Invoice</th>
+            <th>Keterangan</th><th>Oleh</th><th class="t-actions">Aksi</th></tr></thead>
+          <tbody id="tbKas"><tr><td colspan="10" class="empty">Memuat…</td></tr></tbody></table>
         </div></div>
         <p class="hint">Pemasukan dari tagihan lunas tercatat <b>otomatis</b> (kategori pembayaran) —
-           entri otomatis tidak bisa dihapus manual.</p>
+           entri otomatis tidak bisa dihapus manual. Baris retur pembayaran ikut ditampilkan
+           sebagai jejak, tetapi <b>tidak</b> dihitung sebagai pengeluaran dan tidak mengurangi saldo.</p>
+        <p class="hint" id="kCatatan"></p>
       </div>
 
       <!-- ================= PERANGKAT ================= -->
@@ -1313,7 +1328,8 @@
     <input type="hidden" id="rtTagId">
     <p class="hint">Tagihan <b id="rtInvoice">-</b> · <span id="rtPelanggan">-</span> · total <b id="rtTotal">-</b></p>
     <p class="hint">Pilih pembayaran yang akan dikembalikan. Barisnya <b>tidak dihapus</b> — statusnya menjadi
-      <span class="badge warn">retur</span> dan kas mencatat pengeluarannya, jadi jejak audit tetap utuh.</p>
+      <span class="badge warn">retur</span> sehingga jejak audit tetap utuh. Retur <b>tidak</b> dicatat sebagai
+      pengeluaran kas: yang dibalik hanya status tagihannya (kembali ke berjalan/jatuh tempo).</p>
     <div id="rtDaftar" class="form-row"><label>Pembayaran tercatat</label>
       <div class="empty">Memuat…</div></div>
     <div class="form-row"><label>Alasan retur * <span class="hint">(tercetak di laporan &amp; audit)</span></label>
@@ -1383,6 +1399,6 @@
 
 <script src="/assets/vendor/leaflet/leaflet.js"></script>
 <script src="/assets/app.js?v=20261012b"></script>
-<script src="panel.js?v=20261015g"></script>
+<script src="panel.js?v=20261017a"></script>
 </body>
 </html>
